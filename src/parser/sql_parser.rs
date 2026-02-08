@@ -9,8 +9,8 @@ use crate::parser::ast::{
     ForeignKeyAction, ForeignKeyReference, InsertSource, InsertStatement, JoinCondition, JoinExpr,
     JoinType, MergeStatement, MergeWhenClause, OnConflictClause, OrderByExpr, Query, QueryExpr,
     RefreshMaterializedViewStatement, SelectItem, SelectQuantifier, SelectStatement, SetOperator,
-    SetQuantifier, Statement, SubqueryRef, TableConstraint, TableExpression, TableRef,
-    TruncateStatement, TypeName, UnaryOp, UpdateStatement, WithClause,
+    SetQuantifier, Statement, SubqueryRef, TableConstraint, TableExpression, TableFunctionRef,
+    TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WithClause,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -1652,6 +1652,27 @@ impl Parser {
         }
 
         let name = self.parse_qualified_name()?;
+        if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
+            let mut args = Vec::new();
+            if !self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+                args.push(self.parse_expr()?);
+                while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                    args.push(self.parse_expr()?);
+                }
+                self.expect_token(
+                    |k| matches!(k, TokenKind::RParen),
+                    "expected ')' after function arguments",
+                )?;
+            }
+            let alias = self.parse_optional_alias()?;
+            let column_aliases = self.parse_optional_column_aliases()?;
+            return Ok(TableExpression::Function(TableFunctionRef {
+                name,
+                args,
+                alias,
+                column_aliases,
+            }));
+        }
         let alias = self.parse_optional_alias()?;
         Ok(TableExpression::Relation(TableRef { name, alias }))
     }
@@ -1659,6 +1680,7 @@ impl Parser {
     fn apply_table_alias(&self, table: &mut TableExpression, alias: String) {
         match table {
             TableExpression::Relation(rel) => rel.alias = Some(alias),
+            TableExpression::Function(function) => function.alias = Some(alias),
             TableExpression::Subquery(sub) => sub.alias = Some(alias),
             TableExpression::Join(join) => join.alias = Some(alias),
         }
@@ -1686,6 +1708,22 @@ impl Parser {
         self.expect_token(
             |k| matches!(k, TokenKind::RParen),
             "expected ')' after USING column list",
+        )?;
+        Ok(cols)
+    }
+
+    fn parse_optional_column_aliases(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.consume_if(|k| matches!(k, TokenKind::LParen)) {
+            return Ok(Vec::new());
+        }
+
+        let mut cols = vec![self.parse_identifier()?];
+        while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+            cols.push(self.parse_identifier()?);
+        }
+        self.expect_token(
+            |k| matches!(k, TokenKind::RParen),
+            "expected ')' after column alias list",
         )?;
         Ok(cols)
     }
@@ -2417,6 +2455,44 @@ mod tests {
                 }
             }
             other => panic!("expected subquery table expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_function_call_in_from_clause() {
+        let stmt = parse_statement("SELECT elem FROM json_array_elements('[1,2,3]') AS elem")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.from.len(), 1);
+        match &select.from[0] {
+            TableExpression::Function(function) => {
+                assert_eq!(function.name, vec!["json_array_elements".to_string()]);
+                assert_eq!(function.args.len(), 1);
+                assert_eq!(function.alias.as_deref(), Some("elem"));
+                assert!(function.column_aliases.is_empty());
+            }
+            other => panic!("expected function table expression, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_function_call_with_column_aliases_in_from_clause() {
+        let stmt = parse_statement("SELECT x FROM json_array_elements('[1,2,3]') AS t(x)")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.from.len(), 1);
+        match &select.from[0] {
+            TableExpression::Function(function) => {
+                assert_eq!(function.alias.as_deref(), Some("t"));
+                assert_eq!(function.column_aliases, vec!["x".to_string()]);
+            }
+            other => panic!("expected function table expression, got {other:?}"),
         }
     }
 

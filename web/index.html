@@ -268,12 +268,6 @@
           return;
         }
 
-        const expanded = expandJsonResultArrayRows(tabular);
-        if (expanded) {
-          applyGridData(expanded.columnDefs, expanded.rowData);
-          return;
-        }
-
         const columnDefs = tabular.columns.map(function (name) {
           return {
             field: name,
@@ -290,91 +284,6 @@
           return record;
         });
         applyGridData(columnDefs, rowData);
-      }
-
-      function expandJsonResultArrayRows(tabular) {
-        if (!Array.isArray(tabular.columns) || tabular.columns.length !== 1) {
-          return null;
-        }
-        const sourceColumn = tabular.columns[0];
-        const parsedItems = [];
-        const sourceRows = Array.isArray(tabular.rows) ? tabular.rows : [];
-
-        for (const row of sourceRows) {
-          if (!Array.isArray(row) || row.length === 0 || typeof row[0] !== "string") {
-            continue;
-          }
-          let parsed;
-          try {
-            parsed = JSON.parse(row[0]);
-          } catch (_err) {
-            continue;
-          }
-
-          const items = Array.isArray(parsed)
-            ? parsed
-            : parsed && typeof parsed === "object" && Array.isArray(parsed.result)
-              ? parsed.result
-              : null;
-          if (items && items.length) {
-            for (const item of items) {
-              parsedItems.push(item);
-            }
-          }
-        }
-
-        if (parsedItems.length === 0) {
-          return null;
-        }
-
-        const allObjects = parsedItems.every(function (item) {
-          return item && typeof item === "object" && !Array.isArray(item);
-        });
-        if (!allObjects) {
-          return {
-            columnDefs: [{ field: sourceColumn, headerName: sourceColumn }],
-            rowData: parsedItems.map(function (item) {
-              return {
-                [sourceColumn]:
-                  item === null || typeof item === "string" || typeof item === "number" || typeof item === "boolean"
-                    ? item
-                    : JSON.stringify(item),
-              };
-            }),
-          };
-        }
-
-        const orderedKeys = [];
-        const keySet = new Set();
-        for (const item of parsedItems) {
-          for (const key of Object.keys(item)) {
-            if (!keySet.has(key)) {
-              keySet.add(key);
-              orderedKeys.push(key);
-            }
-          }
-        }
-
-        const columnDefs = orderedKeys.map(function (key) {
-          return {
-            field: key,
-            headerName: key,
-            wrapText: true,
-            autoHeight: true,
-          };
-        });
-        const rowData = parsedItems.map(function (item) {
-          const row = {};
-          for (const key of orderedKeys) {
-            const value = item[key];
-            row[key] =
-              value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
-                ? value
-                : JSON.stringify(value);
-          }
-          return row;
-        });
-        return { columnDefs, rowData };
       }
 
       function parseExecutionPayload(out) {
@@ -621,7 +530,21 @@
 
         editor = monaco.editor.create(document.getElementById("editor"), {
           value: [
-            "SELECT http_get('https://test.deribit.com/api/v2/public/get_currencies') AS payload;",
+            "WITH payload AS (",
+            "  SELECT http_get('https://test.deribit.com/api/v2/public/get_currencies') AS body",
+            "), currencies AS (",
+            "  SELECT item",
+            "  FROM payload",
+            "  CROSS JOIN json_array_elements(json_extract_path(body, 'result')) AS src(item)",
+            ")",
+            "SELECT",
+            "  json_extract_path_text(item, 'currency') AS currency,",
+            "  json_extract_path_text(item, 'coin_type') AS coin_type,",
+            "  json_extract_path_text(item, 'min_confirmations') AS min_confirmations,",
+            "  json_extract_path_text(item, 'fee_precision') AS fee_precision,",
+            "  json_extract_path_text(item, 'withdrawal_fee') AS withdrawal_fee",
+            "FROM currencies",
+            "ORDER BY currency;",
           ].join("\n"),
           language: "sql",
           theme: "vs-dark",

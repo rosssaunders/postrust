@@ -26,8 +26,8 @@ use crate::parser::ast::{
     DropTableStatement, DropViewStatement, Expr, ForeignKeyAction, InsertSource, InsertStatement,
     JoinCondition, JoinType, MergeStatement, MergeWhenClause, OnConflictClause, Query, QueryExpr,
     RefreshMaterializedViewStatement, SelectQuantifier, SelectStatement, SetOperator,
-    SetQuantifier, Statement, TableConstraint, TableExpression, TableRef, TruncateStatement,
-    TypeName, UnaryOp, UpdateStatement,
+    SetQuantifier, Statement, TableConstraint, TableExpression, TableFunctionRef, TableRef,
+    TruncateStatement, TypeName, UnaryOp, UpdateStatement,
 };
 use crate::security::{self, RlsCommand, TablePrivilege};
 
@@ -4333,6 +4333,10 @@ fn table_expression_references_relation(table: &TableExpression, relation_name: 
         TableExpression::Relation(rel) => {
             rel.name.len() == 1 && rel.name[0].eq_ignore_ascii_case(relation_name)
         }
+        TableExpression::Function(function) => function
+            .args
+            .iter()
+            .any(|arg| expr_references_relation(arg, relation_name)),
         TableExpression::Subquery(sub) => query_references_relation(&sub.query, relation_name),
         TableExpression::Join(join) => {
             table_expression_references_relation(&join.left, relation_name)
@@ -4682,6 +4686,27 @@ fn expand_table_expression_columns(
                     lookup_parts: vec![qualifier.clone(), column.name().to_string()],
                 })
                 .collect())
+        }
+        TableExpression::Function(function) => {
+            let column_name = function
+                .column_aliases
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "value".to_string());
+            let qualifier = function
+                .alias
+                .as_ref()
+                .map(|alias| alias.to_ascii_lowercase())
+                .or_else(|| function.name.last().map(|name| name.to_ascii_lowercase()));
+            let lookup_parts = if let Some(qualifier) = qualifier {
+                vec![qualifier, column_name.clone()]
+            } else {
+                vec![column_name.clone()]
+            };
+            Ok(vec![ExpandedFromColumn {
+                label: column_name,
+                lookup_parts,
+            }])
         }
         TableExpression::Subquery(sub) => {
             let mut nested = ctes.clone();
@@ -5064,6 +5089,9 @@ fn evaluate_table_expression(
 ) -> Result<TableEval, EngineError> {
     match table {
         TableExpression::Relation(rel) => evaluate_relation(rel, params, outer_scope),
+        TableExpression::Function(function) => {
+            evaluate_table_function(function, params, outer_scope)
+        }
         TableExpression::Subquery(sub) => {
             let result = execute_query_with_outer(&sub.query, params, outer_scope)?;
             let qualifiers = sub
@@ -5103,6 +5131,132 @@ fn evaluate_table_expression(
             )
         }
     }
+}
+
+fn evaluate_table_function(
+    function: &TableFunctionRef,
+    params: &[Option<String>],
+    outer_scope: Option<&EvalScope>,
+) -> Result<TableEval, EngineError> {
+    let mut scope = EvalScope::default();
+    if let Some(outer) = outer_scope {
+        scope.inherit_outer(outer);
+    }
+
+    let mut args = Vec::with_capacity(function.args.len());
+    for arg in &function.args {
+        args.push(eval_expr(arg, &scope, params)?);
+    }
+
+    let (mut columns, rows) = evaluate_set_returning_function(function, &args)?;
+    if !function.column_aliases.is_empty() {
+        if function.column_aliases.len() != columns.len() {
+            return Err(EngineError {
+                message: format!(
+                    "table function {} expects {} column aliases, got {}",
+                    function
+                        .name
+                        .last()
+                        .map(String::as_str)
+                        .unwrap_or("function"),
+                    columns.len(),
+                    function.column_aliases.len()
+                ),
+            });
+        }
+        columns = function.column_aliases.clone();
+    }
+
+    let qualifiers = function
+        .alias
+        .as_ref()
+        .map(|alias| vec![alias.to_ascii_lowercase()])
+        .or_else(|| {
+            function
+                .name
+                .last()
+                .map(|name| vec![name.to_ascii_lowercase()])
+        })
+        .unwrap_or_default();
+    let mut scoped_rows = Vec::with_capacity(rows.len());
+    for row in &rows {
+        scoped_rows.push(scope_from_row(&columns, row, &qualifiers, &columns));
+    }
+    let null_values = vec![ScalarValue::Null; columns.len()];
+    let null_scope = scope_from_row(&columns, &null_values, &qualifiers, &columns);
+
+    Ok(TableEval {
+        rows: scoped_rows,
+        columns,
+        null_scope,
+    })
+}
+
+fn evaluate_set_returning_function(
+    function: &TableFunctionRef,
+    args: &[ScalarValue],
+) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
+    let fn_name = function
+        .name
+        .last()
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    match fn_name.as_str() {
+        "json_array_elements" | "jsonb_array_elements" => {
+            eval_json_array_elements_set_function(args, false, &fn_name)
+        }
+        "json_array_elements_text" | "jsonb_array_elements_text" => {
+            eval_json_array_elements_set_function(args, true, &fn_name)
+        }
+        _ => Err(EngineError {
+            message: format!(
+                "unsupported set-returning table function {}",
+                function
+                    .name
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
+        }),
+    }
+}
+
+fn eval_json_array_elements_set_function(
+    args: &[ScalarValue],
+    text_mode: bool,
+    fn_name: &str,
+) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
+    if args.len() != 1 {
+        return Err(EngineError {
+            message: format!("{fn_name}() expects exactly one argument"),
+        });
+    }
+
+    if matches!(args[0], ScalarValue::Null) {
+        return Ok((vec!["value".to_string()], Vec::new()));
+    }
+
+    let value = parse_json_document_arg(&args[0], fn_name, 1)?;
+    let JsonValue::Array(items) = value else {
+        return Err(EngineError {
+            message: format!("{fn_name}() argument 1 must be a JSON array"),
+        });
+    };
+
+    let rows = items
+        .iter()
+        .map(|item| {
+            let value = if text_mode {
+                json_value_text_output(item)
+            } else {
+                ScalarValue::Text(item.to_string())
+            };
+            vec![value]
+        })
+        .collect::<Vec<_>>();
+    Ok((vec!["value".to_string()], rows))
 }
 
 fn evaluate_relation(
@@ -8681,6 +8835,62 @@ mod tests {
             let planned = plan_statement(statement).expect("plans");
             let err = execute_planned_query(&planned, &[]).expect_err("invalid json should fail");
             assert!(err.message.contains("not valid JSON"));
+        });
+    }
+
+    #[test]
+    fn expands_json_array_elements_in_from_clause() {
+        let result = run(
+            "SELECT json_extract_path_text(elem, 'currency') AS currency \
+             FROM json_array_elements(json_extract_path('{\"result\":[{\"currency\":\"XRP\"},{\"currency\":\"USDC\"}]}', 'result')) AS src(elem) \
+             ORDER BY currency",
+        );
+        assert_eq!(result.columns, vec!["currency".to_string()]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![ScalarValue::Text("USDC".to_string())],
+                vec![ScalarValue::Text("XRP".to_string())],
+            ]
+        );
+    }
+
+    #[test]
+    fn expands_json_array_elements_text_in_from_clause() {
+        let result = run("SELECT * FROM json_array_elements_text('[1,\"x\",null]')");
+        assert_eq!(result.columns, vec!["value".to_string()]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![ScalarValue::Text("1".to_string())],
+                vec![ScalarValue::Text("x".to_string())],
+                vec![ScalarValue::Null],
+            ]
+        );
+    }
+
+    #[test]
+    fn supports_column_aliases_for_table_functions() {
+        let result = run("SELECT item FROM json_array_elements_text('[1,2]') AS t(item)");
+        assert_eq!(result.columns, vec!["item".to_string()]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![ScalarValue::Text("1".to_string())],
+                vec![ScalarValue::Text("2".to_string())],
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_non_array_json_for_json_array_elements() {
+        with_isolated_state(|| {
+            let statement =
+                parse_statement("SELECT * FROM json_array_elements('{\"a\":1}')").expect("parses");
+            let planned = plan_statement(statement).expect("plans");
+            let err =
+                execute_planned_query(&planned, &[]).expect_err("non-array JSON input should fail");
+            assert!(err.message.contains("must be a JSON array"));
         });
     }
 

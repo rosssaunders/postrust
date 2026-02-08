@@ -336,6 +336,11 @@ fn collect_table_expression_refs(
             }
             out.push(rel.name.clone());
         }
+        TableExpression::Function(function) => {
+            for arg in &function.args {
+                collect_expr_relation_refs(arg, ctes, out);
+            }
+        }
         TableExpression::Subquery(sub) => collect_query_relation_refs(&sub.query, ctes, out),
         TableExpression::Join(join) => {
             collect_table_expression_refs(&join.left, ctes, out);

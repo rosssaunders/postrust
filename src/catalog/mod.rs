@@ -1626,6 +1626,10 @@ fn query_expr_references_sequence(expr: &QueryExpr, sequence_name: &str) -> bool
 fn table_expression_references_sequence(table: &TableExpression, sequence_name: &str) -> bool {
     match table {
         TableExpression::Relation(_) => false,
+        TableExpression::Function(function) => function
+            .args
+            .iter()
+            .any(|arg| expr_references_sequence(arg, sequence_name)),
         TableExpression::Subquery(sub) => query_references_sequence(&sub.query, sequence_name),
         TableExpression::Join(join) => {
             table_expression_references_sequence(&join.left, sequence_name)

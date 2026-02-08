@@ -396,6 +396,14 @@ pub struct TableRef {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct TableFunctionRef {
+    pub name: Vec<String>,
+    pub args: Vec<Expr>,
+    pub alias: Option<String>,
+    pub column_aliases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SubqueryRef {
     pub query: Query,
     pub alias: Option<String>,
@@ -414,6 +422,7 @@ pub struct JoinExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableExpression {
     Relation(TableRef),
+    Function(TableFunctionRef),
     Subquery(SubqueryRef),
     Join(JoinExpr),
 }
