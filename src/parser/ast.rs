@@ -1,0 +1,534 @@
+#[derive(Debug, Clone, PartialEq)]
+pub enum Statement {
+    Query(Query),
+    CreateTable(CreateTableStatement),
+    CreateSchema(CreateSchemaStatement),
+    CreateIndex(CreateIndexStatement),
+    CreateSequence(CreateSequenceStatement),
+    CreateView(CreateViewStatement),
+    RefreshMaterializedView(RefreshMaterializedViewStatement),
+    AlterSequence(AlterSequenceStatement),
+    AlterView(AlterViewStatement),
+    Insert(InsertStatement),
+    Update(UpdateStatement),
+    Delete(DeleteStatement),
+    Merge(MergeStatement),
+    DropTable(DropTableStatement),
+    DropSchema(DropSchemaStatement),
+    DropIndex(DropIndexStatement),
+    DropSequence(DropSequenceStatement),
+    DropView(DropViewStatement),
+    Truncate(TruncateStatement),
+    AlterTable(AlterTableStatement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeName {
+    Bool,
+    Int8,
+    Float8,
+    Text,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnDefinition {
+    pub name: String,
+    pub data_type: TypeName,
+    pub nullable: bool,
+    pub identity: bool,
+    pub primary_key: bool,
+    pub unique: bool,
+    pub references: Option<ForeignKeyReference>,
+    pub check: Option<Expr>,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTableStatement {
+    pub name: Vec<String>,
+    pub columns: Vec<ColumnDefinition>,
+    pub constraints: Vec<TableConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyReference {
+    pub table_name: Vec<String>,
+    pub column_name: Option<String>,
+    pub on_delete: ForeignKeyAction,
+    pub on_update: ForeignKeyAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TableConstraint {
+    PrimaryKey {
+        name: Option<String>,
+        columns: Vec<String>,
+    },
+    Unique {
+        name: Option<String>,
+        columns: Vec<String>,
+    },
+    ForeignKey {
+        name: Option<String>,
+        columns: Vec<String>,
+        referenced_table: Vec<String>,
+        referenced_columns: Vec<String>,
+        on_delete: ForeignKeyAction,
+        on_update: ForeignKeyAction,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignKeyAction {
+    Restrict,
+    Cascade,
+    SetNull,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertStatement {
+    pub table_name: Vec<String>,
+    pub table_alias: Option<String>,
+    pub columns: Vec<String>,
+    pub source: InsertSource,
+    pub on_conflict: Option<OnConflictClause>,
+    pub returning: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsertSource {
+    Values(Vec<Vec<Expr>>),
+    Query(Query),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConflictTarget {
+    Columns(Vec<String>),
+    Constraint(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnConflictClause {
+    DoNothing {
+        conflict_target: Option<ConflictTarget>,
+    },
+    DoUpdate {
+        conflict_target: Option<ConflictTarget>,
+        assignments: Vec<Assignment>,
+        where_clause: Option<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub column: String,
+    pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateStatement {
+    pub table_name: Vec<String>,
+    pub assignments: Vec<Assignment>,
+    pub from: Vec<TableExpression>,
+    pub where_clause: Option<Expr>,
+    pub returning: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteStatement {
+    pub table_name: Vec<String>,
+    pub using: Vec<TableExpression>,
+    pub where_clause: Option<Expr>,
+    pub returning: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropBehavior {
+    Restrict,
+    Cascade,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropTableStatement {
+    pub name: Vec<String>,
+    pub if_exists: bool,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSchemaStatement {
+    pub name: String,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSchemaStatement {
+    pub name: String,
+    pub if_exists: bool,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropIndexStatement {
+    pub name: Vec<String>,
+    pub if_exists: bool,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropSequenceStatement {
+    pub name: Vec<String>,
+    pub if_exists: bool,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TruncateStatement {
+    pub table_names: Vec<Vec<String>>,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateViewStatement {
+    pub name: Vec<String>,
+    pub or_replace: bool,
+    pub materialized: bool,
+    pub with_data: bool,
+    pub query: Query,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefreshMaterializedViewStatement {
+    pub name: Vec<String>,
+    pub concurrently: bool,
+    pub with_data: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropViewStatement {
+    pub names: Vec<Vec<String>>,
+    pub materialized: bool,
+    pub if_exists: bool,
+    pub behavior: DropBehavior,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MergeStatement {
+    pub target_table: Vec<String>,
+    pub target_alias: Option<String>,
+    pub source: TableExpression,
+    pub on: Expr,
+    pub when_clauses: Vec<MergeWhenClause>,
+    pub returning: Vec<SelectItem>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergeWhenClause {
+    MatchedUpdate {
+        condition: Option<Expr>,
+        assignments: Vec<Assignment>,
+    },
+    MatchedDelete {
+        condition: Option<Expr>,
+    },
+    MatchedDoNothing {
+        condition: Option<Expr>,
+    },
+    NotMatchedBySourceUpdate {
+        condition: Option<Expr>,
+        assignments: Vec<Assignment>,
+    },
+    NotMatchedBySourceDelete {
+        condition: Option<Expr>,
+    },
+    NotMatchedBySourceDoNothing {
+        condition: Option<Expr>,
+    },
+    NotMatchedInsert {
+        condition: Option<Expr>,
+        columns: Vec<String>,
+        values: Vec<Expr>,
+    },
+    NotMatchedDoNothing {
+        condition: Option<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateIndexStatement {
+    pub name: String,
+    pub table_name: Vec<String>,
+    pub columns: Vec<String>,
+    pub unique: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateSequenceStatement {
+    pub name: Vec<String>,
+    pub start: Option<i64>,
+    pub increment: Option<i64>,
+    pub min_value: Option<Option<i64>>,
+    pub max_value: Option<Option<i64>>,
+    pub cycle: Option<bool>,
+    pub cache: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterSequenceAction {
+    Restart { with: Option<i64> },
+    SetStart { start: i64 },
+    SetIncrement { increment: i64 },
+    SetMinValue { min: Option<i64> },
+    SetMaxValue { max: Option<i64> },
+    SetCycle { cycle: bool },
+    SetCache { cache: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterSequenceStatement {
+    pub name: Vec<String>,
+    pub actions: Vec<AlterSequenceAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlterViewAction {
+    RenameTo { new_name: String },
+    RenameColumn { old_name: String, new_name: String },
+    SetSchema { schema_name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlterViewStatement {
+    pub name: Vec<String>,
+    pub materialized: bool,
+    pub action: AlterViewAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterTableAction {
+    AddColumn(ColumnDefinition),
+    AddConstraint(TableConstraint),
+    DropColumn { name: String },
+    DropConstraint { name: String },
+    RenameColumn { old_name: String, new_name: String },
+    SetColumnNullable { name: String, nullable: bool },
+    SetColumnDefault { name: String, default: Option<Expr> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterTableStatement {
+    pub table_name: Vec<String>,
+    pub action: AlterTableAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Query {
+    pub with: Option<WithClause>,
+    pub body: QueryExpr,
+    pub order_by: Vec<OrderByExpr>,
+    pub limit: Option<Expr>,
+    pub offset: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithClause {
+    pub recursive: bool,
+    pub ctes: Vec<CommonTableExpr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CommonTableExpr {
+    pub name: String,
+    pub query: Query,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum QueryExpr {
+    Select(SelectStatement),
+    SetOperation {
+        left: Box<QueryExpr>,
+        op: SetOperator,
+        quantifier: SetQuantifier,
+        right: Box<QueryExpr>,
+    },
+    Nested(Box<Query>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetOperator {
+    Union,
+    Intersect,
+    Except,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetQuantifier {
+    All,
+    Distinct,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectQuantifier {
+    All,
+    Distinct,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectStatement {
+    pub quantifier: Option<SelectQuantifier>,
+    pub targets: Vec<SelectItem>,
+    pub from: Vec<TableExpression>,
+    pub where_clause: Option<Expr>,
+    pub group_by: Vec<Expr>,
+    pub having: Option<Expr>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectItem {
+    pub expr: Expr,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct TableRef {
+    pub name: Vec<String>,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubqueryRef {
+    pub query: Query,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct JoinExpr {
+    pub left: Box<TableExpression>,
+    pub kind: JoinType,
+    pub right: Box<TableExpression>,
+    pub condition: Option<JoinCondition>,
+    pub natural: bool,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TableExpression {
+    Relation(TableRef),
+    Subquery(SubqueryRef),
+    Join(JoinExpr),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinType {
+    Inner,
+    Left,
+    Right,
+    Full,
+    Cross,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum JoinCondition {
+    On(Expr),
+    Using(Vec<String>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByExpr {
+    pub expr: Expr,
+    pub ascending: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    Identifier(Vec<String>),
+    String(String),
+    Integer(i64),
+    Float(String),
+    Boolean(bool),
+    Null,
+    Parameter(i32),
+    FunctionCall {
+        name: Vec<String>,
+        args: Vec<Expr>,
+    },
+    Cast {
+        expr: Box<Expr>,
+        type_name: String,
+    },
+    Wildcard,
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+    },
+    Binary {
+        left: Box<Expr>,
+        op: BinaryOp,
+        right: Box<Expr>,
+    },
+    Exists(Box<Query>),
+    ScalarSubquery(Box<Query>),
+    InList {
+        expr: Box<Expr>,
+        list: Vec<Expr>,
+        negated: bool,
+    },
+    InSubquery {
+        expr: Box<Expr>,
+        subquery: Box<Query>,
+        negated: bool,
+    },
+    Between {
+        expr: Box<Expr>,
+        low: Box<Expr>,
+        high: Box<Expr>,
+        negated: bool,
+    },
+    Like {
+        expr: Box<Expr>,
+        pattern: Box<Expr>,
+        case_insensitive: bool,
+        negated: bool,
+    },
+    IsNull {
+        expr: Box<Expr>,
+        negated: bool,
+    },
+    IsDistinctFrom {
+        left: Box<Expr>,
+        right: Box<Expr>,
+        negated: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnaryOp {
+    Plus,
+    Minus,
+    Not,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BinaryOp {
+    Or,
+    And,
+    Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    JsonGet,
+    JsonGetText,
+    JsonPath,
+    JsonPathText,
+    JsonContains,
+    JsonHasKey,
+    JsonHasAny,
+    JsonHasAll,
+}

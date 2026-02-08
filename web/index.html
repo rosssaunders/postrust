@@ -1,0 +1,655 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Postgrust Browser Test</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-theme-quartz.css"
+    />
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b1020;
+        --panel: #0f172a;
+        --panel-border: #1e293b;
+        --text: #dbe4f0;
+        --muted: #94a3b8;
+        --accent: #22c55e;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: radial-gradient(circle at top, #1e293b 0%, #0b1020 50%, #05080f 100%);
+        color: var(--text);
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+      }
+
+      .app {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 1rem;
+        display: grid;
+        gap: 0.75rem;
+      }
+
+      .title {
+        margin: 0;
+        font-size: 1rem;
+        font-weight: 600;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+      }
+
+      .toolbar button {
+        border: 1px solid var(--panel-border);
+        border-radius: 6px;
+        background: #111827;
+        color: var(--text);
+        cursor: pointer;
+        padding: 0.45rem 0.75rem;
+      }
+
+      .toolbar button:hover {
+        border-color: var(--accent);
+      }
+
+      .status {
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+
+      #editor {
+        width: 100%;
+        height: 55vh;
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .output {
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        background: var(--panel);
+        padding: 0.75rem;
+      }
+
+      .output h2 {
+        margin: 0 0 0.5rem;
+        font-size: 0.9rem;
+        color: var(--muted);
+      }
+
+      #result-editor {
+        width: 100%;
+        height: 20vh;
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      #result-grid {
+        width: 100%;
+        height: 34vh;
+        border: 1px solid var(--panel-border);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+
+      .ag-theme-quartz-dark {
+        --ag-foreground-color: #dbe4f0;
+        --ag-background-color: #0f172a;
+        --ag-header-foreground-color: #cbd5e1;
+        --ag-header-background-color: #111827;
+        --ag-odd-row-background-color: #0c1324;
+        --ag-border-color: #1e293b;
+        --ag-row-hover-color: #17213a;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <h1 class="title">Postgrust Browser SQL Harness</h1>
+      <div class="toolbar">
+        <button id="run" type="button">Run (Cmd/Ctrl + Enter)</button>
+        <button id="export-snapshot" type="button">Export Snapshot</button>
+        <button id="import-snapshot" type="button">Import Snapshot</button>
+        <button id="reset-state" type="button">Reset DB</button>
+        <span class="status" id="status">Monaco: loading</span>
+      </div>
+      <div id="editor"></div>
+      <section class="output">
+        <h2>Result</h2>
+        <div id="result-editor">Loading WASM runtime...</div>
+      </section>
+      <section class="output">
+        <h2>Grid</h2>
+        <div id="result-grid" class="ag-theme-quartz-dark"></div>
+      </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/ag-grid-community/dist/ag-grid-community.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+    <script>
+      const statusEl = document.getElementById("status");
+      const resultEditorEl = document.getElementById("result-editor");
+      const resultGridEl = document.getElementById("result-grid");
+      const runBtn = document.getElementById("run");
+      const exportBtn = document.getElementById("export-snapshot");
+      const importBtn = document.getElementById("import-snapshot");
+      const resetBtn = document.getElementById("reset-state");
+      const SNAPSHOT_KEY = "postgrust_snapshot_v1";
+      let editor;
+      let resultEditor;
+      let pendingResultText = "Loading WASM runtime...";
+      let wasmApi = null;
+      let monacoReady = false;
+      let gridReady = false;
+      let wasmStatus = "loading";
+      let snapshotRestored = false;
+      let httpMode = false;
+      let gridApi = null;
+      const gridOptions = {
+        columnDefs: [],
+        rowData: [],
+        defaultColDef: {
+          resizable: true,
+          sortable: true,
+          filter: true,
+          minWidth: 130,
+        },
+        animateRows: false,
+      };
+
+      function refreshStatus() {
+        const parts = [
+          `Monaco: ${monacoReady ? "ready" : "loading"}`,
+          `Grid: ${gridReady ? "ready" : "loading"}`,
+          `WASM: ${wasmStatus}`,
+        ];
+        if (snapshotRestored) {
+          parts.push("snapshot restored");
+        }
+        if (httpMode) {
+          parts.push("HTTP mode");
+        }
+        statusEl.textContent = parts.join(" | ");
+      }
+
+      function setResult(text) {
+        const rendered = typeof text === "string" ? text : String(text);
+        pendingResultText = rendered;
+        if (resultEditor) {
+          resultEditor.setValue(rendered);
+        } else if (resultEditorEl) {
+          resultEditorEl.textContent = rendered;
+        }
+      }
+
+      function isExecutionErrorText(value) {
+        return typeof value === "string" && value.startsWith("Execution error:");
+      }
+
+      function initGrid() {
+        if (!resultGridEl || !window.agGrid) {
+          gridReady = false;
+          return;
+        }
+        if (typeof window.agGrid.createGrid === "function") {
+          gridApi = window.agGrid.createGrid(resultGridEl, gridOptions);
+        } else if (typeof window.agGrid.Grid === "function") {
+          new window.agGrid.Grid(resultGridEl, gridOptions);
+          gridApi = gridOptions.api || null;
+        }
+        gridReady = !!gridApi;
+      }
+
+      function applyGridData(columnDefs, rowData) {
+        if (!gridApi) {
+          return;
+        }
+        if (typeof gridApi.setGridOption === "function") {
+          gridApi.setGridOption("columnDefs", columnDefs);
+          gridApi.setGridOption("rowData", rowData);
+        } else {
+          if (typeof gridApi.setColumnDefs === "function") {
+            gridApi.setColumnDefs(columnDefs);
+          }
+          if (typeof gridApi.setRowData === "function") {
+            gridApi.setRowData(rowData);
+          }
+        }
+        setTimeout(function () {
+          if (gridApi && typeof gridApi.sizeColumnsToFit === "function") {
+            try {
+              gridApi.sizeColumnsToFit();
+            } catch (_err) {}
+          }
+        }, 0);
+      }
+
+      function clearGrid() {
+        applyGridData([], []);
+      }
+
+      function selectGridResult(executionPayload) {
+        const results = Array.isArray(executionPayload && executionPayload.results)
+          ? executionPayload.results
+          : [];
+        for (let idx = results.length - 1; idx >= 0; idx -= 1) {
+          const result = results[idx];
+          if (Array.isArray(result.columns) && result.columns.length > 0) {
+            return result;
+          }
+        }
+        return null;
+      }
+
+      function renderGridFromExecutionPayload(executionPayload) {
+        const tabular = selectGridResult(executionPayload);
+        if (!tabular) {
+          clearGrid();
+          return;
+        }
+
+        const expanded = expandJsonResultArrayRows(tabular);
+        if (expanded) {
+          applyGridData(expanded.columnDefs, expanded.rowData);
+          return;
+        }
+
+        const columnDefs = tabular.columns.map(function (name) {
+          return {
+            field: name,
+            headerName: name,
+            wrapText: true,
+            autoHeight: true,
+          };
+        });
+        const rowData = (Array.isArray(tabular.rows) ? tabular.rows : []).map(function (row) {
+          const record = {};
+          tabular.columns.forEach(function (name, idx) {
+            record[name] = Array.isArray(row) ? row[idx] ?? "" : "";
+          });
+          return record;
+        });
+        applyGridData(columnDefs, rowData);
+      }
+
+      function expandJsonResultArrayRows(tabular) {
+        if (!Array.isArray(tabular.columns) || tabular.columns.length !== 1) {
+          return null;
+        }
+        const sourceColumn = tabular.columns[0];
+        const parsedItems = [];
+        const sourceRows = Array.isArray(tabular.rows) ? tabular.rows : [];
+
+        for (const row of sourceRows) {
+          if (!Array.isArray(row) || row.length === 0 || typeof row[0] !== "string") {
+            continue;
+          }
+          let parsed;
+          try {
+            parsed = JSON.parse(row[0]);
+          } catch (_err) {
+            continue;
+          }
+
+          const items = Array.isArray(parsed)
+            ? parsed
+            : parsed && typeof parsed === "object" && Array.isArray(parsed.result)
+              ? parsed.result
+              : null;
+          if (items && items.length) {
+            for (const item of items) {
+              parsedItems.push(item);
+            }
+          }
+        }
+
+        if (parsedItems.length === 0) {
+          return null;
+        }
+
+        const allObjects = parsedItems.every(function (item) {
+          return item && typeof item === "object" && !Array.isArray(item);
+        });
+        if (!allObjects) {
+          return {
+            columnDefs: [{ field: sourceColumn, headerName: sourceColumn }],
+            rowData: parsedItems.map(function (item) {
+              return {
+                [sourceColumn]:
+                  item === null || typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+                    ? item
+                    : JSON.stringify(item),
+              };
+            }),
+          };
+        }
+
+        const orderedKeys = [];
+        const keySet = new Set();
+        for (const item of parsedItems) {
+          for (const key of Object.keys(item)) {
+            if (!keySet.has(key)) {
+              keySet.add(key);
+              orderedKeys.push(key);
+            }
+          }
+        }
+
+        const columnDefs = orderedKeys.map(function (key) {
+          return {
+            field: key,
+            headerName: key,
+            wrapText: true,
+            autoHeight: true,
+          };
+        });
+        const rowData = parsedItems.map(function (item) {
+          const row = {};
+          for (const key of orderedKeys) {
+            const value = item[key];
+            row[key] =
+              value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean"
+                ? value
+                : JSON.stringify(value);
+          }
+          return row;
+        });
+        return { columnDefs, rowData };
+      }
+
+      function parseExecutionPayload(out) {
+        if (typeof out === "string") {
+          try {
+            return JSON.parse(out);
+          } catch (_err) {
+            return null;
+          }
+        }
+        return out && typeof out === "object" ? out : null;
+      }
+
+      function resolveWasmFunction(names) {
+        if (wasmApi) {
+          for (const name of names) {
+            if (typeof wasmApi[name] === "function") {
+              return wasmApi[name];
+            }
+          }
+        }
+        if (names.includes("execute_sql") && typeof window.postgrustExecute === "function") {
+          return window.postgrustExecute;
+        }
+        return null;
+      }
+
+      async function persistSnapshotToLocalStorage() {
+        const exportFn = resolveWasmFunction(["export_state_snapshot", "export_state"]);
+        if (typeof exportFn !== "function") {
+          return;
+        }
+        const snapshot = await exportFn();
+        if (typeof snapshot === "string" && snapshot.trim()) {
+          localStorage.setItem(SNAPSHOT_KEY, snapshot);
+        }
+      }
+
+      async function restoreSnapshotFromLocalStorage() {
+        const importFn = resolveWasmFunction(["import_state_snapshot", "import_state"]);
+        if (typeof importFn !== "function") {
+          return false;
+        }
+        const snapshot = localStorage.getItem(SNAPSHOT_KEY);
+        if (!snapshot) {
+          return false;
+        }
+        const out = await importFn(snapshot);
+        if (isExecutionErrorText(out)) {
+          localStorage.removeItem(SNAPSHOT_KEY);
+          setResult(
+            out +
+              "\n\nStored browser snapshot was rejected and has been cleared from localStorage."
+          );
+          return false;
+        }
+        return true;
+      }
+
+      async function tryLoadWasmApi() {
+        try {
+          const mod = await import("./pkg/postgrust.js");
+          if (typeof mod.default === "function") {
+            await mod.default();
+          }
+          wasmApi = mod;
+          wasmStatus = "connected";
+          httpMode =
+            typeof resolveWasmFunction([
+              "execute_sql_http_json",
+              "run_sql_http_json",
+              "execute_sql_http",
+              "run_sql_http",
+            ]) === "function";
+          snapshotRestored = await restoreSnapshotFromLocalStorage();
+          refreshStatus();
+          if (!snapshotRestored) {
+            setResult("WASM engine connected. Run SQL to see results.");
+          }
+        } catch (err) {
+          wasmStatus = "not found";
+          refreshStatus();
+          setResult("WASM module failed to load. Rebuild with scripts/build_wasm.sh");
+          console.error("WASM load error", err);
+        }
+      }
+
+      async function runSql() {
+        const sql = editor.getValue();
+        if (!sql.trim()) {
+          setResult("No SQL to run.");
+          return;
+        }
+
+        const runFunction = resolveWasmFunction([
+          "execute_sql_http_json",
+          "run_sql_http_json",
+          "execute_sql_json",
+          "run_sql_json",
+          "execute_sql_http",
+          "run_sql_http",
+          "execute_sql",
+          "exec_sql",
+          "run_sql",
+        ]);
+
+        if (typeof runFunction !== "function") {
+          setResult("No execute function found. Expected `postgrustExecute(sql)` or WASM export.");
+          return;
+        }
+
+        try {
+          const out = await runFunction(sql);
+          const executionPayload = parseExecutionPayload(out);
+
+          if (executionPayload && Array.isArray(executionPayload.results)) {
+            const rendered =
+              typeof executionPayload.rendered === "string"
+                ? executionPayload.rendered
+                : JSON.stringify(executionPayload, null, 2);
+            setResult(rendered);
+            renderGridFromExecutionPayload(executionPayload);
+            if (executionPayload.ok) {
+              await persistSnapshotToLocalStorage();
+            }
+            return;
+          }
+
+          const rendered = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+          setResult(rendered);
+          clearGrid();
+          if (!isExecutionErrorText(rendered)) {
+            await persistSnapshotToLocalStorage();
+          }
+        } catch (err) {
+          setResult("Execution error:\n" + (err && err.message ? err.message : String(err)));
+          clearGrid();
+        }
+      }
+
+      async function exportSnapshot() {
+        const exportFn = resolveWasmFunction(["export_state_snapshot", "export_state"]);
+        if (typeof exportFn !== "function") {
+          setResult("Snapshot export function not found in WASM module.");
+          return;
+        }
+
+        try {
+          const out = await exportFn();
+          const snapshot = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+          if (typeof snapshot === "string" && snapshot.trim()) {
+            localStorage.setItem(SNAPSHOT_KEY, snapshot);
+          }
+          try {
+            await navigator.clipboard.writeText(snapshot);
+            setResult("Snapshot exported and copied to clipboard.\n\n" + snapshot);
+          } catch (_err) {
+            setResult("Snapshot exported (clipboard unavailable).\n\n" + snapshot);
+          }
+        } catch (err) {
+          setResult("Snapshot export failed:\n" + (err && err.message ? err.message : String(err)));
+        }
+      }
+
+      async function importSnapshot() {
+        const importFn = resolveWasmFunction(["import_state_snapshot", "import_state"]);
+        if (typeof importFn !== "function") {
+          setResult("Snapshot import function not found in WASM module.");
+          return;
+        }
+
+        const pasted = window.prompt("Paste snapshot text");
+        if (pasted === null) {
+          return;
+        }
+        if (!pasted.trim()) {
+          setResult("Snapshot input is empty.");
+          return;
+        }
+
+        try {
+          const out = await importFn(pasted);
+          const rendered = typeof out === "string" ? out : JSON.stringify(out, null, 2);
+          setResult(rendered);
+          if (!isExecutionErrorText(rendered)) {
+            localStorage.setItem(SNAPSHOT_KEY, pasted.trim());
+          }
+        } catch (err) {
+          setResult("Snapshot import failed:\n" + (err && err.message ? err.message : String(err)));
+        }
+      }
+
+      async function resetState() {
+        const resetFn = resolveWasmFunction(["reset_state_snapshot", "reset_state"]);
+        if (typeof resetFn !== "function") {
+          localStorage.removeItem(SNAPSHOT_KEY);
+          setResult("Reset function not found in WASM module. Cleared local snapshot only.");
+          return;
+        }
+
+        try {
+          const out = await resetFn();
+          localStorage.removeItem(SNAPSHOT_KEY);
+          setResult(typeof out === "string" ? out : JSON.stringify(out, null, 2));
+          clearGrid();
+        } catch (err) {
+          setResult("Reset failed:\n" + (err && err.message ? err.message : String(err)));
+        }
+      }
+
+      window.MonacoEnvironment = {
+        getWorkerUrl: function () {
+          return (
+            "data:text/javascript;charset=utf-8," +
+            encodeURIComponent(
+              "self.MonacoEnvironment = { baseUrl: 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/' };" +
+                "importScripts('https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/base/worker/workerMain.js');"
+            )
+          );
+        },
+      };
+
+      require.config({
+        paths: {
+          vs: "https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs",
+        },
+      });
+
+      initGrid();
+      refreshStatus();
+      tryLoadWasmApi();
+
+      setTimeout(function () {
+        if (!monacoReady) {
+          setResult(
+            "Monaco editor is still loading. Check network access to https://cdn.jsdelivr.net/ and disable blockers for this page."
+          );
+        }
+      }, 8000);
+
+      require(["vs/editor/editor.main"], function () {
+        monacoReady = true;
+        refreshStatus();
+
+        editor = monaco.editor.create(document.getElementById("editor"), {
+          value: [
+            "SELECT http_get('https://test.deribit.com/api/v2/public/get_currencies') AS payload;",
+          ].join("\n"),
+          language: "sql",
+          theme: "vs-dark",
+          minimap: { enabled: false },
+          automaticLayout: true,
+          fontSize: 14,
+        });
+
+        resultEditor = monaco.editor.create(resultEditorEl, {
+          value: pendingResultText,
+          language: "plaintext",
+          theme: "vs-dark",
+          minimap: { enabled: false },
+          automaticLayout: true,
+          fontSize: 13,
+          readOnly: true,
+          domReadOnly: true,
+          lineNumbers: "off",
+          wordWrap: "on",
+          scrollBeyondLastLine: false,
+        });
+
+        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runSql);
+        runBtn.addEventListener("click", runSql);
+        exportBtn.addEventListener("click", exportSnapshot);
+        importBtn.addEventListener("click", importSnapshot);
+        resetBtn.addEventListener("click", resetState);
+      });
+    </script>
+  </body>
+</html>

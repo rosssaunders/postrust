@@ -1,0 +1,625 @@
+use std::cell::RefCell;
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use serde_json::json;
+
+use crate::tcop::engine::{EngineStateSnapshot, restore_state, snapshot_state};
+use crate::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue, prelude::wasm_bindgen};
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen_futures::JsFuture;
+
+const SNAPSHOT_HEADER: &str = "POSTGRUST_BROWSER_SNAPSHOT_V1";
+
+thread_local! {
+    static BASELINE_SNAPSHOT: RefCell<Option<EngineStateSnapshot>> = const { RefCell::new(None) };
+    static SNAPSHOT_REPLAY_LOG: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserQueryResult {
+    columns: Vec<String>,
+    rows: Vec<Vec<String>>,
+    command_tag: String,
+    rows_affected: u64,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn execute_sql(sql: &str) -> String {
+    execute_sql_internal(sql, true)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = execute_sql_json))]
+pub fn execute_sql_json(sql: &str) -> String {
+    execute_sql_json_internal(sql, true)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = run_sql_json))]
+pub fn run_sql_json(sql: &str) -> String {
+    execute_sql_json(sql)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = exec_sql))]
+pub fn exec_sql(sql: &str) -> String {
+    execute_sql(sql)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = run_sql))]
+pub fn run_sql(sql: &str) -> String {
+    execute_sql(sql)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = execute_sql_http)]
+pub async fn execute_sql_http(sql: String) -> Result<String, JsValue> {
+    let rewritten = rewrite_http_get_calls(&sql).await?;
+    Ok(execute_sql(&rewritten))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = run_sql_http)]
+pub async fn run_sql_http(sql: String) -> Result<String, JsValue> {
+    execute_sql_http(sql).await
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = execute_sql_http_json)]
+pub async fn execute_sql_http_json(sql: String) -> Result<String, JsValue> {
+    let rewritten = rewrite_http_get_calls(&sql).await?;
+    Ok(execute_sql_json_internal(&rewritten, true))
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = run_sql_http_json)]
+pub async fn run_sql_http_json(sql: String) -> Result<String, JsValue> {
+    execute_sql_http_json(sql).await
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen(js_name = http_get)]
+pub async fn http_get(url: String) -> Result<String, JsValue> {
+    let window = web_sys::window().ok_or_else(|| JsValue::from_str("window is not available"))?;
+    let response_value = JsFuture::from(window.fetch_with_str(&url)).await?;
+    let response: web_sys::Response = response_value
+        .dyn_into()
+        .map_err(|_| JsValue::from_str("failed to decode fetch response"))?;
+    if !response.ok() {
+        return Err(JsValue::from_str(&format!(
+            "http_get request failed with status {} {}",
+            response.status(),
+            response.status_text()
+        )));
+    }
+    let text_promise = response
+        .text()
+        .map_err(|_| JsValue::from_str("failed to read response body"))?;
+    let text_value = JsFuture::from(text_promise).await?;
+    Ok(text_value.as_string().unwrap_or_default())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn http_get(url: &str) -> Result<String, String> {
+    let response = ureq::get(url)
+        .call()
+        .map_err(|err| format!("http_get request failed: {err}"))?;
+    response
+        .into_string()
+        .map_err(|err| format!("http_get body read failed: {err}"))
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = export_state_snapshot))]
+pub fn export_state_snapshot() -> String {
+    ensure_baseline_snapshot();
+    let mut out = String::from(SNAPSHOT_HEADER);
+    for entry in snapshot_log_entries() {
+        out.push('\n');
+        out.push_str(&BASE64_STANDARD.encode(entry.as_bytes()));
+    }
+    out
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = export_state))]
+pub fn export_state() -> String {
+    export_state_snapshot()
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = import_state_snapshot))]
+pub fn import_state_snapshot(snapshot: &str) -> String {
+    ensure_baseline_snapshot();
+    match import_state_snapshot_impl(snapshot) {
+        Ok(message) => message,
+        Err(message) => format!("Execution error: {message}"),
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = import_state))]
+pub fn import_state(snapshot: &str) -> String {
+    import_state_snapshot(snapshot)
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = reset_state_snapshot))]
+pub fn reset_state_snapshot() -> String {
+    ensure_baseline_snapshot();
+    restore_state(baseline_snapshot_clone());
+    clear_snapshot_log();
+    "OK".to_string()
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = reset_state))]
+pub fn reset_state() -> String {
+    reset_state_snapshot()
+}
+
+fn execute_sql_internal(sql: &str, record_snapshot: bool) -> String {
+    match execute_sql_results_internal(sql, record_snapshot) {
+        Ok(results) => render_results(&results),
+        Err(message) => format!("Execution error: {message}"),
+    }
+}
+
+fn execute_sql_json_internal(sql: &str, record_snapshot: bool) -> String {
+    match execute_sql_results_internal(sql, record_snapshot) {
+        Ok(results) => render_results_json_payload(&results),
+        Err(message) => json!({
+            "ok": false,
+            "error": message,
+            "rendered": format!("Execution error: {message}"),
+            "results": [],
+        })
+        .to_string(),
+    }
+}
+
+fn execute_sql_results_internal(
+    sql: &str,
+    record_snapshot: bool,
+) -> Result<Vec<BrowserQueryResult>, String> {
+    ensure_baseline_snapshot();
+    let results = execute_simple_query(sql)?;
+    if record_snapshot {
+        let trimmed = sql.trim();
+        if !trimmed.is_empty() {
+            push_snapshot_log(trimmed.to_string());
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone)]
+struct HttpGetCallSpan {
+    start: usize,
+    end: usize,
+    url: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn rewrite_http_get_calls(sql: &str) -> Result<String, JsValue> {
+    let mut rewritten = sql.to_string();
+    let mut search_from = 0usize;
+    loop {
+        let Some(call) = find_next_http_get_call(&rewritten, search_from)? else {
+            break;
+        };
+        let body = http_get(call.url).await?;
+        let replacement = sql_quote_literal(&body);
+        rewritten.replace_range(call.start..call.end, &replacement);
+        search_from = call.start + replacement.len();
+    }
+    Ok(rewritten)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn find_next_http_get_call(sql: &str, start: usize) -> Result<Option<HttpGetCallSpan>, JsValue> {
+    let bytes = sql.as_bytes();
+    let mut idx = start.min(bytes.len());
+    let mut in_single = false;
+
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte == b'\'' {
+            if in_single && idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
+                idx += 2;
+                continue;
+            }
+            in_single = !in_single;
+            idx += 1;
+            continue;
+        }
+
+        if in_single {
+            idx += 1;
+            continue;
+        }
+
+        if matches_http_get_name(bytes, idx) {
+            let fn_start = idx;
+            let fn_end = idx + 8;
+            if fn_start > 0 && is_ident_byte(bytes[fn_start - 1]) {
+                idx += 1;
+                continue;
+            }
+            if fn_end < bytes.len() && is_ident_byte(bytes[fn_end]) {
+                idx += 1;
+                continue;
+            }
+
+            let mut open_idx = fn_end;
+            while open_idx < bytes.len() && bytes[open_idx].is_ascii_whitespace() {
+                open_idx += 1;
+            }
+            if open_idx >= bytes.len() || bytes[open_idx] != b'(' {
+                idx += 1;
+                continue;
+            }
+
+            let close_idx = find_matching_paren(bytes, open_idx)
+                .ok_or_else(|| JsValue::from_str("unterminated http_get(...) call in SQL input"))?;
+            let arg_sql = sql[open_idx + 1..close_idx].trim();
+            let url = parse_single_quoted_sql_literal(arg_sql)
+                .map_err(|err| JsValue::from_str(&format!("invalid http_get argument: {err}")))?;
+            return Ok(Some(HttpGetCallSpan {
+                start: fn_start,
+                end: close_idx + 1,
+                url,
+            }));
+        }
+
+        idx += 1;
+    }
+
+    Ok(None)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn matches_http_get_name(bytes: &[u8], idx: usize) -> bool {
+    let name = b"http_get";
+    if idx + name.len() > bytes.len() {
+        return false;
+    }
+    name.iter()
+        .enumerate()
+        .all(|(offset, expected)| bytes[idx + offset].to_ascii_lowercase() == *expected)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
+#[cfg(target_arch = "wasm32")]
+fn find_matching_paren(bytes: &[u8], open_idx: usize) -> Option<usize> {
+    let mut idx = open_idx;
+    let mut depth = 0usize;
+    let mut in_single = false;
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte == b'\'' {
+            if in_single && idx + 1 < bytes.len() && bytes[idx + 1] == b'\'' {
+                idx += 2;
+                continue;
+            }
+            in_single = !in_single;
+            idx += 1;
+            continue;
+        }
+        if in_single {
+            idx += 1;
+            continue;
+        }
+        if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                return Some(idx);
+            }
+        }
+        idx += 1;
+    }
+    None
+}
+
+#[cfg(target_arch = "wasm32")]
+fn parse_single_quoted_sql_literal(input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if trimmed.len() < 2 || !trimmed.starts_with('\'') || !trimmed.ends_with('\'') {
+        return Err("http_get() currently requires a single quoted string literal URL".to_string());
+    }
+
+    let mut out = String::new();
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.peek().is_some_and(|next| *next == '\'') {
+                let _ = chars.next();
+                out.push('\'');
+            } else {
+                return Err("unterminated single quote in URL literal".to_string());
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sql_quote_literal(value: &str) -> String {
+    let escaped = value.replace('\'', "''");
+    format!("'{escaped}'")
+}
+
+fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, String> {
+    let mut session = PostgresSession::new();
+    let messages = session.run([FrontendMessage::Query {
+        sql: sql.to_string(),
+    }]);
+
+    let mut results = Vec::new();
+    let mut current_columns: Option<Vec<String>> = None;
+    let mut current_rows: Vec<Vec<String>> = Vec::new();
+
+    for message in messages {
+        match message {
+            BackendMessage::RowDescription { fields } => {
+                current_columns = Some(fields.into_iter().map(|field| field.name).collect());
+                current_rows.clear();
+            }
+            BackendMessage::DataRow { values } => {
+                current_rows.push(values);
+            }
+            BackendMessage::CommandComplete { tag, rows } => {
+                results.push(BrowserQueryResult {
+                    columns: current_columns.take().unwrap_or_default(),
+                    rows: std::mem::take(&mut current_rows),
+                    command_tag: tag,
+                    rows_affected: rows,
+                });
+            }
+            BackendMessage::ErrorResponse { message } => return Err(message),
+            _ => {}
+        }
+    }
+
+    if results.is_empty() {
+        return Ok(vec![BrowserQueryResult {
+            columns: Vec::new(),
+            rows: Vec::new(),
+            command_tag: "EMPTY".to_string(),
+            rows_affected: 0,
+        }]);
+    }
+
+    Ok(results)
+}
+
+fn import_state_snapshot_impl(snapshot: &str) -> Result<String, String> {
+    let trimmed = snapshot.trim();
+    if trimmed.is_empty() {
+        restore_state(baseline_snapshot_clone());
+        clear_snapshot_log();
+        return Ok("OK (empty snapshot)".to_string());
+    }
+
+    let mut lines = trimmed.lines();
+    let header = lines.next().unwrap_or_default().trim();
+    if header != SNAPSHOT_HEADER {
+        return Err("invalid snapshot header".to_string());
+    }
+
+    let mut replay_entries: Vec<(usize, String)> = Vec::new();
+    for (idx, raw_line) in lines.enumerate() {
+        let line_no = idx + 2;
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let decoded = BASE64_STANDARD
+            .decode(line)
+            .map_err(|_| format!("invalid base64 payload at snapshot line {line_no}"))?;
+        let statement = String::from_utf8(decoded)
+            .map_err(|_| format!("invalid utf8 payload at snapshot line {line_no}"))?;
+        replay_entries.push((line_no, statement));
+    }
+
+    restore_state(baseline_snapshot_clone());
+    clear_snapshot_log();
+
+    let mut replayed = Vec::with_capacity(replay_entries.len());
+    for (line_no, statement) in replay_entries {
+        let out = execute_sql_internal(&statement, false);
+        if let Some(error) = out.strip_prefix("Execution error:") {
+            restore_state(baseline_snapshot_clone());
+            clear_snapshot_log();
+            return Err(format!(
+                "snapshot replay failed at line {}: {}",
+                line_no,
+                error.trim()
+            ));
+        }
+        replayed.push(statement);
+    }
+    replace_snapshot_log(replayed.clone());
+
+    Ok(format!("OK (replayed {} statements)", replayed.len()))
+}
+
+fn ensure_baseline_snapshot() {
+    BASELINE_SNAPSHOT.with(|slot| {
+        if slot.borrow().is_none() {
+            slot.replace(Some(snapshot_state()));
+        }
+    });
+}
+
+fn baseline_snapshot_clone() -> EngineStateSnapshot {
+    ensure_baseline_snapshot();
+    BASELINE_SNAPSHOT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .expect("baseline snapshot should be initialized")
+            .clone()
+    })
+}
+
+fn push_snapshot_log(entry: String) {
+    SNAPSHOT_REPLAY_LOG.with(|log| {
+        log.borrow_mut().push(entry);
+    });
+}
+
+fn replace_snapshot_log(entries: Vec<String>) {
+    SNAPSHOT_REPLAY_LOG.with(|log| {
+        log.replace(entries);
+    });
+}
+
+fn clear_snapshot_log() {
+    SNAPSHOT_REPLAY_LOG.with(|log| {
+        log.borrow_mut().clear();
+    });
+}
+
+fn snapshot_log_entries() -> Vec<String> {
+    SNAPSHOT_REPLAY_LOG.with(|log| log.borrow().clone())
+}
+
+fn render_results(results: &[BrowserQueryResult]) -> String {
+    let mut out = String::new();
+    for (idx, result) in results.iter().enumerate() {
+        if idx > 0 {
+            out.push_str("\n\n");
+        }
+        out.push_str(&render_query_result(result));
+    }
+    out
+}
+
+fn render_query_result(result: &BrowserQueryResult) -> String {
+    if result.columns.is_empty() && result.rows.is_empty() {
+        return format!("{} {}", result.command_tag, result.rows_affected);
+    }
+
+    if result.rows.is_empty() {
+        return format!("{} {}", result.command_tag, result.rows_affected);
+    }
+
+    result
+        .rows
+        .iter()
+        .map(|row| {
+            if row.len() <= 1 {
+                row.first().cloned().unwrap_or_default()
+            } else {
+                row.join("\t")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_results_json_payload(results: &[BrowserQueryResult]) -> String {
+    let result_rows = results
+        .iter()
+        .map(|result| {
+            json!({
+                "columns": result.columns.clone(),
+                "rows": result.rows.clone(),
+                "command_tag": result.command_tag.clone(),
+                "rows_affected": result.rows_affected,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "ok": true,
+        "rendered": render_results(results),
+        "results": result_rows,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+fn reset_browser_snapshot_state_for_tests() {
+    crate::catalog::reset_global_catalog_for_tests();
+    crate::tcop::engine::reset_global_storage_for_tests();
+    BASELINE_SNAPSHOT.with(|slot| {
+        slot.replace(Some(snapshot_state()));
+    });
+    clear_snapshot_log();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        execute_sql, execute_sql_json, export_state_snapshot, import_state_snapshot,
+        reset_browser_snapshot_state_for_tests, reset_state_snapshot,
+    };
+
+    #[test]
+    fn browser_api_executes_multi_statement_sql() {
+        crate::catalog::with_global_state_lock(|| {
+            reset_browser_snapshot_state_for_tests();
+
+            let out = execute_sql(
+                "create table browser_users (id int8, name text);
+                 insert into browser_users values (1, 'Ada');
+                 select * from browser_users;",
+            );
+            assert!(out.contains("Ada"));
+            assert!(out.contains("1\tAda"));
+            assert!(!out.contains("-+-"));
+        });
+    }
+
+    #[test]
+    fn snapshot_export_import_roundtrip_restores_state() {
+        crate::catalog::with_global_state_lock(|| {
+            reset_browser_snapshot_state_for_tests();
+
+            let create_out = execute_sql(
+                "create table browser_snap_users (id int8, name text);
+                 insert into browser_snap_users values (1, 'Ada'), (2, 'Linus');",
+            );
+            assert!(!create_out.starts_with("Execution error:"));
+
+            let snapshot = export_state_snapshot();
+            assert!(snapshot.starts_with("POSTGRUST_BROWSER_SNAPSHOT_V1"));
+
+            let reset_out = reset_state_snapshot();
+            assert_eq!(reset_out, "OK");
+
+            let import_out = import_state_snapshot(&snapshot);
+            assert!(!import_out.starts_with("Execution error:"));
+
+            let select_out = execute_sql("select * from browser_snap_users order by id;");
+            assert!(select_out.contains("Ada"));
+            assert!(select_out.contains("Linus"));
+        });
+    }
+
+    #[test]
+    fn execute_sql_json_returns_structured_results() {
+        crate::catalog::with_global_state_lock(|| {
+            reset_browser_snapshot_state_for_tests();
+            let out = execute_sql_json("select 1 as one, 2 as two;");
+            let parsed: serde_json::Value =
+                serde_json::from_str(&out).expect("json payload should parse");
+
+            assert_eq!(parsed.get("ok"), Some(&serde_json::Value::Bool(true)));
+            assert_eq!(
+                parsed["results"][0]["columns"],
+                serde_json::json!(["one", "two"])
+            );
+            assert_eq!(
+                parsed["results"][0]["rows"],
+                serde_json::json!([["1", "2"]])
+            );
+            assert_eq!(parsed["rendered"], serde_json::json!("1\t2"));
+        });
+    }
+}
