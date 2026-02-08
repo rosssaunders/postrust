@@ -7,4 +7,5 @@
 - `psql_smoke.sh`: launches `pg_server` locally and validates:
   - TLS (`sslmode=require`) connectivity
   - SCRAM authentication flow
+  - `COPY ... TO/FROM STDOUT/STDIN` text and CSV round-trips
   - `COPY ... TO/FROM STDOUT/STDIN BINARY` round-trip

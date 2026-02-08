@@ -373,6 +373,25 @@ fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, String> {
             BackendMessage::DataRow { values } => {
                 current_rows.push(values);
             }
+            BackendMessage::DataRowBinary { values } => {
+                current_rows.push(
+                    values
+                        .into_iter()
+                        .map(|value| match value {
+                            None => "NULL".to_string(),
+                            Some(bytes) => String::from_utf8(bytes.clone()).unwrap_or_else(|_| {
+                                format!(
+                                    "\\x{}",
+                                    bytes
+                                        .iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect::<String>()
+                                )
+                            }),
+                        })
+                        .collect(),
+                );
+            }
             BackendMessage::CommandComplete { tag, rows } => {
                 results.push(BrowserQueryResult {
                     columns: current_columns.take().unwrap_or_default(),

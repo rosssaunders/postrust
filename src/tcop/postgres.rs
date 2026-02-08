@@ -14,6 +14,7 @@ use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 
 use crate::parser::ast::{Expr, QueryExpr, Statement};
+use crate::parser::lexer::{TokenKind, lex_sql};
 use crate::parser::sql_parser::parse_statement;
 use crate::security::{self, CreateRoleOptions, RlsCommand, RlsPolicy, TablePrivilege};
 use crate::tcop::engine::{
@@ -142,6 +143,9 @@ pub enum BackendMessage {
     EmptyQueryResponse,
     DataRow {
         values: Vec<String>,
+    },
+    DataRowBinary {
+        values: Vec<Option<Vec<u8>>>,
     },
     CommandComplete {
         tag: String,
@@ -284,11 +288,20 @@ enum CopyDirection {
     ToStdout,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyFormat {
+    Text,
+    Csv,
+    Binary,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CopyCommand {
     table_name: Vec<String>,
     direction: CopyDirection,
-    binary: bool,
+    format: CopyFormat,
+    delimiter: char,
+    null_marker: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,7 +325,9 @@ enum AuthenticationState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CopyInState {
     table_name: Vec<String>,
-    binary: bool,
+    format: CopyFormat,
+    delimiter: char,
+    null_marker: String,
     column_type_oids: Vec<PgType>,
     payload: Vec<u8>,
 }
@@ -977,6 +992,7 @@ impl PostgresSession {
             });
         }
 
+        let parameter_types = resolve_parse_parameter_types(query_string, parameter_types)?;
         let prepared = PreparedStatement {
             operation,
             parameter_types,
@@ -1024,18 +1040,16 @@ impl PostgresSession {
 
         let normalized_param_formats =
             normalize_format_codes(&param_formats, params.len(), "bind parameter format codes")?;
-        if normalized_param_formats.iter().any(|format| *format != 0) {
-            return Err(SessionError {
-                message: "binary bind parameter formats are not supported yet".to_string(),
-            });
-        }
         let params = params
             .into_iter()
-            .map(|param| match param {
-                None => Ok(None),
-                Some(raw) => String::from_utf8(raw).map(Some).map_err(|_| SessionError {
-                    message: "bind parameter contains invalid UTF-8 text".to_string(),
-                }),
+            .enumerate()
+            .map(|(idx, param)| {
+                decode_bind_parameter(
+                    idx,
+                    param,
+                    normalized_param_formats[idx],
+                    prepared.parameter_types[idx],
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
 
@@ -1048,11 +1062,6 @@ impl PostgresSession {
             result_column_count,
             "bind result format codes",
         )?;
-        if normalized_result_formats.iter().any(|format| *format != 0) {
-            return Err(SessionError {
-                message: "binary result formats are not supported yet".to_string(),
-            });
-        }
 
         if self.is_aborted_transaction_block()
             && !prepared.operation.allowed_in_failed_transaction()
@@ -1235,13 +1244,15 @@ impl PostgresSession {
             }
             ExecutionOutcome::Query(result) => {
                 if let Some((portal, prev_cursor, prev_desc_sent)) = portal_state {
+                    let fields = row_description
+                        .map(|fields| fields.to_vec())
+                        .unwrap_or_else(|| {
+                            infer_row_description_fields(&result.columns, &result.rows)
+                        });
                     if !prev_desc_sent {
-                        let fields = row_description
-                            .map(|fields| fields.to_vec())
-                            .unwrap_or_else(|| {
-                                infer_row_description_fields(&result.columns, &result.rows)
-                            });
-                        out.push(BackendMessage::RowDescription { fields });
+                        out.push(BackendMessage::RowDescription {
+                            fields: fields.clone(),
+                        });
                         portal.row_description_sent = true;
                     }
 
@@ -1258,9 +1269,7 @@ impl PostgresSession {
                     };
 
                     for row in &result.rows[start..end] {
-                        out.push(BackendMessage::DataRow {
-                            values: row.iter().map(ScalarValue::render).collect(),
-                        });
+                        out.push(encode_result_data_row_message(row, &fields)?);
                     }
 
                     portal.cursor = end;
@@ -1278,11 +1287,11 @@ impl PostgresSession {
                 let fields = row_description
                     .map(|fields| fields.to_vec())
                     .unwrap_or_else(|| infer_row_description_fields(&result.columns, &result.rows));
-                out.push(BackendMessage::RowDescription { fields });
+                out.push(BackendMessage::RowDescription {
+                    fields: fields.clone(),
+                });
                 for row in &result.rows {
-                    out.push(BackendMessage::DataRow {
-                        values: row.iter().map(ScalarValue::render).collect(),
-                    });
+                    out.push(encode_result_data_row_message(row, &fields)?);
                 }
                 out.push(BackendMessage::CommandComplete {
                     tag: result.command_tag,
@@ -1290,20 +1299,24 @@ impl PostgresSession {
                 });
                 Ok(())
             }
-            ExecutionOutcome::CopyInStart { column_formats } => {
+            ExecutionOutcome::CopyInStart {
+                overall_format,
+                column_formats,
+            } => {
                 out.push(BackendMessage::CopyInResponse {
-                    overall_format: 1,
+                    overall_format,
                     column_formats,
                 });
                 Ok(())
             }
             ExecutionOutcome::CopyOut {
+                overall_format,
                 column_formats,
                 data,
                 rows,
             } => {
                 out.push(BackendMessage::CopyOutResponse {
-                    overall_format: 1,
+                    overall_format,
                     column_formats,
                 });
                 if !data.is_empty() {
@@ -1421,38 +1434,58 @@ impl PostgresSession {
             }
             PlannedOperation::Copy(command) => match command.direction {
                 CopyDirection::FromStdin => {
-                    if !command.binary {
-                        return Err(SessionError {
-                            message: "COPY FROM STDIN requires BINARY in this implementation"
-                                .to_string(),
-                        });
-                    }
                     let column_type_oids = self.copy_column_type_oids(&command.table_name)?;
+                    let (overall_format, column_formats) = match command.format {
+                        CopyFormat::Binary => (1, vec![1i16; column_type_oids.len()]),
+                        CopyFormat::Text | CopyFormat::Csv => {
+                            (0, vec![0i16; column_type_oids.len()])
+                        }
+                    };
                     self.copy_in_state = Some(CopyInState {
                         table_name: command.table_name.clone(),
-                        binary: command.binary,
+                        format: command.format.clone(),
+                        delimiter: command.delimiter,
+                        null_marker: command.null_marker.clone(),
                         column_type_oids: column_type_oids.clone(),
                         payload: Vec::new(),
                     });
-                    let column_formats = vec![1i16; column_type_oids.len()];
-                    Ok(ExecutionOutcome::CopyInStart { column_formats })
+                    Ok(ExecutionOutcome::CopyInStart {
+                        overall_format,
+                        column_formats,
+                    })
                 }
                 CopyDirection::ToStdout => {
-                    if !command.binary {
-                        return Err(SessionError {
-                            message: "COPY TO STDOUT requires BINARY in this implementation"
-                                .to_string(),
-                        });
-                    }
                     let snapshot = match self.tx_state.visibility_mode() {
                         VisibilityMode::Global => self.copy_snapshot(&command.table_name)?,
                         VisibilityMode::TransactionLocal => {
                             self.copy_snapshot_in_transaction_scope(&command.table_name)?
                         }
                     };
-                    let column_formats = vec![1i16; snapshot.columns.len()];
-                    let data = encode_copy_binary_stream(&snapshot.columns, &snapshot.rows)?;
+                    let snapshot_column_type_oids = snapshot
+                        .columns
+                        .iter()
+                        .map(|column| column.type_oid)
+                        .collect::<Vec<_>>();
+                    let (overall_format, column_formats, data) = match command.format {
+                        CopyFormat::Binary => (
+                            1,
+                            vec![1i16; snapshot.columns.len()],
+                            encode_copy_binary_stream(&snapshot.columns, &snapshot.rows)?,
+                        ),
+                        CopyFormat::Text | CopyFormat::Csv => (
+                            0,
+                            vec![0i16; snapshot.columns.len()],
+                            encode_copy_text_stream(
+                                &snapshot.rows,
+                                &snapshot_column_type_oids,
+                                command.delimiter,
+                                &command.null_marker,
+                                matches!(command.format, CopyFormat::Csv),
+                            )?,
+                        ),
+                    };
                     Ok(ExecutionOutcome::CopyOut {
+                        overall_format,
                         column_formats,
                         data,
                         rows: snapshot.rows.len() as u64,
@@ -1721,11 +1754,6 @@ impl PostgresSession {
                 message: "COPY data was sent without COPY IN state".to_string(),
             });
         };
-        if !state.binary {
-            return Err(SessionError {
-                message: "COPY text protocol is not implemented".to_string(),
-            });
-        }
         state.payload.extend_from_slice(&data);
         Ok(())
     }
@@ -1734,7 +1762,18 @@ impl PostgresSession {
         let state = self.copy_in_state.take().ok_or_else(|| SessionError {
             message: "COPY done was sent without COPY IN state".to_string(),
         })?;
-        let rows = parse_copy_binary_stream(&state.payload, &state.column_type_oids)?;
+        let rows = match state.format {
+            CopyFormat::Binary => {
+                parse_copy_binary_stream(&state.payload, &state.column_type_oids)?
+            }
+            CopyFormat::Text | CopyFormat::Csv => parse_copy_text_stream(
+                &state.payload,
+                &state.column_type_oids,
+                state.delimiter,
+                &state.null_marker,
+                matches!(state.format, CopyFormat::Csv),
+            )?,
+        };
 
         let inserted = match self.tx_state.visibility_mode() {
             VisibilityMode::Global => security::with_current_role(&self.current_role, || {
@@ -1876,9 +1915,11 @@ enum ExecutionOutcome {
     Query(QueryResult),
     Command(Completion),
     CopyInStart {
+        overall_format: i8,
         column_formats: Vec<i16>,
     },
     CopyOut {
+        overall_format: i8,
         column_formats: Vec<i16>,
         data: Vec<u8>,
         rows: u64,
@@ -1987,41 +2028,210 @@ fn parse_copy_command(query: &str) -> Result<Option<CopyCommand>, SessionError> 
     if let Some(to_pos) = upper.find(" TO ") {
         let table_name = security::parse_qualified_name(trimmed["COPY ".len()..to_pos].trim());
         let target = trimmed[to_pos + " TO ".len()..].trim();
-        if !target.eq_ignore_ascii_case("STDOUT BINARY")
-            && !target.eq_ignore_ascii_case("STDOUT (FORMAT BINARY)")
-        {
-            return Err(SessionError {
-                message: "only COPY ... TO STDOUT BINARY is supported".to_string(),
-            });
-        }
+        let (format, delimiter, null_marker) =
+            parse_copy_target_spec(target, CopyDirection::ToStdout)?;
         return Ok(Some(CopyCommand {
             table_name,
             direction: CopyDirection::ToStdout,
-            binary: true,
+            format,
+            delimiter,
+            null_marker,
         }));
     }
 
     if let Some(from_pos) = upper.find(" FROM ") {
         let table_name = security::parse_qualified_name(trimmed["COPY ".len()..from_pos].trim());
         let target = trimmed[from_pos + " FROM ".len()..].trim();
-        if !target.eq_ignore_ascii_case("STDIN BINARY")
-            && !target.eq_ignore_ascii_case("STDIN (FORMAT BINARY)")
-        {
-            return Err(SessionError {
-                message: "only COPY ... FROM STDIN BINARY is supported".to_string(),
-            });
-        }
+        let (format, delimiter, null_marker) =
+            parse_copy_target_spec(target, CopyDirection::FromStdin)?;
         return Ok(Some(CopyCommand {
             table_name,
             direction: CopyDirection::FromStdin,
-            binary: true,
+            format,
+            delimiter,
+            null_marker,
         }));
     }
 
     Err(SessionError {
-        message: "unsupported COPY command (expected COPY <table> TO/FROM STDOUT/STDIN BINARY)"
+        message: "unsupported COPY command (expected COPY <table> TO/FROM STDOUT/STDIN ...)"
             .to_string(),
     })
+}
+
+fn parse_copy_target_spec(
+    target: &str,
+    direction: CopyDirection,
+) -> Result<(CopyFormat, char, String), SessionError> {
+    let (prefix, rest) = match direction {
+        CopyDirection::ToStdout => ("STDOUT", "TO"),
+        CopyDirection::FromStdin => ("STDIN", "FROM"),
+    };
+    if !starts_with_keyword(target, prefix) {
+        return Err(SessionError {
+            message: format!("COPY {} requires {}", rest, prefix),
+        });
+    }
+    let mut remainder = target[prefix.len()..].trim();
+
+    let mut format = if remainder.is_empty() {
+        CopyFormat::Text
+    } else {
+        CopyFormat::Text
+    };
+    let mut delimiter: Option<char> = None;
+    let mut null_marker: Option<String> = None;
+
+    if !remainder.is_empty() {
+        if let Some(inner) = remainder
+            .strip_prefix('(')
+            .and_then(|value| value.strip_suffix(')'))
+        {
+            for token in split_copy_option_tokens(inner) {
+                parse_copy_option_token(&token, &mut format, &mut delimiter, &mut null_marker)?;
+            }
+            remainder = "";
+        } else {
+            match remainder.to_ascii_uppercase().as_str() {
+                "BINARY" => format = CopyFormat::Binary,
+                "CSV" => format = CopyFormat::Csv,
+                "TEXT" => format = CopyFormat::Text,
+                other => {
+                    return Err(SessionError {
+                        message: format!("unsupported COPY target option {}", other),
+                    });
+                }
+            }
+            remainder = "";
+        }
+    }
+
+    if !remainder.is_empty() {
+        return Err(SessionError {
+            message: "unsupported COPY target syntax".to_string(),
+        });
+    }
+
+    let delimiter = delimiter.unwrap_or(match format {
+        CopyFormat::Csv => ',',
+        _ => '\t',
+    });
+    let null_marker = null_marker.unwrap_or(match format {
+        CopyFormat::Csv => "".to_string(),
+        _ => "\\N".to_string(),
+    });
+
+    Ok((format, delimiter, null_marker))
+}
+
+fn split_copy_option_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let chars = text.chars().peekable();
+    for ch in chars {
+        if ch == '\'' {
+            in_quote = !in_quote;
+            current.push(ch);
+            continue;
+        }
+        if ch == ',' && !in_quote {
+            let token = current.trim();
+            if !token.is_empty() {
+                tokens.push(token.to_string());
+            }
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+    }
+    let token = current.trim();
+    if !token.is_empty() {
+        tokens.push(token.to_string());
+    }
+    tokens
+}
+
+fn parse_copy_option_token(
+    token: &str,
+    format: &mut CopyFormat,
+    delimiter: &mut Option<char>,
+    null_marker: &mut Option<String>,
+) -> Result<(), SessionError> {
+    let upper = token.to_ascii_uppercase();
+    if upper == "BINARY" {
+        *format = CopyFormat::Binary;
+        return Ok(());
+    }
+    if upper == "CSV" {
+        *format = CopyFormat::Csv;
+        return Ok(());
+    }
+    if upper == "TEXT" {
+        *format = CopyFormat::Text;
+        return Ok(());
+    }
+    if let Some(rest) = strip_prefix_keyword(token, "FORMAT ") {
+        *format = match rest.trim().to_ascii_uppercase().as_str() {
+            "BINARY" => CopyFormat::Binary,
+            "CSV" => CopyFormat::Csv,
+            "TEXT" => CopyFormat::Text,
+            other => {
+                return Err(SessionError {
+                    message: format!("unsupported COPY FORMAT option {}", other),
+                });
+            }
+        };
+        return Ok(());
+    }
+    if let Some(rest) = strip_prefix_keyword(token, "DELIMITER ") {
+        let parsed = parse_copy_quoted_value(rest.trim(), "DELIMITER")?;
+        let mut chars = parsed.chars();
+        let ch = chars.next().ok_or_else(|| SessionError {
+            message: "COPY DELIMITER cannot be empty".to_string(),
+        })?;
+        if chars.next().is_some() {
+            return Err(SessionError {
+                message: "COPY DELIMITER must be a single character".to_string(),
+            });
+        }
+        *delimiter = Some(ch);
+        return Ok(());
+    }
+    if let Some(rest) = strip_prefix_keyword(token, "NULL ") {
+        *null_marker = Some(parse_copy_quoted_value(rest.trim(), "NULL")?);
+        return Ok(());
+    }
+    Err(SessionError {
+        message: format!("unsupported COPY option {}", token),
+    })
+}
+
+fn parse_copy_quoted_value(text: &str, option_name: &str) -> Result<String, SessionError> {
+    let Some(inner) = text
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    else {
+        return Err(SessionError {
+            message: format!("COPY {} requires a single-quoted string", option_name),
+        });
+    };
+    let mut out = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\'' {
+            if chars.peek() == Some(&'\'') {
+                chars.next();
+                out.push('\'');
+                continue;
+            }
+            return Err(SessionError {
+                message: format!("COPY {} string literal is invalid", option_name),
+            });
+        }
+        out.push(ch);
+    }
+    Ok(out)
 }
 
 fn parse_security_command(query: &str) -> Result<Option<SecurityCommand>, SessionError> {
@@ -2730,6 +2940,71 @@ fn normalize_format_codes(
     Ok(formats)
 }
 
+fn resolve_parse_parameter_types(
+    query_string: &str,
+    mut parameter_types: Vec<PgType>,
+) -> Result<Vec<PgType>, SessionError> {
+    let mut max_index = 0usize;
+    let tokens = lex_sql(query_string).map_err(|err| SessionError {
+        message: format!("parse error: {}", err),
+    })?;
+    for token in tokens {
+        if let TokenKind::Parameter(index) = token.kind {
+            if index <= 0 {
+                return Err(SessionError {
+                    message: format!("invalid parameter reference ${index}"),
+                });
+            }
+            max_index = max_index.max(index as usize);
+        }
+    }
+
+    if max_index > parameter_types.len() {
+        parameter_types.resize(max_index, 0);
+    }
+    Ok(parameter_types)
+}
+
+fn decode_bind_parameter(
+    index: usize,
+    param: Option<Vec<u8>>,
+    format_code: i16,
+    type_oid: PgType,
+) -> Result<Option<String>, SessionError> {
+    let Some(raw) = param else {
+        return Ok(None);
+    };
+
+    let decoded = match format_code {
+        0 => String::from_utf8(raw).map_err(|_| SessionError {
+            message: format!("bind parameter ${} contains invalid UTF-8 text", index + 1),
+        })?,
+        1 => decode_binary_bind_parameter(index, &raw, type_oid)?,
+        other => {
+            return Err(SessionError {
+                message: format!("unsupported bind parameter format code {}", other),
+            });
+        }
+    };
+    Ok(Some(decoded))
+}
+
+fn decode_binary_bind_parameter(
+    index: usize,
+    raw: &[u8],
+    type_oid: PgType,
+) -> Result<String, SessionError> {
+    if type_oid == 0 {
+        return String::from_utf8(raw.to_vec()).map_err(|_| SessionError {
+            message: format!(
+                "bind parameter ${} has binary format but unknown type",
+                index + 1
+            ),
+        });
+    }
+    Ok(decode_binary_scalar(raw, type_oid, "bind parameter")?.render())
+}
+
 fn infer_row_description_fields(
     columns: &[String],
     rows: &[Vec<ScalarValue>],
@@ -2804,6 +3079,590 @@ fn fill_random_bytes(out: &mut [u8]) {
     });
 }
 
+fn encode_result_data_row_message(
+    row: &[ScalarValue],
+    fields: &[RowDescriptionField],
+) -> Result<BackendMessage, SessionError> {
+    if row.len() != fields.len() {
+        return Err(SessionError {
+            message: "row width does not match row description field count".to_string(),
+        });
+    }
+    let requires_binary = fields.iter().any(|field| field.format_code == 1)
+        || row.iter().any(|value| matches!(value, ScalarValue::Null));
+    if !requires_binary {
+        return Ok(BackendMessage::DataRow {
+            values: row.iter().map(ScalarValue::render).collect(),
+        });
+    }
+
+    let mut values = Vec::with_capacity(row.len());
+    for (value, field) in row.iter().zip(fields.iter()) {
+        values.push(encode_result_field(value, field)?);
+    }
+    Ok(BackendMessage::DataRowBinary { values })
+}
+
+fn encode_result_field(
+    value: &ScalarValue,
+    field: &RowDescriptionField,
+) -> Result<Option<Vec<u8>>, SessionError> {
+    if matches!(value, ScalarValue::Null) {
+        return Ok(None);
+    }
+    let encoded = match field.format_code {
+        0 => value.render().into_bytes(),
+        1 => encode_binary_scalar(value, field.type_oid, "result")?,
+        other => {
+            return Err(SessionError {
+                message: format!("unsupported result format code {}", other),
+            });
+        }
+    };
+    Ok(Some(encoded))
+}
+
+fn encode_binary_scalar(
+    value: &ScalarValue,
+    type_oid: PgType,
+    context: &str,
+) -> Result<Vec<u8>, SessionError> {
+    match (type_oid, value) {
+        (16, ScalarValue::Bool(v)) => Ok(vec![if *v { 1 } else { 0 }]),
+        (20, ScalarValue::Int(v)) => Ok(v.to_be_bytes().to_vec()),
+        (701, ScalarValue::Float(v)) => Ok(v.to_bits().to_be_bytes().to_vec()),
+        (25, ScalarValue::Text(v)) => Ok(v.as_bytes().to_vec()),
+        (25, other) => Ok(other.render().into_bytes()),
+        (20, ScalarValue::Text(v)) => v
+            .trim()
+            .parse::<i64>()
+            .map(|parsed| parsed.to_be_bytes().to_vec())
+            .map_err(|_| SessionError {
+                message: format!("{} integer field is invalid", context),
+            }),
+        (701, ScalarValue::Text(v)) => v
+            .trim()
+            .parse::<f64>()
+            .map(|parsed| parsed.to_bits().to_be_bytes().to_vec())
+            .map_err(|_| SessionError {
+                message: format!("{} float field is invalid", context),
+            }),
+        (16, ScalarValue::Text(v)) => match v.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "1" => Ok(vec![1]),
+            "false" | "f" | "0" => Ok(vec![0]),
+            _ => Err(SessionError {
+                message: format!("{} boolean field is invalid", context),
+            }),
+        },
+        (1082, ScalarValue::Text(v)) => {
+            let days = parse_pg_date_days(v)?;
+            Ok(days.to_be_bytes().to_vec())
+        }
+        (1114, ScalarValue::Text(v)) => {
+            let micros = parse_pg_timestamp_micros(v)?;
+            Ok(micros.to_be_bytes().to_vec())
+        }
+        (_, ScalarValue::Null) => Ok(Vec::new()),
+        _ => Err(SessionError {
+            message: format!("{} binary type oid {} is not supported", context, type_oid),
+        }),
+    }
+}
+
+fn decode_binary_scalar(
+    raw: &[u8],
+    type_oid: PgType,
+    context: &str,
+) -> Result<ScalarValue, SessionError> {
+    match type_oid {
+        16 => {
+            if raw.len() != 1 {
+                return Err(SessionError {
+                    message: format!("{} boolean field length must be 1", context),
+                });
+            }
+            Ok(ScalarValue::Bool(raw[0] != 0))
+        }
+        20 => {
+            if raw.len() != 8 {
+                return Err(SessionError {
+                    message: format!("{} int8 field length must be 8", context),
+                });
+            }
+            Ok(ScalarValue::Int(i64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ])))
+        }
+        701 => {
+            if raw.len() != 8 {
+                return Err(SessionError {
+                    message: format!("{} float8 field length must be 8", context),
+                });
+            }
+            let bits = u64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ]);
+            Ok(ScalarValue::Float(f64::from_bits(bits)))
+        }
+        25 => Ok(ScalarValue::Text(String::from_utf8(raw.to_vec()).map_err(
+            |_| SessionError {
+                message: format!("{} text field is not valid utf8", context),
+            },
+        )?)),
+        1082 => {
+            if raw.len() != 4 {
+                return Err(SessionError {
+                    message: format!("{} date field length must be 4", context),
+                });
+            }
+            let days = i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+            Ok(ScalarValue::Text(format_pg_date_from_days(days)))
+        }
+        1114 => {
+            if raw.len() != 8 {
+                return Err(SessionError {
+                    message: format!("{} timestamp field length must be 8", context),
+                });
+            }
+            let micros = i64::from_be_bytes([
+                raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+            ]);
+            Ok(ScalarValue::Text(format_pg_timestamp_from_micros(micros)))
+        }
+        other => Err(SessionError {
+            message: format!("{} binary type oid {} is not supported", context, other),
+        }),
+    }
+}
+
+fn parse_pg_date_days(text: &str) -> Result<i32, SessionError> {
+    let (year, month, day) = parse_date_ymd(text.trim())?;
+    let day_number = days_from_civil(year, month, day);
+    let pg_epoch = days_from_civil(2000, 1, 1);
+    let delta = day_number - pg_epoch;
+    i32::try_from(delta).map_err(|_| SessionError {
+        message: "date value is out of range".to_string(),
+    })
+}
+
+fn parse_pg_timestamp_micros(text: &str) -> Result<i64, SessionError> {
+    let trimmed = text.trim();
+    let (date_part, time_part) = if let Some((date, time)) = trimmed.split_once(' ') {
+        (date, time)
+    } else if let Some((date, time)) = trimmed.split_once('T') {
+        (date, time)
+    } else {
+        (trimmed, "00:00:00")
+    };
+    let (year, month, day) = parse_date_ymd(date_part.trim())?;
+    let (hour, minute, second, micros) = parse_time_hms_micros(time_part.trim())?;
+    let day_number = days_from_civil(year, month, day);
+    let pg_epoch = days_from_civil(2000, 1, 1);
+    let delta_days = day_number - pg_epoch;
+    let seconds_of_day = (hour as i64) * 3600 + (minute as i64) * 60 + second as i64;
+    Ok(delta_days * 86_400_000_000 + seconds_of_day * 1_000_000 + micros as i64)
+}
+
+fn format_pg_date_from_days(days: i32) -> String {
+    let pg_epoch = days_from_civil(2000, 1, 1);
+    let absolute_days = pg_epoch + days as i64;
+    let (year, month, day) = civil_from_days(absolute_days);
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+fn format_pg_timestamp_from_micros(micros: i64) -> String {
+    let pg_epoch = days_from_civil(2000, 1, 1);
+    let day_micros = 86_400_000_000i64;
+    let days = micros.div_euclid(day_micros);
+    let micros_of_day = micros.rem_euclid(day_micros);
+    let absolute_days = pg_epoch + days;
+    let (year, month, day) = civil_from_days(absolute_days);
+    let hour = micros_of_day / 3_600_000_000;
+    let minute = (micros_of_day % 3_600_000_000) / 60_000_000;
+    let second = (micros_of_day % 60_000_000) / 1_000_000;
+    let fractional = micros_of_day % 1_000_000;
+    if fractional == 0 {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            year, month, day, hour, minute, second
+        )
+    } else {
+        format!(
+            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+            year, month, day, hour, minute, second, fractional
+        )
+    }
+}
+
+fn parse_date_ymd(text: &str) -> Result<(i32, u32, u32), SessionError> {
+    let parts = text.split('-').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(SessionError {
+            message: "date value is invalid".to_string(),
+        });
+    }
+    let year = parts[0].parse::<i32>().map_err(|_| SessionError {
+        message: "date year is invalid".to_string(),
+    })?;
+    let month = parts[1].parse::<u32>().map_err(|_| SessionError {
+        message: "date month is invalid".to_string(),
+    })?;
+    let day = parts[2].parse::<u32>().map_err(|_| SessionError {
+        message: "date day is invalid".to_string(),
+    })?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return Err(SessionError {
+            message: "date value is out of range".to_string(),
+        });
+    }
+    Ok((year, month, day))
+}
+
+fn parse_time_hms_micros(text: &str) -> Result<(u32, u32, u32, u32), SessionError> {
+    let parts = text.split(':').collect::<Vec<_>>();
+    if parts.len() != 3 {
+        return Err(SessionError {
+            message: "timestamp time component is invalid".to_string(),
+        });
+    }
+    let hour = parts[0].parse::<u32>().map_err(|_| SessionError {
+        message: "timestamp hour is invalid".to_string(),
+    })?;
+    let minute = parts[1].parse::<u32>().map_err(|_| SessionError {
+        message: "timestamp minute is invalid".to_string(),
+    })?;
+    let (second, micros) = if let Some((sec, frac)) = parts[2].split_once('.') {
+        let second = sec.parse::<u32>().map_err(|_| SessionError {
+            message: "timestamp second is invalid".to_string(),
+        })?;
+        let digits = frac
+            .chars()
+            .take(6)
+            .filter(|ch| ch.is_ascii_digit())
+            .collect::<String>();
+        let mut micros_text = digits;
+        while micros_text.len() < 6 {
+            micros_text.push('0');
+        }
+        let micros = if micros_text.is_empty() {
+            0
+        } else {
+            micros_text.parse::<u32>().map_err(|_| SessionError {
+                message: "timestamp fractional second is invalid".to_string(),
+            })?
+        };
+        (second, micros)
+    } else {
+        let second = parts[2].parse::<u32>().map_err(|_| SessionError {
+            message: "timestamp second is invalid".to_string(),
+        })?;
+        (second, 0)
+    };
+    if hour > 23 || minute > 59 || second > 59 {
+        return Err(SessionError {
+            message: "timestamp time is out of range".to_string(),
+        });
+    }
+    Ok((hour, minute, second, micros))
+}
+
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let mut y = year;
+    let m = month as i32;
+    y -= (m <= 2) as i32;
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era as i64 * 146_097 + doe as i64 - 719_468
+}
+
+fn civil_from_days(days: i64) -> (i32, u32, u32) {
+    let days = days + 719_468;
+    let era = if days >= 0 { days } else { days - 146_096 } / 146_097;
+    let doe = days - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
+
+#[derive(Debug, Clone)]
+struct ParsedCopyTextField {
+    value: String,
+    quoted: bool,
+}
+
+fn encode_copy_text_stream(
+    rows: &[Vec<ScalarValue>],
+    column_type_oids: &[PgType],
+    delimiter: char,
+    null_marker: &str,
+    csv: bool,
+) -> Result<Vec<u8>, SessionError> {
+    let mut out = String::new();
+    for row in rows {
+        if row.len() != column_type_oids.len() {
+            return Err(SessionError {
+                message: "COPY row width does not match relation column count".to_string(),
+            });
+        }
+        let line = if csv {
+            encode_copy_csv_row(row, delimiter, null_marker)
+        } else {
+            encode_copy_text_row(row, delimiter, null_marker)
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    Ok(out.into_bytes())
+}
+
+fn encode_copy_text_row(row: &[ScalarValue], delimiter: char, null_marker: &str) -> String {
+    row.iter()
+        .map(|value| match value {
+            ScalarValue::Null => null_marker.to_string(),
+            other => escape_copy_text_value(&other.render(), delimiter),
+        })
+        .collect::<Vec<_>>()
+        .join(&delimiter.to_string())
+}
+
+fn escape_copy_text_value(value: &str, delimiter: char) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            _ if ch == delimiter => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn encode_copy_csv_row(row: &[ScalarValue], delimiter: char, null_marker: &str) -> String {
+    row.iter()
+        .map(|value| match value {
+            ScalarValue::Null => null_marker.to_string(),
+            other => {
+                let text = other.render();
+                let must_quote = text.contains(delimiter)
+                    || text.contains('\n')
+                    || text.contains('\r')
+                    || text.contains('"')
+                    || text == null_marker;
+                if must_quote {
+                    let escaped = text.replace('"', "\"\"");
+                    format!("\"{}\"", escaped)
+                } else {
+                    text
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(&delimiter.to_string())
+}
+
+fn parse_copy_text_stream(
+    payload: &[u8],
+    column_type_oids: &[PgType],
+    delimiter: char,
+    null_marker: &str,
+    csv: bool,
+) -> Result<Vec<Vec<ScalarValue>>, SessionError> {
+    let text = String::from_utf8(payload.to_vec()).map_err(|_| SessionError {
+        message: "COPY text payload is not valid utf8".to_string(),
+    })?;
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut rows = Vec::new();
+    let lines = text.split('\n').collect::<Vec<_>>();
+    for (idx, raw_line) in lines.iter().enumerate() {
+        let mut line = *raw_line;
+        if let Some(stripped) = line.strip_suffix('\r') {
+            line = stripped;
+        }
+        if line.is_empty() && idx + 1 == lines.len() {
+            continue;
+        }
+        let fields = if csv {
+            parse_copy_csv_line(line, delimiter)?
+        } else {
+            parse_copy_text_line(line, delimiter)
+        };
+        if fields.len() != column_type_oids.len() {
+            return Err(SessionError {
+                message: format!(
+                    "COPY row has {} columns but relation expects {}",
+                    fields.len(),
+                    column_type_oids.len()
+                ),
+            });
+        }
+        let mut row = Vec::with_capacity(fields.len());
+        for (field, type_oid) in fields.iter().zip(column_type_oids.iter()) {
+            row.push(parse_copy_text_field(field, *type_oid, null_marker)?);
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+fn parse_copy_text_line(line: &str, delimiter: char) -> Vec<ParsedCopyTextField> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            let decoded = match ch {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            };
+            current.push(decoded);
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if ch == delimiter {
+            fields.push(ParsedCopyTextField {
+                value: std::mem::take(&mut current),
+                quoted: false,
+            });
+            continue;
+        }
+        current.push(ch);
+    }
+    if escaped {
+        current.push('\\');
+    }
+    fields.push(ParsedCopyTextField {
+        value: current,
+        quoted: false,
+    });
+    fields
+}
+
+fn parse_copy_csv_line(
+    line: &str,
+    delimiter: char,
+) -> Result<Vec<ParsedCopyTextField>, SessionError> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut quoted = false;
+    let chars = line.chars().collect::<Vec<_>>();
+    let mut idx = 0usize;
+    while idx < chars.len() {
+        let ch = chars[idx];
+        if in_quotes {
+            if ch == '"' {
+                if idx + 1 < chars.len() && chars[idx + 1] == '"' {
+                    current.push('"');
+                    idx += 2;
+                    continue;
+                }
+                in_quotes = false;
+                idx += 1;
+                continue;
+            }
+            current.push(ch);
+            idx += 1;
+            continue;
+        }
+        if ch == delimiter {
+            fields.push(ParsedCopyTextField {
+                value: std::mem::take(&mut current),
+                quoted,
+            });
+            quoted = false;
+            idx += 1;
+            continue;
+        }
+        if ch == '"' && current.is_empty() {
+            in_quotes = true;
+            quoted = true;
+            idx += 1;
+            continue;
+        }
+        current.push(ch);
+        idx += 1;
+    }
+    if in_quotes {
+        return Err(SessionError {
+            message: "COPY CSV payload has unterminated quoted field".to_string(),
+        });
+    }
+    fields.push(ParsedCopyTextField {
+        value: current,
+        quoted,
+    });
+    Ok(fields)
+}
+
+fn parse_copy_text_field(
+    field: &ParsedCopyTextField,
+    type_oid: PgType,
+    null_marker: &str,
+) -> Result<ScalarValue, SessionError> {
+    if !field.quoted && field.value == null_marker {
+        return Ok(ScalarValue::Null);
+    }
+    match type_oid {
+        16 => match field.value.trim().to_ascii_lowercase().as_str() {
+            "true" | "t" | "1" => Ok(ScalarValue::Bool(true)),
+            "false" | "f" | "0" => Ok(ScalarValue::Bool(false)),
+            _ => Err(SessionError {
+                message: "COPY boolean field is invalid".to_string(),
+            }),
+        },
+        20 => field
+            .value
+            .trim()
+            .parse::<i64>()
+            .map(ScalarValue::Int)
+            .map_err(|_| SessionError {
+                message: "COPY integer field is invalid".to_string(),
+            }),
+        701 => field
+            .value
+            .trim()
+            .parse::<f64>()
+            .map(ScalarValue::Float)
+            .map_err(|_| SessionError {
+                message: "COPY float field is invalid".to_string(),
+            }),
+        25 => Ok(ScalarValue::Text(field.value.clone())),
+        1082 => {
+            let days = parse_pg_date_days(field.value.trim())?;
+            Ok(ScalarValue::Text(format_pg_date_from_days(days)))
+        }
+        1114 => {
+            let micros = parse_pg_timestamp_micros(field.value.trim())?;
+            Ok(ScalarValue::Text(format_pg_timestamp_from_micros(micros)))
+        }
+        other => Err(SessionError {
+            message: format!("unsupported COPY type oid {}", other),
+        }),
+    }
+}
+
 fn encode_copy_binary_stream(
     columns: &[crate::tcop::engine::CopyBinaryColumn],
     rows: &[Vec<ScalarValue>],
@@ -2838,44 +3697,7 @@ fn encode_copy_binary_field(
         return Ok(());
     }
 
-    let bytes = match (type_oid, value) {
-        (16, ScalarValue::Bool(v)) => vec![if *v { 1 } else { 0 }],
-        (20, ScalarValue::Int(v)) => v.to_be_bytes().to_vec(),
-        (701, ScalarValue::Float(v)) => v.to_bits().to_be_bytes().to_vec(),
-        (25, ScalarValue::Text(v)) => v.as_bytes().to_vec(),
-        (25, other) => other.render().into_bytes(),
-        (20, ScalarValue::Text(v)) => v
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| SessionError {
-                message: "COPY integer field is invalid".to_string(),
-            })?
-            .to_be_bytes()
-            .to_vec(),
-        (701, ScalarValue::Text(v)) => v
-            .trim()
-            .parse::<f64>()
-            .map_err(|_| SessionError {
-                message: "COPY float field is invalid".to_string(),
-            })?
-            .to_bits()
-            .to_be_bytes()
-            .to_vec(),
-        (16, ScalarValue::Text(v)) => match v.trim().to_ascii_lowercase().as_str() {
-            "true" | "t" | "1" => vec![1],
-            "false" | "f" | "0" => vec![0],
-            _ => {
-                return Err(SessionError {
-                    message: "COPY boolean field is invalid".to_string(),
-                });
-            }
-        },
-        _ => {
-            return Err(SessionError {
-                message: format!("COPY binary type oid {} is not supported", type_oid),
-            });
-        }
-    };
+    let bytes = encode_binary_scalar(value, type_oid, "COPY")?;
     out.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
     out.extend_from_slice(&bytes);
     Ok(())
@@ -2954,47 +3776,7 @@ fn parse_copy_binary_stream(
                 });
             }
             let raw = read_bytes(&mut idx, len as usize)?;
-            let value = match *type_oid {
-                16 => {
-                    if raw.len() != 1 {
-                        return Err(SessionError {
-                            message: "COPY boolean field length must be 1".to_string(),
-                        });
-                    }
-                    ScalarValue::Bool(raw[0] != 0)
-                }
-                20 => {
-                    if raw.len() != 8 {
-                        return Err(SessionError {
-                            message: "COPY int8 field length must be 8".to_string(),
-                        });
-                    }
-                    ScalarValue::Int(i64::from_be_bytes([
-                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                    ]))
-                }
-                701 => {
-                    if raw.len() != 8 {
-                        return Err(SessionError {
-                            message: "COPY float8 field length must be 8".to_string(),
-                        });
-                    }
-                    let bits = u64::from_be_bytes([
-                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                    ]);
-                    ScalarValue::Float(f64::from_bits(bits))
-                }
-                25 => ScalarValue::Text(String::from_utf8(raw.to_vec()).map_err(|_| {
-                    SessionError {
-                        message: "COPY text field is not valid utf8".to_string(),
-                    }
-                })?),
-                other => {
-                    return Err(SessionError {
-                        message: format!("unsupported COPY type oid {}", other),
-                    });
-                }
-            };
+            let value = decode_binary_scalar(raw, *type_oid, "COPY")?;
             row.push(value);
         }
         rows.push(row);
@@ -3120,6 +3902,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_infers_parameter_slots_when_type_oids_are_omitted() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([
+                FrontendMessage::Parse {
+                    statement_name: "s1".to_string(),
+                    query: "SELECT $1 + 1".to_string(),
+                    parameter_types: vec![],
+                },
+                FrontendMessage::DescribeStatement {
+                    statement_name: "s1".to_string(),
+                },
+                FrontendMessage::Sync,
+            ])
+        });
+
+        assert!(out.iter().any(|msg| {
+            matches!(
+                msg,
+                BackendMessage::ParameterDescription { parameter_types }
+                    if parameter_types == &vec![0]
+            )
+        }));
+    }
+
+    #[test]
+    fn bind_accepts_parameters_when_parse_omits_type_oids() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([
+                FrontendMessage::Parse {
+                    statement_name: "s1".to_string(),
+                    query: "SELECT $1 + 1".to_string(),
+                    parameter_types: vec![],
+                },
+                FrontendMessage::Bind {
+                    portal_name: "p1".to_string(),
+                    statement_name: "s1".to_string(),
+                    param_formats: vec![],
+                    params: vec![Some(b"41".to_vec())],
+                    result_formats: vec![],
+                },
+                FrontendMessage::Execute {
+                    portal_name: "p1".to_string(),
+                    max_rows: 0,
+                },
+                FrontendMessage::Sync,
+            ])
+        });
+
+        assert!(out.iter().any(|msg| {
+            matches!(msg, BackendMessage::DataRow { values } if values == &vec!["42".to_string()])
+        }));
+    }
+
+    #[test]
     fn describe_statement_uses_planned_type_metadata() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
@@ -3147,19 +3985,24 @@ mod tests {
             })
             .expect("row description should be present");
         assert_eq!(
-            fields.iter().map(|field| field.type_oid).collect::<Vec<_>>(),
+            fields
+                .iter()
+                .map(|field| field.type_oid)
+                .collect::<Vec<_>>(),
             vec![20, 25, 16]
         );
     }
 
     #[test]
-    fn bind_rejects_binary_result_format_codes() {
+    fn bind_supports_binary_result_format_codes() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
             session.run([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
-                    query: "SELECT 1".to_string(),
+                    query:
+                        "SELECT 1::int8 AS id, true AS ok, 1.5::float8 AS score, 'x'::text AS note"
+                            .to_string(),
                     parameter_types: vec![],
                 },
                 FrontendMessage::Bind {
@@ -3169,6 +4012,123 @@ mod tests {
                     params: vec![],
                     result_formats: vec![1],
                 },
+                FrontendMessage::Execute {
+                    portal_name: "p1".to_string(),
+                    max_rows: 0,
+                },
+                FrontendMessage::Sync,
+            ])
+        });
+
+        let fields = out
+            .iter()
+            .find_map(|msg| {
+                if let BackendMessage::RowDescription { fields } = msg {
+                    Some(fields.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("row description should be present");
+        assert!(fields.iter().all(|field| field.format_code == 1));
+
+        let values = out
+            .iter()
+            .find_map(|msg| {
+                if let BackendMessage::DataRowBinary { values } = msg {
+                    Some(values.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("binary data row should be present");
+        assert_eq!(values.len(), 4);
+        assert_eq!(values[0].as_deref(), Some(&1i64.to_be_bytes().to_vec()[..]));
+        assert_eq!(values[1].as_deref(), Some(&[1u8][..]));
+        assert_eq!(
+            values[2].as_deref(),
+            Some(&1.5f64.to_bits().to_be_bytes().to_vec()[..])
+        );
+        assert_eq!(values[3].as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn bind_supports_binary_parameter_formats() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([
+                FrontendMessage::Parse {
+                    statement_name: "s1".to_string(),
+                    query: "SELECT $1::int8 + 1 AS n, $2::boolean AS ok, $3::text AS note"
+                        .to_string(),
+                    parameter_types: vec![20, 16, 25],
+                },
+                FrontendMessage::Bind {
+                    portal_name: "p1".to_string(),
+                    statement_name: "s1".to_string(),
+                    param_formats: vec![1],
+                    params: vec![
+                        Some(41i64.to_be_bytes().to_vec()),
+                        Some(vec![1u8]),
+                        Some(b"hello".to_vec()),
+                    ],
+                    result_formats: vec![],
+                },
+                FrontendMessage::Execute {
+                    portal_name: "p1".to_string(),
+                    max_rows: 0,
+                },
+                FrontendMessage::Sync,
+            ])
+        });
+
+        assert!(
+            out.iter()
+                .any(|msg| matches!(msg, BackendMessage::BindComplete))
+        );
+        assert!(out.iter().any(|msg| {
+            matches!(
+                msg,
+                BackendMessage::DataRow { values }
+                    if values == &vec!["42".to_string(), "true".to_string(), "hello".to_string()]
+            )
+        }));
+    }
+
+    #[test]
+    fn bind_supports_binary_date_and_timestamp_parameters() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([
+                FrontendMessage::Parse {
+                    statement_name: "s1".to_string(),
+                    query: "SELECT $1::date AS d, $2::timestamp AS ts".to_string(),
+                    parameter_types: vec![1082, 1114],
+                },
+                FrontendMessage::Bind {
+                    portal_name: "p1".to_string(),
+                    statement_name: "s1".to_string(),
+                    param_formats: vec![1],
+                    params: vec![
+                        Some(
+                            parse_pg_date_days("2024-01-02")
+                                .expect("date should parse")
+                                .to_be_bytes()
+                                .to_vec(),
+                        ),
+                        Some(
+                            parse_pg_timestamp_micros("2024-01-02 03:04:05")
+                                .expect("timestamp should parse")
+                                .to_be_bytes()
+                                .to_vec(),
+                        ),
+                    ],
+                    result_formats: vec![],
+                },
+                FrontendMessage::Execute {
+                    portal_name: "p1".to_string(),
+                    max_rows: 0,
+                },
                 FrontendMessage::Sync,
             ])
         });
@@ -3176,8 +4136,9 @@ mod tests {
         assert!(out.iter().any(|msg| {
             matches!(
                 msg,
-                BackendMessage::ErrorResponse { message }
-                    if message.contains("binary result formats are not supported yet")
+                BackendMessage::DataRow { values }
+                    if values
+                        == &vec!["2024-01-02".to_string(), "2024-01-02 03:04:05".to_string()]
             )
         }));
     }
@@ -3211,6 +4172,132 @@ mod tests {
         assert!(matches!(out[2], BackendMessage::ReadyForQuery { .. }));
         assert!(matches!(out[3], BackendMessage::ParseComplete));
         assert!(matches!(out[4], BackendMessage::ReadyForQuery { .. }));
+    }
+
+    #[test]
+    fn copy_text_from_stdin_and_to_stdout_round_trip() {
+        with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([FrontendMessage::Query {
+                sql: "CREATE TABLE copy_text_t (id int8, note text, ok boolean, score float8)"
+                    .to_string(),
+            }]);
+
+            let start = session.run([FrontendMessage::Query {
+                sql: "COPY copy_text_t FROM STDIN".to_string(),
+            }]);
+            assert!(start.iter().any(|message| {
+                matches!(
+                    message,
+                    BackendMessage::CopyInResponse {
+                        overall_format: 0,
+                        column_formats
+                    } if column_formats.iter().all(|format| *format == 0)
+                )
+            }));
+
+            let finish = session.run([
+                FrontendMessage::CopyData {
+                    data: b"1\talpha\ttrue\t1.5\n2\tbeta\tfalse\t2.5\n".to_vec(),
+                },
+                FrontendMessage::CopyDone,
+            ]);
+            assert!(finish.iter().any(|message| {
+                matches!(
+                    message,
+                    BackendMessage::CommandComplete { tag, rows } if tag == "COPY" && *rows == 2
+                )
+            }));
+
+            let copy_out = session.run([FrontendMessage::Query {
+                sql: "COPY copy_text_t TO STDOUT".to_string(),
+            }]);
+            assert!(copy_out.iter().any(|message| {
+                matches!(
+                    message,
+                    BackendMessage::CopyOutResponse {
+                        overall_format: 0,
+                        column_formats
+                    } if column_formats.iter().all(|format| *format == 0)
+                )
+            }));
+            let payload = copy_out
+                .iter()
+                .find_map(|message| {
+                    if let BackendMessage::CopyData { data } = message {
+                        Some(data.clone())
+                    } else {
+                        None
+                    }
+                })
+                .expect("copy data payload should be present");
+            let rendered = String::from_utf8(payload).expect("copy text payload should be utf8");
+            assert!(rendered.contains("1\talpha\ttrue\t1.5\n"));
+            assert!(rendered.contains("2\tbeta\tfalse\t2.5\n"));
+        });
+    }
+
+    #[test]
+    fn copy_csv_from_stdin_and_to_stdout_round_trip() {
+        with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([FrontendMessage::Query {
+                sql: "CREATE TABLE copy_csv_t (id int8, note text, ok boolean)".to_string(),
+            }]);
+
+            let start = session.run([FrontendMessage::Query {
+                sql: "COPY copy_csv_t FROM STDIN CSV".to_string(),
+            }]);
+            assert!(start.iter().any(|message| {
+                matches!(
+                    message,
+                    BackendMessage::CopyInResponse {
+                        overall_format: 0,
+                        column_formats
+                    } if column_formats.iter().all(|format| *format == 0)
+                )
+            }));
+
+            let finish = session.run([
+                FrontendMessage::CopyData {
+                    data: b"1,\"hello,world\",true\n2,\"quote\"\"inside\",false\n".to_vec(),
+                },
+                FrontendMessage::CopyDone,
+            ]);
+            assert!(finish.iter().any(|message| {
+                matches!(
+                    message,
+                    BackendMessage::CommandComplete { tag, rows } if tag == "COPY" && *rows == 2
+                )
+            }));
+
+            let verify = session.run([FrontendMessage::Query {
+                sql: "SELECT note FROM copy_csv_t WHERE id = 2".to_string(),
+            }]);
+            assert!(verify.iter().any(|message| {
+                matches!(
+                    message,
+                    BackendMessage::DataRow { values } if values == &vec!["quote\"inside".to_string()]
+                )
+            }));
+
+            let copy_out = session.run([FrontendMessage::Query {
+                sql: "COPY copy_csv_t TO STDOUT CSV".to_string(),
+            }]);
+            let payload = copy_out
+                .iter()
+                .find_map(|message| {
+                    if let BackendMessage::CopyData { data } = message {
+                        Some(data.clone())
+                    } else {
+                        None
+                    }
+                })
+                .expect("copy data payload should be present");
+            let rendered = String::from_utf8(payload).expect("copy csv payload should be utf8");
+            assert!(rendered.contains("\"hello,world\""));
+            assert!(rendered.contains("\"quote\"\"inside\""));
+        });
     }
 
     #[test]

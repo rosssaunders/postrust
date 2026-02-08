@@ -57,4 +57,40 @@ PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres ss
   -v ON_ERROR_STOP=1 \
   -c "SELECT * FROM wire_copy_t ORDER BY 1"
 
+echo "[compat] running COPY TEXT smoke"
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -q \
+  -c "COPY wire_copy_t TO STDOUT" > /tmp/postgrust-wire-copy.txt
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -c "TRUNCATE wire_copy_t"
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -q \
+  -c "COPY wire_copy_t FROM STDIN" < /tmp/postgrust-wire-copy.txt
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -c "SELECT * FROM wire_copy_t ORDER BY 1"
+
+echo "[compat] running COPY CSV smoke"
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -c "CREATE TABLE wire_copy_csv_t (id int8, note text, ok boolean)" \
+  -c "INSERT INTO wire_copy_csv_t VALUES (1,'hello,world',true),(2,'quote\"inside',false)"
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -q \
+  -c "COPY wire_copy_csv_t TO STDOUT CSV" > /tmp/postgrust-wire-copy.csv
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -c "TRUNCATE wire_copy_csv_t"
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -q \
+  -c "COPY wire_copy_csv_t FROM STDIN CSV" < /tmp/postgrust-wire-copy.csv
+PGPASSWORD='' psql "host=127.0.0.1 port=${PORT} user=postgres dbname=postgres sslmode=require" \
+  -v ON_ERROR_STOP=1 \
+  -c "SELECT * FROM wire_copy_csv_t ORDER BY 1"
+
 echo "[compat] psql smoke passed"

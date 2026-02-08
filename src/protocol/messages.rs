@@ -365,6 +365,20 @@ pub fn encode_backend_message(message: &BackendMessage) -> Option<Vec<u8>> {
             }
             Some(frame_message(b'D', payload))
         }
+        BackendMessage::DataRowBinary { values } => {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(&(values.len() as i16).to_be_bytes());
+            for value in values {
+                match value {
+                    Some(bytes) => {
+                        payload.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                        payload.extend_from_slice(bytes);
+                    }
+                    None => payload.extend_from_slice(&(-1i32).to_be_bytes()),
+                }
+            }
+            Some(frame_message(b'D', payload))
+        }
         BackendMessage::CommandComplete { tag, rows } => {
             let rendered = render_command_complete(tag, *rows);
             let mut payload = Vec::new();
@@ -763,6 +777,12 @@ mod tests {
             values: vec!["1".to_string()],
         })
         .expect("data row should encode");
+        assert_eq!(frame[0], b'D');
+
+        let frame = encode_backend_message(&BackendMessage::DataRowBinary {
+            values: vec![Some(vec![0, 0, 0, 0, 0, 0, 0, 1]), None],
+        })
+        .expect("binary data row should encode");
         assert_eq!(frame[0], b'D');
 
         let frame = encode_backend_message(&BackendMessage::CopyInResponse {
