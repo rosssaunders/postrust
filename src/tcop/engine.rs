@@ -5070,11 +5070,28 @@ fn evaluate_from_clause(
 ) -> Result<Vec<EvalScope>, EngineError> {
     let mut current = vec![EvalScope::default()];
     for item in from {
-        let rhs = evaluate_table_expression(item, params, outer_scope)?;
         let mut next = Vec::new();
-        for lhs_scope in &current {
-            for rhs_scope in &rhs.rows {
-                next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
+        match item {
+            TableExpression::Function(_) => {
+                // Table functions in FROM may reference prior FROM bindings; evaluate per lhs scope.
+                for lhs_scope in &current {
+                    let mut merged_outer = lhs_scope.clone();
+                    if let Some(outer) = outer_scope {
+                        merged_outer.inherit_outer(outer);
+                    }
+                    let rhs = evaluate_table_expression(item, params, Some(&merged_outer))?;
+                    for rhs_scope in &rhs.rows {
+                        next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
+                    }
+                }
+            }
+            _ => {
+                let rhs = evaluate_table_expression(item, params, outer_scope)?;
+                for lhs_scope in &current {
+                    for rhs_scope in &rhs.rows {
+                        next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
+                    }
+                }
             }
         }
         current = next;
@@ -8878,6 +8895,24 @@ mod tests {
             vec![
                 vec![ScalarValue::Text("1".to_string())],
                 vec![ScalarValue::Text("2".to_string())],
+            ]
+        );
+    }
+
+    #[test]
+    fn allows_table_function_arguments_to_reference_prior_from_items() {
+        let result = run(
+            "WITH payload AS (SELECT '{\"result\":[{\"currency\":\"XRP\"},{\"currency\":\"USDC\"}]}' AS body) \
+             SELECT json_extract_path_text(item, 'currency') AS currency \
+             FROM payload, json_array_elements(json_extract_path(body, 'result')) AS src(item) \
+             ORDER BY currency",
+        );
+        assert_eq!(result.columns, vec!["currency".to_string()]);
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![ScalarValue::Text("USDC".to_string())],
+                vec![ScalarValue::Text("XRP".to_string())],
             ]
         );
     }

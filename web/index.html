@@ -535,7 +535,7 @@
             "), currencies AS (",
             "  SELECT item",
             "  FROM payload",
-            "  CROSS JOIN json_array_elements(json_extract_path(body, 'result')) AS src(item)",
+            "    , json_array_elements(json_extract_path(body, 'result')) AS src(item)",
             ")",
             "SELECT",
             "  json_extract_path_text(item, 'currency') AS currency,",
