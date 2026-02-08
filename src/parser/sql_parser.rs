@@ -1349,6 +1349,8 @@ impl Parser {
                 }
                 TypeName::Text
             }
+            "date" => TypeName::Date,
+            "timestamp" => TypeName::Timestamp,
             other => {
                 return Err(self.error_at_current(&format!("unsupported type name \"{other}\"")));
             }
@@ -2817,6 +2819,19 @@ mod tests {
         assert!(create.columns[0].check.is_none());
         assert!(create.columns[0].default.is_none());
         assert!(create.constraints.is_empty());
+    }
+
+    #[test]
+    fn parses_create_table_with_date_and_timestamp_types() {
+        let stmt = parse_statement("CREATE TABLE events (event_day date, created_at timestamp)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+
+        assert_eq!(create.columns.len(), 2);
+        assert_eq!(create.columns[0].data_type, TypeName::Date);
+        assert_eq!(create.columns[1].data_type, TypeName::Timestamp);
     }
 
     #[test]

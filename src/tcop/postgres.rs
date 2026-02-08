@@ -133,6 +133,9 @@ pub enum BackendMessage {
     },
     NoticeResponse {
         message: String,
+        code: String,
+        detail: Option<String>,
+        hint: Option<String>,
     },
     ReadyForQuery {
         status: ReadyForQueryStatus,
@@ -173,6 +176,10 @@ pub enum BackendMessage {
     CopyDone,
     ErrorResponse {
         message: String,
+        code: String,
+        detail: Option<String>,
+        hint: Option<String>,
+        position: Option<u32>,
     },
     FlushComplete,
     Terminate,
@@ -491,9 +498,7 @@ impl PostgresSession {
                     break;
                 }
                 Err(err) => {
-                    out.push(BackendMessage::ErrorResponse {
-                        message: err.message,
-                    });
+                    out.push(error_response_from_message(err.message));
                     self.handle_error_recovery();
                 }
             }
@@ -575,12 +580,18 @@ impl PostgresSession {
             FrontendMessage::SslRequest => {
                 out.push(BackendMessage::NoticeResponse {
                     message: "SSL is not supported by postgrust".to_string(),
+                    code: "00000".to_string(),
+                    detail: None,
+                    hint: None,
                 });
                 Ok(ControlFlow::Continue)
             }
             FrontendMessage::CancelRequest { .. } => {
                 out.push(BackendMessage::NoticeResponse {
                     message: "cancel request ignored".to_string(),
+                    code: "00000".to_string(),
+                    detail: None,
+                    hint: None,
                 });
                 Ok(ControlFlow::Continue)
             }
@@ -2940,6 +2951,89 @@ fn normalize_format_codes(
     Ok(formats)
 }
 
+fn error_response_from_message(message: String) -> BackendMessage {
+    let (code, detail, hint, position) = classify_sqlstate_error_fields(&message);
+    BackendMessage::ErrorResponse {
+        message,
+        code,
+        detail,
+        hint,
+        position,
+    }
+}
+
+fn classify_sqlstate_error_fields(
+    message: &str,
+) -> (String, Option<String>, Option<String>, Option<u32>) {
+    let lower = message.to_ascii_lowercase();
+    if lower.starts_with("parse error:") {
+        let position = extract_parse_error_position(message);
+        let detail = position.map(|pos| format!("parser byte offset {}", pos.saturating_sub(1)));
+        let hint = Some("Check SQL syntax near the reported position.".to_string());
+        return ("42601".to_string(), detail, hint, position);
+    }
+    if lower.contains("current transaction is aborted") {
+        return ("25P02".to_string(), None, None, None);
+    }
+    if lower.contains("cannot be executed from a transaction block") {
+        return ("25001".to_string(), None, None, None);
+    }
+    if lower.contains("privilege") || lower.contains("permission denied") {
+        return ("42501".to_string(), None, None, None);
+    }
+    if lower.contains("duplicate value for key") {
+        return ("23505".to_string(), None, None, None);
+    }
+    if lower.contains("does not allow null values") {
+        return ("23502".to_string(), None, None, None);
+    }
+    if lower.contains("already exists") {
+        if lower.contains("relation")
+            || lower.contains("table")
+            || lower.contains("view")
+            || lower.contains("index")
+        {
+            return ("42P07".to_string(), None, None, None);
+        }
+        return ("42710".to_string(), None, None, None);
+    }
+    if lower.contains("unknown column") {
+        return ("42703".to_string(), None, None, None);
+    }
+    if lower.contains("does not exist") {
+        if lower.contains("column") {
+            return ("42703".to_string(), None, None, None);
+        }
+        if lower.contains("schema")
+            || lower.contains("relation")
+            || lower.contains("table")
+            || lower.contains("view")
+            || lower.contains("sequence")
+        {
+            return ("42P01".to_string(), None, None, None);
+        }
+        return ("42704".to_string(), None, None, None);
+    }
+    if lower.contains("division by zero") {
+        return ("22012".to_string(), None, None, None);
+    }
+    ("XX000".to_string(), None, None, None)
+}
+
+fn extract_parse_error_position(message: &str) -> Option<u32> {
+    let marker = "at byte ";
+    let start = message.rfind(marker)? + marker.len();
+    let digits = message[start..]
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit())
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    let byte_offset = digits.parse::<u32>().ok()?;
+    byte_offset.checked_add(1)
+}
+
 fn resolve_parse_parameter_types(
     query_string: &str,
     mut parameter_types: Vec<PgType>,
@@ -4175,6 +4269,36 @@ mod tests {
     }
 
     #[test]
+    fn parse_errors_include_sqlstate_and_position_metadata() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([FrontendMessage::Query {
+                sql: "SELECT FROM".to_string(),
+            }])
+        });
+
+        let (code, position, message) = out
+            .iter()
+            .find_map(|msg| {
+                if let BackendMessage::ErrorResponse {
+                    code,
+                    position,
+                    message,
+                    ..
+                } = msg
+                {
+                    Some((code.clone(), *position, message.clone()))
+                } else {
+                    None
+                }
+            })
+            .expect("parse error should be emitted");
+        assert_eq!(code, "42601");
+        assert!(position.is_some());
+        assert!(message.contains("parse error"));
+    }
+
+    #[test]
     fn copy_text_from_stdin_and_to_stdout_round_trip() {
         with_isolated_state(|| {
             let mut session = PostgresSession::new();
@@ -4326,7 +4450,7 @@ mod tests {
         assert!(out.iter().any(|m| {
             matches!(
                 m,
-                BackendMessage::ErrorResponse { message }
+                BackendMessage::ErrorResponse { message, .. }
                     if message.contains("aborted")
             )
         }));
@@ -4370,7 +4494,7 @@ mod tests {
         assert!(out.iter().any(|m| {
             matches!(
                 m,
-                BackendMessage::ErrorResponse { message } if message.contains("does not exist")
+                BackendMessage::ErrorResponse { message, .. } if message.contains("does not exist")
             )
         }));
     }
@@ -4447,7 +4571,7 @@ mod tests {
         });
 
         assert!(out.iter().any(|m| {
-            matches!(m, BackendMessage::ErrorResponse { message } if message.contains("parse error"))
+            matches!(m, BackendMessage::ErrorResponse { message, .. } if message.contains("parse error"))
         }));
         assert!(out.iter().any(|m| {
             matches!(m, BackendMessage::DataRow { values } if values == &vec!["1".to_string()])
@@ -4486,7 +4610,7 @@ mod tests {
         assert!(out.iter().any(|m| {
             matches!(
                 m,
-                BackendMessage::ErrorResponse { message }
+                BackendMessage::ErrorResponse { message, .. }
                     if message.contains("cannot be executed from a transaction block")
             )
         }));
@@ -4626,7 +4750,7 @@ mod tests {
             .filter(|msg| {
                 matches!(
                     msg,
-                    BackendMessage::ErrorResponse { message }
+                    BackendMessage::ErrorResponse { message, .. }
                         if message.contains("missing SELECT privilege")
                 )
             })
@@ -4701,7 +4825,7 @@ mod tests {
         assert!(out.iter().any(|msg| {
             matches!(
                 msg,
-                BackendMessage::ErrorResponse { message }
+                BackendMessage::ErrorResponse { message, .. }
                     if message.contains("row-level security policy")
             )
         }));
@@ -4796,7 +4920,7 @@ mod tests {
         assert!(out.iter().any(|msg| {
             matches!(
                 msg,
-                BackendMessage::ErrorResponse { message }
+                BackendMessage::ErrorResponse { message, .. }
                     if message.contains("does not exist")
             )
         }));

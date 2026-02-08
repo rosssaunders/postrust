@@ -16,6 +16,8 @@ pub enum TypeSignature {
     Int8,
     Float8,
     Text,
+    Date,
+    Timestamp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

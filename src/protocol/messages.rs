@@ -339,9 +339,21 @@ pub fn encode_backend_message(message: &BackendMessage) -> Option<Vec<u8>> {
             payload.extend_from_slice(&secret_key.to_be_bytes());
             Some(frame_message(b'K', payload))
         }
-        BackendMessage::NoticeResponse { message } => Some(frame_message(
+        BackendMessage::NoticeResponse {
+            message,
+            code,
+            detail,
+            hint,
+        } => Some(frame_message(
             b'N',
-            encode_error_or_notice("NOTICE", "00000", message),
+            encode_error_or_notice(
+                "NOTICE",
+                code,
+                message,
+                detail.as_deref(),
+                hint.as_deref(),
+                None,
+            ),
         )),
         BackendMessage::ReadyForQuery { status } => {
             let code = match status {
@@ -435,16 +447,36 @@ pub fn encode_backend_message(message: &BackendMessage) -> Option<Vec<u8>> {
         }
         BackendMessage::CopyData { data } => Some(frame_message(b'd', data.clone())),
         BackendMessage::CopyDone => Some(frame_message(b'c', Vec::new())),
-        BackendMessage::ErrorResponse { message } => Some(frame_message(
+        BackendMessage::ErrorResponse {
+            message,
+            code,
+            detail,
+            hint,
+            position,
+        } => Some(frame_message(
             b'E',
-            encode_error_or_notice("ERROR", "XX000", message),
+            encode_error_or_notice(
+                "ERROR",
+                code,
+                message,
+                detail.as_deref(),
+                hint.as_deref(),
+                *position,
+            ),
         )),
         BackendMessage::FlushComplete => None,
         BackendMessage::Terminate => None,
     }
 }
 
-fn encode_error_or_notice(severity: &str, code: &str, message: &str) -> Vec<u8> {
+fn encode_error_or_notice(
+    severity: &str,
+    code: &str,
+    message: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    position: Option<u32>,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(b'S');
     push_cstring(&mut payload, severity);
@@ -454,6 +486,18 @@ fn encode_error_or_notice(severity: &str, code: &str, message: &str) -> Vec<u8> 
     push_cstring(&mut payload, code);
     payload.push(b'M');
     push_cstring(&mut payload, message);
+    if let Some(detail) = detail {
+        payload.push(b'D');
+        push_cstring(&mut payload, detail);
+    }
+    if let Some(hint) = hint {
+        payload.push(b'H');
+        push_cstring(&mut payload, hint);
+    }
+    if let Some(position) = position {
+        payload.push(b'P');
+        push_cstring(&mut payload, &position.to_string());
+    }
     payload.push(0);
     payload
 }
@@ -797,5 +841,21 @@ mod tests {
         })
         .expect("auth sasl should encode");
         assert_eq!(frame[0], b'R');
+    }
+
+    #[test]
+    fn encodes_error_response_with_sqlstate_detail_hint_and_position() {
+        let frame = encode_backend_message(&BackendMessage::ErrorResponse {
+            message: "syntax error".to_string(),
+            code: "42601".to_string(),
+            detail: Some("unexpected token".to_string()),
+            hint: Some("check query near SELECT".to_string()),
+            position: Some(17),
+        })
+        .expect("error response should encode");
+        assert_eq!(frame[0], b'E');
+        let payload = &frame[5..];
+        let expected = b"SERROR\0VERROR\0C42601\0Msyntax error\0Dunexpected token\0Hcheck query near SELECT\0P17\0\0";
+        assert_eq!(payload, expected);
     }
 }

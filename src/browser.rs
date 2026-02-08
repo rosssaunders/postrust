@@ -400,7 +400,7 @@ fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, String> {
                     rows_affected: rows,
                 });
             }
-            BackendMessage::ErrorResponse { message } => return Err(message),
+            BackendMessage::ErrorResponse { message, .. } => return Err(message),
             _ => {}
         }
     }

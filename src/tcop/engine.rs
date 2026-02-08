@@ -3276,6 +3276,8 @@ fn type_signature_from_ast(ty: TypeName) -> TypeSignature {
         TypeName::Int8 => TypeSignature::Int8,
         TypeName::Float8 => TypeSignature::Float8,
         TypeName::Text => TypeSignature::Text,
+        TypeName::Date => TypeSignature::Date,
+        TypeName::Timestamp => TypeSignature::Timestamp,
     }
 }
 
@@ -3285,6 +3287,8 @@ fn type_signature_to_oid(ty: TypeSignature) -> u32 {
         TypeSignature::Int8 => PG_INT8_OID,
         TypeSignature::Float8 => PG_FLOAT8_OID,
         TypeSignature::Text => PG_TEXT_OID,
+        TypeSignature::Date => PG_DATE_OID,
+        TypeSignature::Timestamp => PG_TIMESTAMP_OID,
     }
 }
 
@@ -4262,6 +4266,30 @@ fn coerce_value_for_column(
         }
         (TypeSignature::Text, ScalarValue::Text(v)) => Ok(ScalarValue::Text(v)),
         (TypeSignature::Text, v) => Ok(ScalarValue::Text(v.render())),
+        (TypeSignature::Date, ScalarValue::Text(v)) => {
+            let dt = parse_datetime_text(&v)?;
+            Ok(ScalarValue::Text(format_date(dt.date)))
+        }
+        (TypeSignature::Date, ScalarValue::Int(v)) => {
+            let dt = datetime_from_epoch_seconds(v);
+            Ok(ScalarValue::Text(format_date(dt.date)))
+        }
+        (TypeSignature::Date, ScalarValue::Float(v)) => {
+            let dt = datetime_from_epoch_seconds(v as i64);
+            Ok(ScalarValue::Text(format_date(dt.date)))
+        }
+        (TypeSignature::Timestamp, ScalarValue::Text(v)) => {
+            let dt = parse_datetime_text(&v)?;
+            Ok(ScalarValue::Text(format_timestamp(dt)))
+        }
+        (TypeSignature::Timestamp, ScalarValue::Int(v)) => {
+            let dt = datetime_from_epoch_seconds(v);
+            Ok(ScalarValue::Text(format_timestamp(dt)))
+        }
+        (TypeSignature::Timestamp, ScalarValue::Float(v)) => {
+            let dt = datetime_from_epoch_seconds(v as i64);
+            Ok(ScalarValue::Text(format_timestamp(dt)))
+        }
         _ => Err(EngineError {
             message: format!("type mismatch for column \"{}\"", column.name()),
         }),
@@ -5159,6 +5187,165 @@ fn active_cte_context() -> HashMap<String, CteBinding> {
     ACTIVE_CTE_STACK.with(|stack| stack.borrow().last().cloned().unwrap_or_default())
 }
 
+#[derive(Debug, Clone)]
+struct VirtualRelationColumnDef {
+    name: String,
+    type_oid: u32,
+}
+
+fn lookup_virtual_relation(
+    name: &[String],
+) -> Option<(String, String, Vec<VirtualRelationColumnDef>)> {
+    let (schema, relation) = resolve_virtual_relation_name(name)?;
+    let columns = virtual_relation_column_defs(&schema, &relation)?;
+    Some((schema, relation, columns))
+}
+
+fn resolve_virtual_relation_name(name: &[String]) -> Option<(String, String)> {
+    let normalized = name
+        .iter()
+        .map(|part| part.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    match normalized.as_slice() {
+        [relation] if is_pg_catalog_virtual_relation(relation) => {
+            Some(("pg_catalog".to_string(), relation.to_string()))
+        }
+        [schema, relation]
+            if schema == "pg_catalog" && is_pg_catalog_virtual_relation(relation) =>
+        {
+            Some((schema.to_string(), relation.to_string()))
+        }
+        [schema, relation]
+            if schema == "information_schema"
+                && is_information_schema_virtual_relation(relation) =>
+        {
+            Some((schema.to_string(), relation.to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn is_pg_catalog_virtual_relation(relation: &str) -> bool {
+    matches!(
+        relation,
+        "pg_namespace" | "pg_class" | "pg_attribute" | "pg_type"
+    )
+}
+
+fn is_information_schema_virtual_relation(relation: &str) -> bool {
+    matches!(relation, "tables" | "columns")
+}
+
+fn virtual_relation_column_defs(
+    schema: &str,
+    relation: &str,
+) -> Option<Vec<VirtualRelationColumnDef>> {
+    let cols = match (schema, relation) {
+        ("pg_catalog", "pg_namespace") => vec![
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "nspname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+        ],
+        ("pg_catalog", "pg_class") => vec![
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "relname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "relnamespace".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "relkind".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+        ],
+        ("pg_catalog", "pg_attribute") => vec![
+            VirtualRelationColumnDef {
+                name: "attrelid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "attname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "atttypid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "attnum".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "attnotnull".to_string(),
+                type_oid: PG_BOOL_OID,
+            },
+        ],
+        ("pg_catalog", "pg_type") => vec![
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "typname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+        ],
+        ("information_schema", "tables") => vec![
+            VirtualRelationColumnDef {
+                name: "table_schema".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_type".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+        ],
+        ("information_schema", "columns") => vec![
+            VirtualRelationColumnDef {
+                name: "table_schema".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "column_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "ordinal_position".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "data_type".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "is_nullable".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+        ],
+        _ => return None,
+    };
+    Some(cols)
+}
+
 fn expand_from_columns(
     from: &[TableExpression],
     ctes: &HashMap<String, Vec<String>>,
@@ -5198,6 +5385,20 @@ fn expand_table_expression_columns(
                         })
                         .collect());
                 }
+            }
+            if let Some((_, relation_name, columns)) = lookup_virtual_relation(&rel.name) {
+                let qualifier = rel
+                    .alias
+                    .as_ref()
+                    .map(|alias| alias.to_ascii_lowercase())
+                    .unwrap_or(relation_name.clone());
+                return Ok(columns
+                    .iter()
+                    .map(|column| ExpandedFromColumn {
+                        label: column.name.clone(),
+                        lookup_parts: vec![qualifier.clone(), column.name.to_string()],
+                    })
+                    .collect());
             }
             let table = with_catalog_read(|catalog| {
                 catalog
@@ -5344,6 +5545,21 @@ fn expand_table_expression_columns_typed(
                         })
                         .collect());
                 }
+            }
+            if let Some((_, relation_name, columns)) = lookup_virtual_relation(&rel.name) {
+                let qualifier = rel
+                    .alias
+                    .as_ref()
+                    .map(|alias| alias.to_ascii_lowercase())
+                    .unwrap_or(relation_name.clone());
+                return Ok(columns
+                    .iter()
+                    .map(|column| ExpandedFromTypeColumn {
+                        label: column.name.clone(),
+                        lookup_parts: vec![qualifier.clone(), column.name.to_string()],
+                        type_oid: column.type_oid,
+                    })
+                    .collect());
             }
             let table = with_catalog_read(|catalog| {
                 catalog
@@ -6255,6 +6471,38 @@ fn evaluate_relation(
         }
     }
 
+    if let Some((schema_name, relation_name, columns)) = lookup_virtual_relation(&rel.name) {
+        let rows = virtual_relation_rows(&schema_name, &relation_name)?;
+        let column_names = columns
+            .iter()
+            .map(|column| column.name.to_string())
+            .collect::<Vec<_>>();
+        let qualifiers = if let Some(alias) = &rel.alias {
+            vec![alias.to_ascii_lowercase()]
+        } else {
+            vec![
+                relation_name.to_ascii_lowercase(),
+                format!("{}.{}", schema_name, relation_name),
+            ]
+        };
+        let mut scoped_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            scoped_rows.push(scope_from_row(
+                &column_names,
+                row,
+                &qualifiers,
+                &column_names,
+            ));
+        }
+        let null_values = vec![ScalarValue::Null; column_names.len()];
+        let null_scope = scope_from_row(&column_names, &null_values, &qualifiers, &column_names);
+        return Ok(TableEval {
+            rows: scoped_rows,
+            columns: column_names,
+            null_scope,
+        });
+    }
+
     let table = with_catalog_read(|catalog| {
         catalog
             .resolve_table(&rel.name, &SearchPath::default())
@@ -6334,6 +6582,200 @@ fn evaluate_relation(
         columns,
         null_scope,
     })
+}
+
+fn virtual_relation_rows(
+    schema: &str,
+    relation: &str,
+) -> Result<Vec<Vec<ScalarValue>>, EngineError> {
+    match (schema, relation) {
+        ("pg_catalog", "pg_namespace") => {
+            let mut entries = with_catalog_read(|catalog| {
+                catalog
+                    .schemas()
+                    .map(|schema| (schema.oid(), schema.name().to_string()))
+                    .collect::<Vec<_>>()
+            });
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(entries
+                .into_iter()
+                .map(|(oid, name)| vec![ScalarValue::Int(oid as i64), ScalarValue::Text(name)])
+                .collect())
+        }
+        ("pg_catalog", "pg_class") => {
+            let mut entries = with_catalog_read(|catalog| {
+                let mut out = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        out.push((
+                            table.oid(),
+                            table.name().to_string(),
+                            schema.oid(),
+                            pg_relkind_for_table(table.kind()).to_string(),
+                        ));
+                    }
+                }
+                out
+            });
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            Ok(entries
+                .into_iter()
+                .map(|(oid, relname, relnamespace, relkind)| {
+                    vec![
+                        ScalarValue::Int(oid as i64),
+                        ScalarValue::Text(relname),
+                        ScalarValue::Int(relnamespace as i64),
+                        ScalarValue::Text(relkind),
+                    ]
+                })
+                .collect())
+        }
+        ("pg_catalog", "pg_attribute") => {
+            let mut entries = with_catalog_read(|catalog| {
+                let mut out = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        for column in table.columns() {
+                            out.push((
+                                table.oid(),
+                                column.ordinal(),
+                                column.name().to_string(),
+                                type_signature_to_oid(column.type_signature()),
+                                !column.nullable(),
+                            ));
+                        }
+                    }
+                }
+                out
+            });
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            Ok(entries
+                .into_iter()
+                .map(|(attrelid, attnum, attname, atttypid, attnotnull)| {
+                    vec![
+                        ScalarValue::Int(attrelid as i64),
+                        ScalarValue::Text(attname),
+                        ScalarValue::Int(atttypid as i64),
+                        ScalarValue::Int(attnum as i64 + 1),
+                        ScalarValue::Bool(attnotnull),
+                    ]
+                })
+                .collect())
+        }
+        ("pg_catalog", "pg_type") => {
+            let mut entries = vec![
+                (16u32, "bool".to_string()),
+                (20u32, "int8".to_string()),
+                (25u32, "text".to_string()),
+                (701u32, "float8".to_string()),
+                (1082u32, "date".to_string()),
+                (1114u32, "timestamp".to_string()),
+            ];
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok(entries
+                .into_iter()
+                .map(|(oid, typname)| {
+                    vec![ScalarValue::Int(oid as i64), ScalarValue::Text(typname)]
+                })
+                .collect())
+        }
+        ("information_schema", "tables") => {
+            let mut entries = with_catalog_read(|catalog| {
+                let mut out = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        out.push((
+                            schema.name().to_string(),
+                            table.name().to_string(),
+                            information_schema_table_type(table.kind()).to_string(),
+                        ));
+                    }
+                }
+                out
+            });
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            Ok(entries
+                .into_iter()
+                .map(|(table_schema, table_name, table_type)| {
+                    vec![
+                        ScalarValue::Text(table_schema),
+                        ScalarValue::Text(table_name),
+                        ScalarValue::Text(table_type),
+                    ]
+                })
+                .collect())
+        }
+        ("information_schema", "columns") => {
+            let mut entries = with_catalog_read(|catalog| {
+                let mut out = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        for column in table.columns() {
+                            out.push((
+                                schema.name().to_string(),
+                                table.name().to_string(),
+                                column.ordinal(),
+                                column.name().to_string(),
+                                information_schema_data_type(column.type_signature()).to_string(),
+                                if column.nullable() {
+                                    "YES".to_string()
+                                } else {
+                                    "NO".to_string()
+                                },
+                            ));
+                        }
+                    }
+                }
+                out
+            });
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+            Ok(entries
+                .into_iter()
+                .map(
+                    |(table_schema, table_name, ordinal, column_name, data_type, is_nullable)| {
+                        vec![
+                            ScalarValue::Text(table_schema),
+                            ScalarValue::Text(table_name),
+                            ScalarValue::Text(column_name),
+                            ScalarValue::Int(ordinal as i64 + 1),
+                            ScalarValue::Text(data_type),
+                            ScalarValue::Text(is_nullable),
+                        ]
+                    },
+                )
+                .collect())
+        }
+        _ => Err(EngineError {
+            message: format!("relation \"{}.{}\" does not exist", schema, relation),
+        }),
+    }
+}
+
+fn pg_relkind_for_table(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::VirtualDual | TableKind::Heap => "r",
+        TableKind::View => "v",
+        TableKind::MaterializedView => "m",
+    }
+}
+
+fn information_schema_table_type(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::VirtualDual | TableKind::Heap => "BASE TABLE",
+        TableKind::View => "VIEW",
+        TableKind::MaterializedView => "MATERIALIZED VIEW",
+    }
+}
+
+fn information_schema_data_type(signature: TypeSignature) -> &'static str {
+    match signature {
+        TypeSignature::Bool => "boolean",
+        TypeSignature::Int8 => "bigint",
+        TypeSignature::Float8 => "double precision",
+        TypeSignature::Text => "text",
+        TypeSignature::Date => "date",
+        TypeSignature::Timestamp => "timestamp without time zone",
+    }
 }
 
 fn evaluate_join(
@@ -10973,6 +11415,73 @@ mod tests {
         let result =
             with_isolated_state(|| run_statement("SELECT $1 + 5", &[Some("7".to_string())]));
         assert_eq!(result.rows[0], vec![ScalarValue::Int(12)]);
+    }
+
+    #[test]
+    fn exposes_pg_catalog_virtual_relations_for_introspection() {
+        let results = run_batch(&[
+            "CREATE TABLE users (id int8)",
+            "SELECT relname FROM pg_catalog.pg_class WHERE relname = 'users'",
+            "SELECT nspname FROM pg_namespace WHERE nspname = 'public'",
+        ]);
+        assert_eq!(
+            results[1].rows,
+            vec![vec![ScalarValue::Text("users".to_string())]]
+        );
+        assert_eq!(
+            results[2].rows,
+            vec![vec![ScalarValue::Text("public".to_string())]]
+        );
+    }
+
+    #[test]
+    fn exposes_information_schema_tables_and_columns() {
+        let results = run_batch(&[
+            "CREATE TABLE events (event_day date, created_at timestamp)",
+            "SELECT table_schema, table_name, table_type FROM information_schema.tables WHERE table_name = 'events'",
+            "SELECT ordinal_position, column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'events' ORDER BY 1",
+        ]);
+        assert_eq!(
+            results[1].rows,
+            vec![vec![
+                ScalarValue::Text("public".to_string()),
+                ScalarValue::Text("events".to_string()),
+                ScalarValue::Text("BASE TABLE".to_string())
+            ]]
+        );
+        assert_eq!(
+            results[2].rows,
+            vec![
+                vec![
+                    ScalarValue::Int(1),
+                    ScalarValue::Text("event_day".to_string()),
+                    ScalarValue::Text("date".to_string()),
+                    ScalarValue::Text("YES".to_string())
+                ],
+                vec![
+                    ScalarValue::Int(2),
+                    ScalarValue::Text("created_at".to_string()),
+                    ScalarValue::Text("timestamp without time zone".to_string()),
+                    ScalarValue::Text("YES".to_string())
+                ]
+            ]
+        );
+    }
+
+    #[test]
+    fn supports_date_and_timestamp_column_types() {
+        let results = run_batch(&[
+            "CREATE TABLE events (event_day date, created_at timestamp)",
+            "INSERT INTO events VALUES ('2024-01-02', '2024-01-02 03:04:05')",
+            "SELECT event_day, created_at FROM events",
+        ]);
+        assert_eq!(
+            results[2].rows,
+            vec![vec![
+                ScalarValue::Text("2024-01-02".to_string()),
+                ScalarValue::Text("2024-01-02 03:04:05".to_string())
+            ]]
+        );
     }
 
     #[test]

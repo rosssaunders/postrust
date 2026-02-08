@@ -204,7 +204,7 @@ fn execute_simple_query_via_session(sql: &str) -> Result<Vec<CliQueryResult>, St
                     rows_affected: rows,
                 });
             }
-            BackendMessage::ErrorResponse { message } => return Err(message),
+            BackendMessage::ErrorResponse { message, .. } => return Err(message),
             BackendMessage::EmptyQueryResponse
             | BackendMessage::AuthenticationOk
             | BackendMessage::AuthenticationCleartextPassword

@@ -185,6 +185,10 @@ fn send_backend_messages(stream: &mut ClientStream, messages: &[BackendMessage])
 fn send_error(stream: &mut ClientStream, message: &str) -> io::Result<()> {
     let error = BackendMessage::ErrorResponse {
         message: message.to_string(),
+        code: "XX000".to_string(),
+        detail: None,
+        hint: None,
+        position: None,
     };
     if let Some(frame) = encode_backend_message(&error) {
         stream.write_all(&frame)?;
