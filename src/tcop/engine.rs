@@ -25,9 +25,9 @@ use crate::parser::ast::{
     DeleteStatement, DropBehavior, DropIndexStatement, DropSchemaStatement, DropSequenceStatement,
     DropTableStatement, DropViewStatement, Expr, ForeignKeyAction, InsertSource, InsertStatement,
     JoinCondition, JoinType, MergeStatement, MergeWhenClause, OnConflictClause, OrderByExpr, Query,
-    QueryExpr, RefreshMaterializedViewStatement, SelectQuantifier, SelectStatement, SetOperator,
-    SetQuantifier, Statement, TableConstraint, TableExpression, TableFunctionRef, TableRef,
-    TruncateStatement, TypeName, UnaryOp, UpdateStatement,
+    QueryExpr, RefreshMaterializedViewStatement, SelectItem, SelectQuantifier, SelectStatement,
+    SetOperator, SetQuantifier, Statement, TableConstraint, TableExpression, TableFunctionRef,
+    TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement,
 };
 use crate::security::{self, RlsCommand, TablePrivilege};
 
@@ -79,6 +79,13 @@ pub struct QueryResult {
     pub rows_affected: u64,
 }
 
+const PG_BOOL_OID: u32 = 16;
+const PG_INT8_OID: u32 = 20;
+const PG_TEXT_OID: u32 = 25;
+const PG_FLOAT8_OID: u32 = 701;
+const PG_DATE_OID: u32 = 1082;
+const PG_TIMESTAMP_OID: u32 = 1114;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyBinaryColumn {
     pub name: String,
@@ -96,6 +103,7 @@ pub struct CopyBinarySnapshot {
 pub struct PlannedQuery {
     statement: Statement,
     columns: Vec<String>,
+    column_type_oids: Vec<u32>,
     returns_data: bool,
     command_tag: String,
 }
@@ -103,6 +111,10 @@ pub struct PlannedQuery {
 impl PlannedQuery {
     pub fn columns(&self) -> &[String] {
         &self.columns
+    }
+
+    pub fn column_type_oids(&self) -> &[u32] {
+        &self.column_type_oids
     }
 
     pub fn returns_data(&self) -> bool {
@@ -115,13 +127,24 @@ impl PlannedQuery {
 }
 
 pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError> {
-    let (columns, returns_data, command_tag) = match &statement {
-        Statement::Query(query) => (derive_query_columns(query)?, true, "SELECT".to_string()),
-        Statement::CreateTable(_) => (Vec::new(), false, "CREATE TABLE".to_string()),
-        Statement::CreateSchema(_) => (Vec::new(), false, "CREATE SCHEMA".to_string()),
-        Statement::CreateIndex(_) => (Vec::new(), false, "CREATE INDEX".to_string()),
-        Statement::CreateSequence(_) => (Vec::new(), false, "CREATE SEQUENCE".to_string()),
+    let (columns, column_type_oids, returns_data, command_tag) = match &statement {
+        Statement::Query(query) => {
+            let output = derive_query_output_columns(query)?;
+            (
+                output.iter().map(|col| col.name.clone()).collect(),
+                output.iter().map(|col| col.type_oid).collect(),
+                true,
+                "SELECT".to_string(),
+            )
+        }
+        Statement::CreateTable(_) => (Vec::new(), Vec::new(), false, "CREATE TABLE".to_string()),
+        Statement::CreateSchema(_) => (Vec::new(), Vec::new(), false, "CREATE SCHEMA".to_string()),
+        Statement::CreateIndex(_) => (Vec::new(), Vec::new(), false, "CREATE INDEX".to_string()),
+        Statement::CreateSequence(_) => {
+            (Vec::new(), Vec::new(), false, "CREATE SEQUENCE".to_string())
+        }
         Statement::CreateView(create) => (
+            Vec::new(),
             Vec::new(),
             false,
             if create.materialized {
@@ -130,11 +153,17 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
                 "CREATE VIEW".to_string()
             },
         ),
-        Statement::RefreshMaterializedView(_) => {
-            (Vec::new(), false, "REFRESH MATERIALIZED VIEW".to_string())
+        Statement::RefreshMaterializedView(_) => (
+            Vec::new(),
+            Vec::new(),
+            false,
+            "REFRESH MATERIALIZED VIEW".to_string(),
+        ),
+        Statement::AlterSequence(_) => {
+            (Vec::new(), Vec::new(), false, "ALTER SEQUENCE".to_string())
         }
-        Statement::AlterSequence(_) => (Vec::new(), false, "ALTER SEQUENCE".to_string()),
         Statement::AlterView(alter) => (
+            Vec::new(),
             Vec::new(),
             false,
             if alter.materialized {
@@ -143,31 +172,56 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
                 "ALTER VIEW".to_string()
             },
         ),
-        Statement::Insert(insert) => (
-            derive_dml_returning_columns(&insert.table_name, &insert.returning)?,
-            !insert.returning.is_empty(),
-            "INSERT".to_string(),
-        ),
-        Statement::Update(update) => (
-            derive_dml_returning_columns(&update.table_name, &update.returning)?,
-            !update.returning.is_empty(),
-            "UPDATE".to_string(),
-        ),
-        Statement::Delete(delete) => (
-            derive_dml_returning_columns(&delete.table_name, &delete.returning)?,
-            !delete.returning.is_empty(),
-            "DELETE".to_string(),
-        ),
-        Statement::Merge(merge) => (
-            derive_dml_returning_columns(&merge.target_table, &merge.returning)?,
-            !merge.returning.is_empty(),
-            "MERGE".to_string(),
-        ),
-        Statement::DropTable(_) => (Vec::new(), false, "DROP TABLE".to_string()),
-        Statement::DropSchema(_) => (Vec::new(), false, "DROP SCHEMA".to_string()),
-        Statement::DropIndex(_) => (Vec::new(), false, "DROP INDEX".to_string()),
-        Statement::DropSequence(_) => (Vec::new(), false, "DROP SEQUENCE".to_string()),
+        Statement::Insert(insert) => {
+            let columns = derive_dml_returning_columns(&insert.table_name, &insert.returning)?;
+            let oids =
+                derive_dml_returning_column_type_oids(&insert.table_name, &insert.returning)?;
+            (
+                columns,
+                oids,
+                !insert.returning.is_empty(),
+                "INSERT".to_string(),
+            )
+        }
+        Statement::Update(update) => {
+            let columns = derive_dml_returning_columns(&update.table_name, &update.returning)?;
+            let oids =
+                derive_dml_returning_column_type_oids(&update.table_name, &update.returning)?;
+            (
+                columns,
+                oids,
+                !update.returning.is_empty(),
+                "UPDATE".to_string(),
+            )
+        }
+        Statement::Delete(delete) => {
+            let columns = derive_dml_returning_columns(&delete.table_name, &delete.returning)?;
+            let oids =
+                derive_dml_returning_column_type_oids(&delete.table_name, &delete.returning)?;
+            (
+                columns,
+                oids,
+                !delete.returning.is_empty(),
+                "DELETE".to_string(),
+            )
+        }
+        Statement::Merge(merge) => {
+            let columns = derive_dml_returning_columns(&merge.target_table, &merge.returning)?;
+            let oids =
+                derive_dml_returning_column_type_oids(&merge.target_table, &merge.returning)?;
+            (
+                columns,
+                oids,
+                !merge.returning.is_empty(),
+                "MERGE".to_string(),
+            )
+        }
+        Statement::DropTable(_) => (Vec::new(), Vec::new(), false, "DROP TABLE".to_string()),
+        Statement::DropSchema(_) => (Vec::new(), Vec::new(), false, "DROP SCHEMA".to_string()),
+        Statement::DropIndex(_) => (Vec::new(), Vec::new(), false, "DROP INDEX".to_string()),
+        Statement::DropSequence(_) => (Vec::new(), Vec::new(), false, "DROP SEQUENCE".to_string()),
         Statement::DropView(drop) => (
+            Vec::new(),
             Vec::new(),
             false,
             if drop.materialized {
@@ -176,12 +230,13 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
                 "DROP VIEW".to_string()
             },
         ),
-        Statement::Truncate(_) => (Vec::new(), false, "TRUNCATE".to_string()),
-        Statement::AlterTable(_) => (Vec::new(), false, "ALTER TABLE".to_string()),
+        Statement::Truncate(_) => (Vec::new(), Vec::new(), false, "TRUNCATE".to_string()),
+        Statement::AlterTable(_) => (Vec::new(), Vec::new(), false, "ALTER TABLE".to_string()),
     };
     Ok(PlannedQuery {
         statement,
         columns,
+        column_type_oids,
         returns_data,
         command_tag,
     })
@@ -3226,10 +3281,21 @@ fn type_signature_from_ast(ty: TypeName) -> TypeSignature {
 
 fn type_signature_to_oid(ty: TypeSignature) -> u32 {
     match ty {
-        TypeSignature::Bool => 16,
-        TypeSignature::Int8 => 20,
-        TypeSignature::Float8 => 701,
-        TypeSignature::Text => 25,
+        TypeSignature::Bool => PG_BOOL_OID,
+        TypeSignature::Int8 => PG_INT8_OID,
+        TypeSignature::Float8 => PG_FLOAT8_OID,
+        TypeSignature::Text => PG_TEXT_OID,
+    }
+}
+
+pub fn type_oid_size(type_oid: u32) -> i16 {
+    match type_oid {
+        PG_BOOL_OID => 1,
+        PG_INT8_OID => 8,
+        PG_FLOAT8_OID => 8,
+        PG_DATE_OID => 4,
+        PG_TIMESTAMP_OID => 8,
+        _ => -1,
     }
 }
 
@@ -4202,6 +4268,412 @@ fn coerce_value_for_column(
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlannedOutputColumn {
+    name: String,
+    type_oid: u32,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TypeScope {
+    unqualified: HashMap<String, u32>,
+    qualified: HashMap<String, u32>,
+    ambiguous: HashSet<String>,
+}
+
+impl TypeScope {
+    fn insert_unqualified(&mut self, key: &str, type_oid: u32) {
+        let key = key.to_ascii_lowercase();
+        if self.ambiguous.contains(&key) {
+            return;
+        }
+        if self.unqualified.contains_key(&key) {
+            self.unqualified.remove(&key);
+            self.ambiguous.insert(key);
+        } else {
+            self.unqualified.insert(key, type_oid);
+        }
+    }
+
+    fn insert_qualified(&mut self, parts: &[String], type_oid: u32) {
+        let key = parts
+            .iter()
+            .map(|part| part.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        self.qualified.insert(key, type_oid);
+    }
+
+    fn lookup_identifier(&self, parts: &[String]) -> Option<u32> {
+        if parts.is_empty() {
+            return None;
+        }
+
+        if parts.len() == 1 {
+            let key = parts[0].to_ascii_lowercase();
+            if self.ambiguous.contains(&key) {
+                return None;
+            }
+            return self.unqualified.get(&key).copied();
+        }
+
+        let key = parts
+            .iter()
+            .map(|part| part.to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(".");
+        self.qualified.get(&key).copied()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExpandedFromTypeColumn {
+    label: String,
+    lookup_parts: Vec<String>,
+    type_oid: u32,
+}
+
+fn cast_type_name_to_oid(type_name: &str) -> u32 {
+    match type_name.to_ascii_lowercase().as_str() {
+        "boolean" | "bool" => PG_BOOL_OID,
+        "int8" | "int4" | "int2" | "bigint" | "integer" | "smallint" => PG_INT8_OID,
+        "float8" | "float4" | "numeric" | "decimal" | "real" => PG_FLOAT8_OID,
+        "date" => PG_DATE_OID,
+        "timestamp" | "timestamptz" => PG_TIMESTAMP_OID,
+        _ => PG_TEXT_OID,
+    }
+}
+
+fn infer_numeric_result_oid(left: u32, right: u32) -> u32 {
+    if left == PG_FLOAT8_OID || right == PG_FLOAT8_OID {
+        PG_FLOAT8_OID
+    } else {
+        PG_INT8_OID
+    }
+}
+
+fn infer_common_type_oid(
+    exprs: &[Expr],
+    scope: &TypeScope,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> u32 {
+    let mut oid = PG_TEXT_OID;
+    for expr in exprs {
+        let next = infer_expr_type_oid(expr, scope, ctes);
+        if next == PG_TEXT_OID {
+            continue;
+        }
+        if oid == PG_TEXT_OID {
+            oid = next;
+            continue;
+        }
+        if oid == next {
+            continue;
+        }
+        if (oid == PG_INT8_OID || oid == PG_FLOAT8_OID)
+            && (next == PG_INT8_OID || next == PG_FLOAT8_OID)
+        {
+            oid = infer_numeric_result_oid(oid, next);
+            continue;
+        }
+        oid = PG_TEXT_OID;
+    }
+    oid
+}
+
+fn infer_function_return_oid(
+    name: &[String],
+    args: &[Expr],
+    scope: &TypeScope,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> u32 {
+    let fn_name = name
+        .last()
+        .map(|part| part.to_ascii_lowercase())
+        .unwrap_or_default();
+    match fn_name.as_str() {
+        "count" | "char_length" | "length" | "nextval" | "currval" | "setval" => PG_INT8_OID,
+        "extract" | "date_part" => PG_INT8_OID,
+        "avg" => PG_FLOAT8_OID,
+        "sum" => args
+            .first()
+            .map(|expr| {
+                let oid = infer_expr_type_oid(expr, scope, ctes);
+                if oid == PG_FLOAT8_OID {
+                    PG_FLOAT8_OID
+                } else {
+                    PG_INT8_OID
+                }
+            })
+            .unwrap_or(PG_INT8_OID),
+        "min" | "max" | "nullif" => args
+            .first()
+            .map(|expr| infer_expr_type_oid(expr, scope, ctes))
+            .unwrap_or(PG_TEXT_OID),
+        "coalesce" | "greatest" | "least" => infer_common_type_oid(args, scope, ctes),
+        "date" | "current_date" => PG_DATE_OID,
+        "timestamp" | "current_timestamp" | "now" | "date_trunc" => PG_TIMESTAMP_OID,
+        "date_add" | "date_sub" => PG_DATE_OID,
+        "jsonb_path_exists" | "jsonb_path_match" | "jsonb_exists" | "jsonb_exists_any"
+        | "jsonb_exists_all" => PG_BOOL_OID,
+        _ => PG_TEXT_OID,
+    }
+}
+
+fn infer_expr_type_oid(
+    expr: &Expr,
+    scope: &TypeScope,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> u32 {
+    match expr {
+        Expr::Identifier(parts) => scope.lookup_identifier(parts).unwrap_or(PG_TEXT_OID),
+        Expr::String(_) => PG_TEXT_OID,
+        Expr::Integer(_) => PG_INT8_OID,
+        Expr::Float(_) => PG_FLOAT8_OID,
+        Expr::Boolean(_) => PG_BOOL_OID,
+        Expr::Null => PG_TEXT_OID,
+        Expr::Parameter(_) => PG_TEXT_OID,
+        Expr::FunctionCall { name, args, .. } => infer_function_return_oid(name, args, scope, ctes),
+        Expr::Cast { type_name, .. } => cast_type_name_to_oid(type_name),
+        Expr::Wildcard => PG_TEXT_OID,
+        Expr::Unary { op, expr } => match op {
+            UnaryOp::Not => PG_BOOL_OID,
+            UnaryOp::Plus | UnaryOp::Minus => infer_expr_type_oid(expr, scope, ctes),
+        },
+        Expr::Binary { left, op, right } => {
+            let left_oid = infer_expr_type_oid(left, scope, ctes);
+            let right_oid = infer_expr_type_oid(right, scope, ctes);
+            match op {
+                BinaryOp::Or
+                | BinaryOp::And
+                | BinaryOp::Eq
+                | BinaryOp::NotEq
+                | BinaryOp::Lt
+                | BinaryOp::Lte
+                | BinaryOp::Gt
+                | BinaryOp::Gte
+                | BinaryOp::JsonContains
+                | BinaryOp::JsonContainedBy
+                | BinaryOp::JsonPathExists
+                | BinaryOp::JsonPathMatch
+                | BinaryOp::JsonHasKey
+                | BinaryOp::JsonHasAny
+                | BinaryOp::JsonHasAll => PG_BOOL_OID,
+                BinaryOp::JsonGet
+                | BinaryOp::JsonGetText
+                | BinaryOp::JsonPath
+                | BinaryOp::JsonPathText
+                | BinaryOp::JsonConcat
+                | BinaryOp::JsonDeletePath => PG_TEXT_OID,
+                BinaryOp::Add => {
+                    if (left_oid == PG_DATE_OID || left_oid == PG_TIMESTAMP_OID)
+                        && right_oid == PG_INT8_OID
+                    {
+                        left_oid
+                    } else if (right_oid == PG_DATE_OID || right_oid == PG_TIMESTAMP_OID)
+                        && left_oid == PG_INT8_OID
+                    {
+                        right_oid
+                    } else {
+                        infer_numeric_result_oid(left_oid, right_oid)
+                    }
+                }
+                BinaryOp::Sub => {
+                    if (left_oid == PG_DATE_OID || left_oid == PG_TIMESTAMP_OID)
+                        && (right_oid == PG_DATE_OID || right_oid == PG_TIMESTAMP_OID)
+                    {
+                        PG_INT8_OID
+                    } else if (left_oid == PG_DATE_OID || left_oid == PG_TIMESTAMP_OID)
+                        && right_oid == PG_INT8_OID
+                    {
+                        left_oid
+                    } else if left_oid == PG_TEXT_OID && right_oid == PG_TEXT_OID {
+                        PG_TEXT_OID
+                    } else {
+                        infer_numeric_result_oid(left_oid, right_oid)
+                    }
+                }
+                BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
+                    infer_numeric_result_oid(left_oid, right_oid)
+                }
+            }
+        }
+        Expr::Exists(_)
+        | Expr::InList { .. }
+        | Expr::InSubquery { .. }
+        | Expr::Between { .. }
+        | Expr::Like { .. }
+        | Expr::IsNull { .. }
+        | Expr::IsDistinctFrom { .. } => PG_BOOL_OID,
+        Expr::ScalarSubquery(query) => {
+            let mut nested = ctes.clone();
+            derive_query_output_columns_with_ctes(query, &mut nested)
+                .ok()
+                .and_then(|cols| cols.first().map(|col| col.type_oid))
+                .unwrap_or(PG_TEXT_OID)
+        }
+    }
+}
+
+fn infer_select_target_name(target: &SelectItem) -> Result<String, EngineError> {
+    if let Some(alias) = &target.alias {
+        return Ok(alias.clone());
+    }
+    let name = match &target.expr {
+        Expr::Identifier(parts) => parts
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "?column?".to_string()),
+        Expr::FunctionCall { name, .. } => name
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "?column?".to_string()),
+        Expr::Wildcard => {
+            return Err(EngineError {
+                message: "wildcard target requires FROM support".to_string(),
+            });
+        }
+        _ => "?column?".to_string(),
+    };
+    Ok(name)
+}
+
+fn derive_query_output_columns(query: &Query) -> Result<Vec<PlannedOutputColumn>, EngineError> {
+    let mut ctes = HashMap::new();
+    derive_query_output_columns_with_ctes(query, &mut ctes)
+}
+
+fn derive_query_output_columns_with_ctes(
+    query: &Query,
+    ctes: &mut HashMap<String, Vec<PlannedOutputColumn>>,
+) -> Result<Vec<PlannedOutputColumn>, EngineError> {
+    let mut local_ctes = ctes.clone();
+    if let Some(with) = &query.with {
+        for cte in &with.ctes {
+            let cte_name = cte.name.to_ascii_lowercase();
+            let cols = if with.recursive && query_references_relation(&cte.query, &cte_name) {
+                derive_recursive_cte_output_columns(cte, &local_ctes)?
+            } else {
+                derive_query_output_columns_with_ctes(&cte.query, &mut local_ctes)?
+            };
+            local_ctes.insert(cte_name, cols);
+        }
+    }
+    derive_query_expr_output_columns(&query.body, &local_ctes)
+}
+
+fn derive_recursive_cte_output_columns(
+    cte: &crate::parser::ast::CommonTableExpr,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> Result<Vec<PlannedOutputColumn>, EngineError> {
+    let cte_name = cte.name.to_ascii_lowercase();
+    let QueryExpr::SetOperation {
+        left,
+        op,
+        quantifier: _,
+        right,
+    } = &cte.query.body
+    else {
+        return Err(EngineError {
+            message: format!(
+                "recursive query \"{}\" must be of the form non-recursive-term UNION [ALL] recursive-term",
+                cte.name
+            ),
+        });
+    };
+    if *op != SetOperator::Union {
+        return Err(EngineError {
+            message: format!(
+                "recursive query \"{}\" must use UNION or UNION ALL",
+                cte.name
+            ),
+        });
+    }
+    validate_recursive_cte_terms(&cte.name, &cte_name, left, right)?;
+
+    let left_cols = derive_query_expr_output_columns(left, ctes)?;
+    let mut recursive_ctes = ctes.clone();
+    recursive_ctes.insert(cte_name, left_cols.clone());
+    let right_cols = derive_query_expr_output_columns(right, &recursive_ctes)?;
+    if left_cols.len() != right_cols.len() {
+        return Err(EngineError {
+            message: "set-operation inputs must have matching column counts".to_string(),
+        });
+    }
+    Ok(left_cols)
+}
+
+fn derive_query_expr_output_columns(
+    expr: &QueryExpr,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> Result<Vec<PlannedOutputColumn>, EngineError> {
+    match expr {
+        QueryExpr::Select(select) => derive_select_output_columns(select, ctes),
+        QueryExpr::SetOperation { left, right, .. } => {
+            let left_cols = derive_query_expr_output_columns(left, ctes)?;
+            let right_cols = derive_query_expr_output_columns(right, ctes)?;
+            if left_cols.len() != right_cols.len() {
+                return Err(EngineError {
+                    message: "set-operation inputs must have matching column counts".to_string(),
+                });
+            }
+            Ok(left_cols)
+        }
+        QueryExpr::Nested(query) => {
+            let mut nested = ctes.clone();
+            derive_query_output_columns_with_ctes(query, &mut nested)
+        }
+    }
+}
+
+fn derive_select_output_columns(
+    select: &SelectStatement,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> Result<Vec<PlannedOutputColumn>, EngineError> {
+    let from_columns = if select.from.is_empty() {
+        Vec::new()
+    } else {
+        expand_from_columns_typed(&select.from, ctes).unwrap_or_default()
+    };
+    let wildcard_columns = if select
+        .targets
+        .iter()
+        .any(|target| matches!(target.expr, Expr::Wildcard))
+    {
+        Some(expand_from_columns_typed(&select.from, ctes)?)
+    } else {
+        None
+    };
+
+    let mut type_scope = TypeScope::default();
+    for col in from_columns {
+        type_scope.insert_unqualified(&col.label, col.type_oid);
+        type_scope.insert_qualified(&col.lookup_parts, col.type_oid);
+    }
+
+    let mut columns = Vec::new();
+    for target in &select.targets {
+        if matches!(target.expr, Expr::Wildcard) {
+            let Some(expanded) = &wildcard_columns else {
+                return Err(EngineError {
+                    message: "wildcard target requires FROM support".to_string(),
+                });
+            };
+            columns.extend(expanded.iter().map(|col| PlannedOutputColumn {
+                name: col.label.clone(),
+                type_oid: col.type_oid,
+            }));
+            continue;
+        }
+
+        columns.push(PlannedOutputColumn {
+            name: infer_select_target_name(target)?,
+            type_oid: infer_expr_type_oid(&target.expr, &type_scope, ctes),
+        });
+    }
+    Ok(columns)
+}
+
 fn derive_query_columns(query: &Query) -> Result<Vec<String>, EngineError> {
     let mut ctes = HashMap::new();
     derive_query_columns_with_ctes(query, &mut ctes)
@@ -4529,6 +5001,53 @@ fn derive_dml_returning_columns(
     derive_returning_columns_from_table(&table, returning)
 }
 
+fn derive_dml_returning_column_type_oids(
+    table_name: &[String],
+    returning: &[crate::parser::ast::SelectItem],
+) -> Result<Vec<u32>, EngineError> {
+    if returning.is_empty() {
+        return Ok(Vec::new());
+    }
+    let table = with_catalog_read(|catalog| {
+        catalog
+            .resolve_table(table_name, &SearchPath::default())
+            .cloned()
+    })
+    .map_err(|err| EngineError {
+        message: err.message,
+    })?;
+    derive_returning_column_type_oids_from_table(&table, returning)
+}
+
+fn derive_returning_column_type_oids_from_table(
+    table: &crate::catalog::Table,
+    returning: &[crate::parser::ast::SelectItem],
+) -> Result<Vec<u32>, EngineError> {
+    let mut scope = TypeScope::default();
+    for column in table.columns() {
+        let oid = type_signature_to_oid(column.type_signature());
+        scope.insert_unqualified(column.name(), oid);
+        scope.insert_qualified(&[table.name().to_string(), column.name().to_string()], oid);
+        scope.insert_qualified(&[table.qualified_name(), column.name().to_string()], oid);
+    }
+
+    let ctes = HashMap::new();
+    let mut out = Vec::new();
+    for target in returning {
+        if matches!(target.expr, Expr::Wildcard) {
+            out.extend(
+                table
+                    .columns()
+                    .iter()
+                    .map(|column| type_signature_to_oid(column.type_signature())),
+            );
+            continue;
+        }
+        out.push(infer_expr_type_oid(&target.expr, &scope, &ctes));
+    }
+    Ok(out)
+}
+
 fn derive_returning_columns_from_table(
     table: &crate::catalog::Table,
     returning: &[crate::parser::ast::SelectItem],
@@ -4785,6 +5304,162 @@ fn expand_table_expression_columns(
     }
 }
 
+fn expand_from_columns_typed(
+    from: &[TableExpression],
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> Result<Vec<ExpandedFromTypeColumn>, EngineError> {
+    if from.is_empty() {
+        return Err(EngineError {
+            message: "wildcard target requires FROM support".to_string(),
+        });
+    }
+
+    let mut out = Vec::new();
+    for table in from {
+        out.extend(expand_table_expression_columns_typed(table, ctes)?);
+    }
+    Ok(out)
+}
+
+fn expand_table_expression_columns_typed(
+    table: &TableExpression,
+    ctes: &HashMap<String, Vec<PlannedOutputColumn>>,
+) -> Result<Vec<ExpandedFromTypeColumn>, EngineError> {
+    match table {
+        TableExpression::Relation(rel) => {
+            if rel.name.len() == 1 {
+                let key = rel.name[0].to_ascii_lowercase();
+                if let Some(columns) = ctes.get(&key) {
+                    let qualifier = rel
+                        .alias
+                        .as_ref()
+                        .map(|alias| alias.to_ascii_lowercase())
+                        .unwrap_or(key);
+                    return Ok(columns
+                        .iter()
+                        .map(|column| ExpandedFromTypeColumn {
+                            label: column.name.to_string(),
+                            lookup_parts: vec![qualifier.clone(), column.name.to_string()],
+                            type_oid: column.type_oid,
+                        })
+                        .collect());
+                }
+            }
+            let table = with_catalog_read(|catalog| {
+                catalog
+                    .resolve_table(&rel.name, &SearchPath::default())
+                    .cloned()
+            })
+            .map_err(|err| EngineError {
+                message: err.message,
+            })?;
+            let qualifier = rel
+                .alias
+                .as_ref()
+                .map(|alias| alias.to_ascii_lowercase())
+                .unwrap_or_else(|| table.name().to_string());
+            Ok(table
+                .columns()
+                .iter()
+                .map(|column| ExpandedFromTypeColumn {
+                    label: column.name().to_string(),
+                    lookup_parts: vec![qualifier.clone(), column.name().to_string()],
+                    type_oid: type_signature_to_oid(column.type_signature()),
+                })
+                .collect())
+        }
+        TableExpression::Function(function) => {
+            let column_names = if function.column_aliases.is_empty() {
+                table_function_output_columns(function)
+            } else {
+                function.column_aliases.clone()
+            };
+            let mut column_type_oids =
+                table_function_output_type_oids(function, column_names.len());
+            if column_type_oids.len() < column_names.len() {
+                column_type_oids.resize(column_names.len(), PG_TEXT_OID);
+            }
+            let qualifier = function
+                .alias
+                .as_ref()
+                .map(|alias| alias.to_ascii_lowercase())
+                .or_else(|| function.name.last().map(|name| name.to_ascii_lowercase()));
+            Ok(column_names
+                .into_iter()
+                .enumerate()
+                .map(|(idx, column_name)| {
+                    let lookup_parts = if let Some(qualifier) = &qualifier {
+                        vec![qualifier.clone(), column_name.clone()]
+                    } else {
+                        vec![column_name.clone()]
+                    };
+                    ExpandedFromTypeColumn {
+                        label: column_name,
+                        lookup_parts,
+                        type_oid: *column_type_oids.get(idx).unwrap_or(&PG_TEXT_OID),
+                    }
+                })
+                .collect())
+        }
+        TableExpression::Subquery(sub) => {
+            let mut nested = ctes.clone();
+            let cols = derive_query_output_columns_with_ctes(&sub.query, &mut nested)?;
+            if let Some(alias) = &sub.alias {
+                let qualifier = alias.to_ascii_lowercase();
+                Ok(cols
+                    .into_iter()
+                    .map(|col| ExpandedFromTypeColumn {
+                        label: col.name.clone(),
+                        lookup_parts: vec![qualifier.clone(), col.name],
+                        type_oid: col.type_oid,
+                    })
+                    .collect())
+            } else {
+                Ok(cols
+                    .into_iter()
+                    .map(|col| ExpandedFromTypeColumn {
+                        label: col.name.clone(),
+                        lookup_parts: vec![col.name],
+                        type_oid: col.type_oid,
+                    })
+                    .collect())
+            }
+        }
+        TableExpression::Join(join) => {
+            let left_cols = expand_table_expression_columns_typed(&join.left, ctes)?;
+            let right_cols = expand_table_expression_columns_typed(&join.right, ctes)?;
+            let using_columns = if join.natural {
+                left_cols
+                    .iter()
+                    .filter(|c| {
+                        right_cols
+                            .iter()
+                            .any(|r| r.label.eq_ignore_ascii_case(&c.label))
+                    })
+                    .map(|c| c.label.clone())
+                    .collect::<Vec<_>>()
+            } else if let Some(JoinCondition::Using(cols)) = &join.condition {
+                cols.clone()
+            } else {
+                Vec::new()
+            };
+            let using_set: HashSet<String> = using_columns
+                .iter()
+                .map(|column| column.to_ascii_lowercase())
+                .collect();
+
+            let mut out = left_cols;
+            for col in right_cols {
+                if using_set.contains(&col.label.to_ascii_lowercase()) {
+                    continue;
+                }
+                out.push(col);
+            }
+            Ok(out)
+        }
+    }
+}
+
 fn table_function_output_columns(function: &TableFunctionRef) -> Vec<String> {
     let fn_name = function
         .name
@@ -4798,6 +5473,41 @@ fn table_function_output_columns(function: &TableFunctionRef) -> Vec<String> {
         "json_object_keys" | "jsonb_object_keys" => vec!["key".to_string()],
         _ => vec!["value".to_string()],
     }
+}
+
+fn table_function_output_type_oids(function: &TableFunctionRef, count: usize) -> Vec<u32> {
+    if !function.column_alias_types.is_empty() {
+        return function
+            .column_alias_types
+            .iter()
+            .take(count)
+            .map(|entry| {
+                entry
+                    .as_deref()
+                    .map(cast_type_name_to_oid)
+                    .unwrap_or(PG_TEXT_OID)
+            })
+            .collect();
+    }
+
+    let fn_name = function
+        .name
+        .last()
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut oids = match fn_name.as_str() {
+        "json_each" | "jsonb_each" | "json_each_text" | "jsonb_each_text" => {
+            vec![PG_TEXT_OID, PG_TEXT_OID]
+        }
+        "json_object_keys" | "jsonb_object_keys" => vec![PG_TEXT_OID],
+        _ => vec![PG_TEXT_OID],
+    };
+    if oids.len() < count {
+        oids.resize(count, PG_TEXT_OID);
+    } else if oids.len() > count {
+        oids.truncate(count);
+    }
+    oids
 }
 
 fn execute_query(query: &Query, params: &[Option<String>]) -> Result<QueryResult, EngineError> {

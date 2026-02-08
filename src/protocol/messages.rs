@@ -193,8 +193,9 @@ pub fn decode_frontend_message(tag: u8, payload: &[u8]) -> Result<FrontendMessag
             let statement_name = cursor.read_cstring()?;
 
             let param_format_count = cursor.read_i16()? as usize;
+            let mut param_formats = Vec::with_capacity(param_format_count);
             for _ in 0..param_format_count {
-                let _ = cursor.read_i16()?;
+                param_formats.push(cursor.read_i16()?);
             }
 
             let param_count = cursor.read_i16()? as usize;
@@ -208,20 +209,23 @@ pub fn decode_frontend_message(tag: u8, payload: &[u8]) -> Result<FrontendMessag
                         message: "bind parameter length is invalid".to_string(),
                     });
                 } else {
-                    let raw = cursor.read_bytes(len as usize)?;
-                    params.push(Some(decode_utf8(raw, "bind parameter value")?));
+                    let raw = cursor.read_bytes(len as usize)?.to_vec();
+                    params.push(Some(raw));
                 }
             }
 
             let result_format_count = cursor.read_i16()? as usize;
+            let mut result_formats = Vec::with_capacity(result_format_count);
             for _ in 0..result_format_count {
-                let _ = cursor.read_i16()?;
+                result_formats.push(cursor.read_i16()?);
             }
 
             FrontendMessage::Bind {
                 portal_name,
                 statement_name,
+                param_formats,
                 params,
+                result_formats,
             }
         }
         b'E' => FrontendMessage::Execute {
@@ -672,7 +676,9 @@ mod tests {
             FrontendMessage::Bind {
                 portal_name: "p1".to_string(),
                 statement_name: "s1".to_string(),
-                params: vec![Some("7".to_string())],
+                param_formats: vec![],
+                params: vec![Some(b"7".to_vec())],
+                result_formats: vec![],
             }
         );
 

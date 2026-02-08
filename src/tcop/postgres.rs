@@ -19,7 +19,7 @@ use crate::security::{self, CreateRoleOptions, RlsCommand, RlsPolicy, TablePrivi
 use crate::tcop::engine::{
     EngineError, PlannedQuery, QueryResult, ScalarValue, copy_insert_rows,
     copy_table_binary_snapshot, copy_table_column_oids, execute_planned_query, plan_statement,
-    restore_state, snapshot_state,
+    restore_state, snapshot_state, type_oid_size,
 };
 use crate::txn::TransactionState;
 use crate::txn::visibility::VisibilityMode;
@@ -77,7 +77,9 @@ pub enum FrontendMessage {
     Bind {
         portal_name: String,
         statement_name: String,
-        params: Vec<Option<String>>,
+        param_formats: Vec<i16>,
+        params: Vec<Option<Vec<u8>>>,
+        result_formats: Vec<i16>,
     },
     Execute {
         portal_name: String,
@@ -210,6 +212,7 @@ struct PreparedStatement {
 struct Portal {
     operation: PlannedOperation,
     params: Vec<Option<String>>,
+    result_format_codes: Vec<i16>,
     result_cache: Option<QueryResult>,
     cursor: usize,
     row_description_sent: bool,
@@ -582,9 +585,18 @@ impl PostgresSession {
             FrontendMessage::Bind {
                 portal_name,
                 statement_name,
+                param_formats,
                 params,
+                result_formats,
             } => {
-                self.exec_bind_message(&portal_name, &statement_name, params, out)?;
+                self.exec_bind_message(
+                    &portal_name,
+                    &statement_name,
+                    param_formats,
+                    params,
+                    result_formats,
+                    out,
+                )?;
                 Ok(ControlFlow::Continue)
             }
             FrontendMessage::Execute {
@@ -929,6 +941,7 @@ impl PostgresSession {
 
         for statement_sql in statements {
             let operation = self.plan_query_string(&statement_sql)?;
+            let row_description = operation_row_description_fields(&operation, &[])?;
 
             if self.is_aborted_transaction_block() && !operation.allowed_in_failed_transaction() {
                 return Err(SessionError {
@@ -938,7 +951,7 @@ impl PostgresSession {
 
             let outcome = self.execute_operation(&operation, &[])?;
             let copy_in_started = matches!(outcome, ExecutionOutcome::CopyInStart { .. });
-            Self::emit_outcome(out, outcome, i64::MAX, None)?;
+            Self::emit_outcome(out, outcome, i64::MAX, None, row_description.as_deref())?;
             if copy_in_started {
                 return Ok(());
             }
@@ -986,7 +999,9 @@ impl PostgresSession {
         &mut self,
         portal_name: &str,
         statement_name: &str,
-        params: Vec<Option<String>>,
+        param_formats: Vec<i16>,
+        params: Vec<Option<Vec<u8>>>,
+        result_formats: Vec<i16>,
         out: &mut Vec<BackendMessage>,
     ) -> Result<(), SessionError> {
         self.start_xact_command();
@@ -1007,6 +1022,38 @@ impl PostgresSession {
             });
         }
 
+        let normalized_param_formats =
+            normalize_format_codes(&param_formats, params.len(), "bind parameter format codes")?;
+        if normalized_param_formats.iter().any(|format| *format != 0) {
+            return Err(SessionError {
+                message: "binary bind parameter formats are not supported yet".to_string(),
+            });
+        }
+        let params = params
+            .into_iter()
+            .map(|param| match param {
+                None => Ok(None),
+                Some(raw) => String::from_utf8(raw).map(Some).map_err(|_| SessionError {
+                    message: "bind parameter contains invalid UTF-8 text".to_string(),
+                }),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let result_column_count = match &prepared.operation {
+            PlannedOperation::ParsedQuery(plan) if plan.returns_data() => plan.columns().len(),
+            _ => 0,
+        };
+        let normalized_result_formats = normalize_format_codes(
+            &result_formats,
+            result_column_count,
+            "bind result format codes",
+        )?;
+        if normalized_result_formats.iter().any(|format| *format != 0) {
+            return Err(SessionError {
+                message: "binary result formats are not supported yet".to_string(),
+            });
+        }
+
         if self.is_aborted_transaction_block()
             && !prepared.operation.allowed_in_failed_transaction()
         {
@@ -1018,6 +1065,7 @@ impl PostgresSession {
         let portal = Portal {
             operation: prepared.operation,
             params,
+            result_format_codes: normalized_result_formats,
             result_cache: None,
             cursor: 0,
             row_description_sent: false,
@@ -1039,13 +1087,14 @@ impl PostgresSession {
         self.start_xact_command();
 
         let key = portal_key(portal_name);
-        let (operation, params, cached_result, cursor, row_desc_sent) = {
+        let (operation, params, result_formats, cached_result, cursor, row_desc_sent) = {
             let portal = self.portals.get(&key).ok_or_else(|| SessionError {
                 message: format!("portal \"{}\" does not exist", portal_name),
             })?;
             (
                 portal.operation.clone(),
                 portal.params.clone(),
+                portal.result_format_codes.clone(),
                 portal.result_cache.clone(),
                 portal.cursor,
                 portal.row_description_sent,
@@ -1068,6 +1117,7 @@ impl PostgresSession {
         } else {
             self.execute_operation(&operation, &params)?
         };
+        let row_description = operation_row_description_fields(&operation, &result_formats)?;
 
         let portal = self.portals.get_mut(&key).ok_or_else(|| SessionError {
             message: format!("portal \"{}\" does not exist", portal_name),
@@ -1084,6 +1134,7 @@ impl PostgresSession {
             outcome,
             max_rows,
             Some((portal, cursor, row_desc_sent)),
+            row_description.as_deref(),
         )?;
 
         if operation.is_transaction_exit() {
@@ -1114,7 +1165,7 @@ impl PostgresSession {
         match &prepared.operation {
             PlannedOperation::ParsedQuery(plan) if plan.returns_data() => {
                 out.push(BackendMessage::RowDescription {
-                    fields: describe_fields_without_rows(plan.columns()),
+                    fields: describe_fields_for_plan(plan, &[])?,
                 });
             }
             _ => out.push(BackendMessage::NoData),
@@ -1143,7 +1194,7 @@ impl PostgresSession {
         match &portal.operation {
             PlannedOperation::ParsedQuery(plan) if plan.returns_data() => {
                 out.push(BackendMessage::RowDescription {
-                    fields: describe_fields_without_rows(plan.columns()),
+                    fields: describe_fields_for_plan(plan, &portal.result_format_codes)?,
                 });
             }
             _ => out.push(BackendMessage::NoData),
@@ -1172,6 +1223,7 @@ impl PostgresSession {
         outcome: ExecutionOutcome,
         max_rows: i64,
         portal_state: Option<(&mut Portal, usize, bool)>,
+        row_description: Option<&[RowDescriptionField]>,
     ) -> Result<(), SessionError> {
         match outcome {
             ExecutionOutcome::Command(completion) => {
@@ -1184,9 +1236,12 @@ impl PostgresSession {
             ExecutionOutcome::Query(result) => {
                 if let Some((portal, prev_cursor, prev_desc_sent)) = portal_state {
                     if !prev_desc_sent {
-                        out.push(BackendMessage::RowDescription {
-                            fields: infer_row_description_fields(&result.columns, &result.rows),
-                        });
+                        let fields = row_description
+                            .map(|fields| fields.to_vec())
+                            .unwrap_or_else(|| {
+                                infer_row_description_fields(&result.columns, &result.rows)
+                            });
+                        out.push(BackendMessage::RowDescription { fields });
                         portal.row_description_sent = true;
                     }
 
@@ -1220,9 +1275,10 @@ impl PostgresSession {
                     return Ok(());
                 }
 
-                out.push(BackendMessage::RowDescription {
-                    fields: infer_row_description_fields(&result.columns, &result.rows),
-                });
+                let fields = row_description
+                    .map(|fields| fields.to_vec())
+                    .unwrap_or_else(|| infer_row_description_fields(&result.columns, &result.rows));
+                out.push(BackendMessage::RowDescription { fields });
                 for row in &result.rows {
                     out.push(BackendMessage::DataRow {
                         values: row.iter().map(ScalarValue::render).collect(),
@@ -2603,11 +2659,75 @@ fn split_simple_query_statements(query: &str) -> Vec<String> {
     statements
 }
 
-fn describe_fields_without_rows(columns: &[String]) -> Vec<RowDescriptionField> {
-    columns
+fn operation_row_description_fields(
+    operation: &PlannedOperation,
+    result_formats: &[i16],
+) -> Result<Option<Vec<RowDescriptionField>>, SessionError> {
+    match operation {
+        PlannedOperation::ParsedQuery(plan) if plan.returns_data() => {
+            Ok(Some(describe_fields_for_plan(plan, result_formats)?))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn describe_fields_for_plan(
+    plan: &PlannedQuery,
+    result_formats: &[i16],
+) -> Result<Vec<RowDescriptionField>, SessionError> {
+    if !plan.returns_data() {
+        return Ok(Vec::new());
+    }
+    let columns = plan.columns();
+    let type_oids = plan.column_type_oids();
+    if columns.len() != type_oids.len() {
+        return Err(SessionError {
+            message: "planned query metadata is inconsistent".to_string(),
+        });
+    }
+    let format_codes =
+        normalize_format_codes(result_formats, columns.len(), "result column format codes")?;
+    Ok(columns
         .iter()
-        .map(|name| default_field_description(name, 25, -1))
-        .collect()
+        .enumerate()
+        .map(|(idx, name)| {
+            default_field_description(
+                name,
+                type_oids[idx],
+                type_oid_size(type_oids[idx]),
+                format_codes[idx],
+            )
+        })
+        .collect())
+}
+
+fn normalize_format_codes(
+    raw_formats: &[i16],
+    field_count: usize,
+    context: &str,
+) -> Result<Vec<i16>, SessionError> {
+    let formats = if raw_formats.is_empty() {
+        vec![0; field_count]
+    } else if raw_formats.len() == 1 {
+        vec![raw_formats[0]; field_count]
+    } else if raw_formats.len() == field_count {
+        raw_formats.to_vec()
+    } else {
+        return Err(SessionError {
+            message: format!(
+                "{context} must contain 0, 1, or {field_count} entries (got {})",
+                raw_formats.len()
+            ),
+        });
+    };
+    for format in &formats {
+        if *format != 0 && *format != 1 {
+            return Err(SessionError {
+                message: format!("{context} contains unsupported format code {}", format),
+            });
+        }
+    }
+    Ok(formats)
 }
 
 fn infer_row_description_fields(
@@ -2624,12 +2744,17 @@ fn infer_row_description_fields(
             Some(ScalarValue::Text(_)) => (25, -1),
             Some(ScalarValue::Null) | None => (25, -1),
         };
-        fields.push(default_field_description(name, type_oid, type_size));
+        fields.push(default_field_description(name, type_oid, type_size, 0));
     }
     fields
 }
 
-fn default_field_description(name: &str, type_oid: PgType, type_size: i16) -> RowDescriptionField {
+fn default_field_description(
+    name: &str,
+    type_oid: PgType,
+    type_size: i16,
+    format_code: i16,
+) -> RowDescriptionField {
     RowDescriptionField {
         name: name.to_string(),
         table_oid: 0,
@@ -2637,7 +2762,7 @@ fn default_field_description(name: &str, type_oid: PgType, type_size: i16) -> Ro
         type_oid,
         type_size,
         type_modifier: -1,
-        format_code: 0,
+        format_code,
     }
 }
 
@@ -2924,7 +3049,9 @@ mod tests {
             FrontendMessage::Bind {
                 portal_name: "p1".to_string(),
                 statement_name: "s1".to_string(),
+                param_formats: vec![],
                 params: vec![],
+                result_formats: vec![],
             },
             FrontendMessage::Execute {
                 portal_name: "p1".to_string(),
@@ -2990,6 +3117,69 @@ mod tests {
                 status: ReadyForQueryStatus::Idle
             }
         );
+    }
+
+    #[test]
+    fn describe_statement_uses_planned_type_metadata() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([
+                FrontendMessage::Parse {
+                    statement_name: "s1".to_string(),
+                    query: "SELECT 1::int8 AS id, 'x'::text AS name, true AS ok".to_string(),
+                    parameter_types: vec![],
+                },
+                FrontendMessage::DescribeStatement {
+                    statement_name: "s1".to_string(),
+                },
+                FrontendMessage::Sync,
+            ])
+        });
+
+        let fields = out
+            .iter()
+            .find_map(|msg| {
+                if let BackendMessage::RowDescription { fields } = msg {
+                    Some(fields.clone())
+                } else {
+                    None
+                }
+            })
+            .expect("row description should be present");
+        assert_eq!(
+            fields.iter().map(|field| field.type_oid).collect::<Vec<_>>(),
+            vec![20, 25, 16]
+        );
+    }
+
+    #[test]
+    fn bind_rejects_binary_result_format_codes() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run([
+                FrontendMessage::Parse {
+                    statement_name: "s1".to_string(),
+                    query: "SELECT 1".to_string(),
+                    parameter_types: vec![],
+                },
+                FrontendMessage::Bind {
+                    portal_name: "p1".to_string(),
+                    statement_name: "s1".to_string(),
+                    param_formats: vec![],
+                    params: vec![],
+                    result_formats: vec![1],
+                },
+                FrontendMessage::Sync,
+            ])
+        });
+
+        assert!(out.iter().any(|msg| {
+            matches!(
+                msg,
+                BackendMessage::ErrorResponse { message }
+                    if message.contains("binary result formats are not supported yet")
+            )
+        }));
     }
 
     #[test]
