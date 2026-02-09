@@ -124,6 +124,10 @@ pub enum Keyword {
     Unlisten,
     Local,
     Reset,
+    Extension,
+    Function,
+    Returns,
+    Language,
 }
 
 impl Keyword {
@@ -249,6 +253,10 @@ impl Keyword {
             "unlisten" => Some(Self::Unlisten),
             "local" => Some(Self::Local),
             "reset" => Some(Self::Reset),
+            "extension" => Some(Self::Extension),
+            "function" => Some(Self::Function),
+            "returns" => Some(Self::Returns),
+            "language" => Some(Self::Language),
             _ => None,
         }
     }
@@ -658,6 +666,42 @@ impl<'a> Lexer<'a> {
                 position: start,
             })?;
             return Ok(self.mk(start, TokenKind::Parameter(value)));
+        }
+
+        // Dollar-quoted string: $$ ... $$ or $tag$ ... $tag$
+        if self.peek_char() == Some('$') || self.peek_char().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+            // Build the delimiter tag
+            let tag_start = self.pos;
+            // Collect tag chars (if any) before closing $
+            while self.peek_char().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                self.advance_char();
+            }
+            if self.peek_char() == Some('$') {
+                self.advance_char(); // consume closing $ of opening delimiter
+                let tag = &self.input[tag_start..self.pos - 1]; // tag between the two $
+                let delimiter = format!("${}$", tag);
+                let body_start = self.pos;
+                // Find matching closing delimiter
+                loop {
+                    if self.pos >= self.input.len() {
+                        return Err(LexError {
+                            message: format!("unterminated dollar-quoted string (expected {})", delimiter),
+                            position: start,
+                        });
+                    }
+                    if self.input[self.pos..].starts_with(&delimiter) {
+                        let body = self.input[body_start..self.pos].to_string();
+                        // Advance past the closing delimiter
+                        for _ in 0..delimiter.len() {
+                            self.advance_char();
+                        }
+                        return Ok(self.mk(start, TokenKind::String(body)));
+                    }
+                    self.advance_char();
+                }
+            }
+            // Not a dollar-quoted string; reset position to after first $
+            self.pos = tag_start;
         }
 
         Ok(self.mk(start, TokenKind::Operator("$".to_string())))

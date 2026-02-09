@@ -29,6 +29,8 @@ use crate::parser::ast::{
     SetOperator, SetQuantifier, Statement, TableConstraint, TableExpression, TableFunctionRef,
     TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WindowFrameBound,
     WindowFrameUnits, WindowSpec, ExplainStatement, SetStatement, ShowStatement,
+    CreateExtensionStatement, DropExtensionStatement, CreateFunctionStatement,
+    FunctionParam, FunctionReturnType,
     // DiscardStatement, DoStatement, ListenStatement, NotifyStatement, UnlistenStatement used in pattern matching
 };
 use crate::security::{self, RlsCommand, TablePrivilege};
@@ -248,6 +250,9 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
         Statement::Listen(_) => (Vec::new(), Vec::new(), false, "LISTEN".to_string()),
         Statement::Notify(_) => (Vec::new(), Vec::new(), false, "NOTIFY".to_string()),
         Statement::Unlisten(_) => (Vec::new(), Vec::new(), false, "UNLISTEN".to_string()),
+        Statement::CreateExtension(_) => (Vec::new(), Vec::new(), false, "CREATE EXTENSION".to_string()),
+        Statement::DropExtension(_) => (Vec::new(), Vec::new(), false, "DROP EXTENSION".to_string()),
+        Statement::CreateFunction(_) => (Vec::new(), Vec::new(), false, "CREATE FUNCTION".to_string()),
     };
     Ok(PlannedQuery {
         statement,
@@ -308,6 +313,9 @@ pub fn execute_planned_query(
             columns: Vec::new(), rows: Vec::new(),
             command_tag: "UNLISTEN".to_string(), rows_affected: 0,
         },
+        Statement::CreateExtension(create) => execute_create_extension(create)?,
+        Statement::DropExtension(drop_ext) => execute_drop_extension(drop_ext)?,
+        Statement::CreateFunction(create) => execute_create_function(create)?,
     };
     Ok(result)
 }
@@ -532,6 +540,65 @@ fn acquire_refresh_execution_guard(
     Ok(RefreshExecutionGuard { relation_oid })
 }
 
+// ── Extension & User Function Registry ──────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct UserFunction {
+    pub name: Vec<String>,
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<FunctionReturnType>,
+    pub body: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExtensionRecord {
+    name: String,
+    version: String,
+    description: String,
+}
+
+/// WebSocket connection state for the ws extension
+#[derive(Debug, Clone)]
+pub struct WsConnection {
+    pub id: i64,
+    pub url: String,
+    pub state: String,
+    pub opened_at: String,
+    pub messages_in: i64,
+    pub messages_out: i64,
+    pub on_open: Option<String>,
+    pub on_message: Option<String>,
+    pub on_close: Option<String>,
+    pub inbound_queue: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ExtensionState {
+    extensions: Vec<ExtensionRecord>,
+    user_functions: Vec<UserFunction>,
+    ws_connections: HashMap<i64, WsConnection>,
+    ws_next_id: i64,
+}
+
+static GLOBAL_EXTENSION_STATE: OnceLock<RwLock<ExtensionState>> = OnceLock::new();
+
+fn global_extension_state() -> &'static RwLock<ExtensionState> {
+    GLOBAL_EXTENSION_STATE.get_or_init(|| RwLock::new(ExtensionState::default()))
+}
+
+fn with_ext_read<T>(f: impl FnOnce(&ExtensionState) -> T) -> T {
+    let state = global_extension_state().read().expect("ext state lock poisoned");
+    f(&state)
+}
+
+fn with_ext_write<T>(f: impl FnOnce(&mut ExtensionState) -> T) -> T {
+    let mut state = global_extension_state().write().expect("ext state lock poisoned");
+    f(&mut state)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone)]
 pub struct EngineStateSnapshot {
     catalog: crate::catalog::Catalog,
@@ -578,6 +645,9 @@ pub fn reset_global_storage_for_tests() {
     });
     with_refresh_scheduler_write(|scheduler| {
         scheduler.active_relation_oids.clear();
+    });
+    with_ext_write(|ext| {
+        *ext = ExtensionState::default();
     });
     security::reset_global_security_for_tests();
 }
@@ -4611,6 +4681,8 @@ fn infer_function_return_oid(
         "date_add" | "date_sub" => PG_DATE_OID,
         "jsonb_path_exists" | "jsonb_path_match" | "jsonb_exists" | "jsonb_exists_any"
         | "jsonb_exists_all" => PG_BOOL_OID,
+        "connect" if name.len() == 2 && name[0].eq_ignore_ascii_case("ws") => PG_INT8_OID,
+        "send" | "close" if name.len() == 2 && name[0].eq_ignore_ascii_case("ws") => PG_BOOL_OID,
         _ => PG_TEXT_OID,
     }
 }
@@ -5431,6 +5503,9 @@ fn resolve_virtual_relation_name(name: &[String]) -> Option<(String, String)> {
         {
             Some((schema.to_string(), relation.to_string()))
         }
+        [schema, relation] if schema == "ws" && relation == "connections" => {
+            Some(("ws".to_string(), "connections".to_string()))
+        }
         _ => None,
     }
 }
@@ -5441,7 +5516,7 @@ fn is_pg_catalog_virtual_relation(relation: &str) -> bool {
         "pg_namespace" | "pg_class" | "pg_attribute" | "pg_type"
             | "pg_database" | "pg_roles" | "pg_settings"
             | "pg_tables" | "pg_views" | "pg_indexes"
-            | "pg_proc" | "pg_constraint"
+            | "pg_proc" | "pg_constraint" | "pg_extension"
     )
 }
 
@@ -5617,6 +5692,19 @@ fn virtual_relation_column_defs(
             VirtualRelationColumnDef { name: "connamespace".to_string(), type_oid: PG_INT8_OID },
             VirtualRelationColumnDef { name: "contype".to_string(), type_oid: PG_TEXT_OID },
             VirtualRelationColumnDef { name: "conrelid".to_string(), type_oid: PG_INT8_OID },
+        ],
+        ("pg_catalog", "pg_extension") => vec![
+            VirtualRelationColumnDef { name: "extname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "extversion".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "extdescription".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("ws", "connections") => vec![
+            VirtualRelationColumnDef { name: "id".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "url".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "state".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "opened_at".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "messages_in".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "messages_out".to_string(), type_oid: PG_INT8_OID },
         ],
         _ => return None,
     };
@@ -7280,12 +7368,52 @@ fn virtual_relation_rows(
             })
         }
         ("pg_catalog", "pg_proc") => {
-            // Return empty - built-in functions don't have pg_proc entries yet
-            Ok(Vec::new())
+            // Return user-defined functions
+            Ok(with_ext_read(|ext| {
+                ext.user_functions.iter().enumerate().map(|(i, f)| {
+                    vec![
+                        ScalarValue::Int(90000 + i as i64),
+                        ScalarValue::Text(f.name.last().cloned().unwrap_or_default()),
+                        ScalarValue::Int(0), // pronamespace placeholder
+                    ]
+                }).collect()
+            }))
         }
         ("pg_catalog", "pg_constraint") => {
             // Return empty for now
             Ok(Vec::new())
+        }
+        ("pg_catalog", "pg_extension") => {
+            Ok(with_ext_read(|ext| {
+                ext.extensions.iter().map(|e| {
+                    vec![
+                        ScalarValue::Text(e.name.clone()),
+                        ScalarValue::Text(e.version.clone()),
+                        ScalarValue::Text(e.description.clone()),
+                    ]
+                }).collect()
+            }))
+        }
+        ("ws", "connections") => {
+            if !is_ws_extension_loaded() {
+                return Err(EngineError {
+                    message: "extension \"ws\" is not loaded".to_string(),
+                });
+            }
+            Ok(with_ext_read(|ext| {
+                let mut conns: Vec<_> = ext.ws_connections.values().collect();
+                conns.sort_by_key(|c| c.id);
+                conns.iter().map(|c| {
+                    vec![
+                        ScalarValue::Int(c.id),
+                        ScalarValue::Text(c.url.clone()),
+                        ScalarValue::Text(c.state.clone()),
+                        ScalarValue::Text(c.opened_at.clone()),
+                        ScalarValue::Int(c.messages_in),
+                        ScalarValue::Int(c.messages_out),
+                    ]
+                }).collect()
+            }))
         }
         _ => Err(EngineError {
             message: format!("relation \"{}.{}\" does not exist", schema, relation),
@@ -9982,6 +10110,24 @@ fn eval_function(
     for arg in args {
         values.push(eval_expr(arg, scope, params)?);
     }
+
+    // Handle schema-qualified extension functions (ws.connect, ws.send, ws.close)
+    if name.len() == 2 {
+        let schema = name[0].to_ascii_lowercase();
+        if schema == "ws" {
+            match fn_name.as_str() {
+                "connect" => return execute_ws_connect(&values),
+                "send" => return execute_ws_send(&values),
+                "close" => return execute_ws_close(&values),
+                _ => {
+                    return Err(EngineError {
+                        message: format!("function ws.{}() does not exist", fn_name),
+                    });
+                }
+            }
+        }
+    }
+
     eval_scalar_function(&fn_name, &values)
 }
 
@@ -13351,6 +13497,263 @@ fn truthy(value: &ScalarValue) -> bool {
         ScalarValue::Float(v) => *v != 0.0,
         ScalarValue::Text(v) => !v.is_empty(),
     }
+}
+
+// ── Extension & Function execution ──────────────────────────────────────────
+
+fn execute_create_extension(create: &CreateExtensionStatement) -> Result<QueryResult, EngineError> {
+    let name = create.name.to_ascii_lowercase();
+    with_ext_write(|ext| {
+        if ext.extensions.iter().any(|e| e.name == name) {
+            if create.if_not_exists {
+                return Ok(());
+            }
+            return Err(EngineError {
+                message: format!("extension \"{}\" already exists", name),
+            });
+        }
+        let (version, description) = match name.as_str() {
+            "ws" => ("1.0".to_string(), "WebSocket client extension".to_string()),
+            _ => {
+                return Err(EngineError {
+                    message: format!("extension \"{}\" is not available", name),
+                });
+            }
+        };
+        ext.extensions.push(ExtensionRecord {
+            name: name.clone(),
+            version,
+            description,
+        });
+        // Register ws extension functions as built-in markers
+        if name == "ws" {
+            ext.ws_next_id = 1;
+            ext.ws_connections.clear();
+        }
+        Ok(())
+    })?;
+    Ok(QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        command_tag: "CREATE EXTENSION".to_string(),
+        rows_affected: 0,
+    })
+}
+
+fn execute_drop_extension(drop_ext: &DropExtensionStatement) -> Result<QueryResult, EngineError> {
+    let name = drop_ext.name.to_ascii_lowercase();
+    with_ext_write(|ext| {
+        let before = ext.extensions.len();
+        ext.extensions.retain(|e| e.name != name);
+        if ext.extensions.len() == before && !drop_ext.if_exists {
+            return Err(EngineError {
+                message: format!("extension \"{}\" does not exist", name),
+            });
+        }
+        if name == "ws" {
+            ext.ws_connections.clear();
+            // Remove ws extension functions
+            ext.user_functions.retain(|f| {
+                f.name.first().map(|s| s.as_str()) != Some("ws")
+            });
+        }
+        Ok(())
+    })?;
+    Ok(QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        command_tag: "DROP EXTENSION".to_string(),
+        rows_affected: 0,
+    })
+}
+
+fn execute_create_function(create: &CreateFunctionStatement) -> Result<QueryResult, EngineError> {
+    let uf = UserFunction {
+        name: create.name.iter().map(|s| s.to_ascii_lowercase()).collect(),
+        params: create.params.clone(),
+        return_type: create.return_type.clone(),
+        body: create.body.trim().to_string(),
+        language: create.language.clone(),
+    };
+    with_ext_write(|ext| {
+        if create.or_replace {
+            ext.user_functions.retain(|f| f.name != uf.name);
+        } else if ext.user_functions.iter().any(|f| f.name == uf.name) {
+            return Err(EngineError {
+                message: format!("function \"{}\" already exists", uf.name.join(".")),
+            });
+        }
+        ext.user_functions.push(uf);
+        Ok(())
+    })?;
+    Ok(QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        command_tag: "CREATE FUNCTION".to_string(),
+        rows_affected: 0,
+    })
+}
+
+fn is_ws_extension_loaded() -> bool {
+    with_ext_read(|ext| ext.extensions.iter().any(|e| e.name == "ws"))
+}
+
+fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+    if !is_ws_extension_loaded() {
+        return Err(EngineError {
+            message: "extension \"ws\" is not loaded".to_string(),
+        });
+    }
+    let url = match args.first() {
+        Some(ScalarValue::Text(u)) => u.clone(),
+        _ => {
+            return Err(EngineError {
+                message: "ws.connect requires a URL argument".to_string(),
+            });
+        }
+    };
+    let on_open = match args.get(1) {
+        Some(ScalarValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let on_message = match args.get(2) {
+        Some(ScalarValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let on_close = match args.get(3) {
+        Some(ScalarValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+        _ => None,
+    };
+    let id = with_ext_write(|ext| {
+        let id = ext.ws_next_id;
+        ext.ws_next_id += 1;
+        ext.ws_connections.insert(id, WsConnection {
+            id,
+            url,
+            state: "connecting".to_string(),
+            opened_at: "2024-01-01 00:00:00".to_string(),
+            messages_in: 0,
+            messages_out: 0,
+            on_open,
+            on_message,
+            on_close,
+            inbound_queue: Vec::new(),
+        });
+        id
+    });
+    Ok(ScalarValue::Int(id))
+}
+
+fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+    if !is_ws_extension_loaded() {
+        return Err(EngineError {
+            message: "extension \"ws\" is not loaded".to_string(),
+        });
+    }
+    let conn_id = match args.first() {
+        Some(ScalarValue::Int(id)) => *id,
+        _ => {
+            return Err(EngineError {
+                message: "ws.send requires a connection id".to_string(),
+            });
+        }
+    };
+    let _message = match args.get(1) {
+        Some(ScalarValue::Text(m)) => m.clone(),
+        _ => {
+            return Err(EngineError {
+                message: "ws.send requires a message argument".to_string(),
+            });
+        }
+    };
+    with_ext_write(|ext| {
+        if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+            if conn.state == "closed" {
+                return Err(EngineError {
+                    message: format!("connection {} is closed", conn_id),
+                });
+            }
+            conn.messages_out += 1;
+            Ok(ScalarValue::Bool(true))
+        } else {
+            Err(EngineError {
+                message: format!("connection {} does not exist", conn_id),
+            })
+        }
+    })
+}
+
+fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+    if !is_ws_extension_loaded() {
+        return Err(EngineError {
+            message: "extension \"ws\" is not loaded".to_string(),
+        });
+    }
+    let conn_id = match args.first() {
+        Some(ScalarValue::Int(id)) => *id,
+        _ => {
+            return Err(EngineError {
+                message: "ws.close requires a connection id".to_string(),
+            });
+        }
+    };
+    with_ext_write(|ext| {
+        if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+            conn.state = "closed".to_string();
+            Ok(ScalarValue::Bool(true))
+        } else {
+            Err(EngineError {
+                message: format!("connection {} does not exist", conn_id),
+            })
+        }
+    })
+}
+
+/// Simulate receiving a message on a WebSocket connection (for testing).
+/// Dispatches the on_message callback if set.
+pub fn ws_simulate_message(conn_id: i64, message: &str) -> Result<Vec<QueryResult>, EngineError> {
+    let callback = with_ext_write(|ext| {
+        if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+            conn.messages_in += 1;
+            conn.inbound_queue.push(message.to_string());
+            Ok(conn.on_message.clone())
+        } else {
+            Err(EngineError {
+                message: format!("connection {} does not exist", conn_id),
+            })
+        }
+    })?;
+
+    let mut results = Vec::new();
+    if let Some(func_name) = callback {
+        // Look up the user function and execute it with the message as parameter
+        let uf = with_ext_read(|ext| {
+            ext.user_functions
+                .iter()
+                .find(|f| {
+                    let fname = f.name.last().map(|s| s.as_str()).unwrap_or("");
+                    fname == func_name.to_ascii_lowercase()
+                })
+                .cloned()
+        });
+        if let Some(uf) = uf {
+            // Execute the function body with message substituted for the first parameter
+            let body = uf.body.clone();
+            // Simple parameter substitution: replace references to the first param with the message value
+            let param_name = uf.params.first().and_then(|p| p.name.clone());
+            let substituted = if let Some(pname) = param_name {
+                body.replace(&pname, &format!("'{}'", message.replace('\'', "''")))
+            } else {
+                body.replace("$1", &format!("'{}'", message.replace('\'', "''")))
+            };
+            let stmt = crate::parser::sql_parser::parse_statement(&substituted)
+                .map_err(|e| EngineError { message: format!("callback parse error: {}", e) })?;
+            let planned = plan_statement(stmt)?;
+            let result = execute_planned_query(&planned, &[])?;
+            results.push(result);
+        }
+    }
+    Ok(results)
 }
 
 #[cfg(test)]
@@ -16885,5 +17288,222 @@ mod tests {
         assert_eq!(r.rows.len(), 3);
         assert_eq!(r.rows[0][0], ScalarValue::Int(1));
         assert_eq!(r.rows[2][1], ScalarValue::Text("c".to_string()));
+    }
+
+    // === Extension system tests ===
+
+    #[test]
+    fn create_and_drop_extension() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT extname, extversion FROM pg_extension",
+            "DROP EXTENSION ws",
+            "SELECT extname FROM pg_extension",
+        ]);
+        assert_eq!(results[0].command_tag, "CREATE EXTENSION");
+        assert_eq!(results[1].rows.len(), 1);
+        assert_eq!(results[1].rows[0][0], ScalarValue::Text("ws".to_string()));
+        assert_eq!(results[1].rows[0][1], ScalarValue::Text("1.0".to_string()));
+        assert_eq!(results[2].command_tag, "DROP EXTENSION");
+        assert_eq!(results[3].rows.len(), 0);
+    }
+
+    #[test]
+    fn create_extension_if_not_exists() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "CREATE EXTENSION IF NOT EXISTS ws",
+        ]);
+        assert_eq!(results[0].command_tag, "CREATE EXTENSION");
+        assert_eq!(results[1].command_tag, "CREATE EXTENSION");
+    }
+
+    #[test]
+    fn create_extension_duplicate_errors() {
+        with_isolated_state(|| {
+            run_statement("CREATE EXTENSION ws", &[]);
+            let result = parse_statement("CREATE EXTENSION ws")
+                .and_then(|s| plan_statement(s).map_err(|e| crate::parser::sql_parser::ParseError { message: e.message, position: 0 }))
+                .and_then(|p| execute_planned_query(&p, &[]).map_err(|e| crate::parser::sql_parser::ParseError { message: e.message, position: 0 }));
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn drop_extension_if_exists() {
+        run("DROP EXTENSION IF EXISTS ws");
+    }
+
+    #[test]
+    fn drop_extension_nonexistent_errors() {
+        with_isolated_state(|| {
+            let stmt = parse_statement("DROP EXTENSION ws").unwrap();
+            let planned = plan_statement(stmt).unwrap();
+            let result = execute_planned_query(&planned, &[]);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn create_extension_unknown_errors() {
+        with_isolated_state(|| {
+            let stmt = parse_statement("CREATE EXTENSION foobar").unwrap();
+            let planned = plan_statement(stmt).unwrap();
+            let result = execute_planned_query(&planned, &[]);
+            assert!(result.is_err());
+        });
+    }
+
+    // === CREATE FUNCTION tests ===
+
+    #[test]
+    fn create_function_basic() {
+        let results = run_batch(&[
+            "CREATE FUNCTION add_one(x INTEGER) RETURNS INTEGER AS $$ SELECT x + 1 $$ LANGUAGE sql",
+            "SELECT proname FROM pg_proc WHERE proname = 'add_one'",
+        ]);
+        assert_eq!(results[0].command_tag, "CREATE FUNCTION");
+        assert_eq!(results[1].rows.len(), 1);
+        assert_eq!(results[1].rows[0][0], ScalarValue::Text("add_one".to_string()));
+    }
+
+    #[test]
+    fn create_or_replace_function() {
+        let results = run_batch(&[
+            "CREATE FUNCTION my_fn(x TEXT) RETURNS TEXT AS $$ SELECT x $$ LANGUAGE sql",
+            "CREATE OR REPLACE FUNCTION my_fn(x TEXT) RETURNS TEXT AS $$ SELECT x $$ LANGUAGE sql",
+        ]);
+        assert_eq!(results[0].command_tag, "CREATE FUNCTION");
+        assert_eq!(results[1].command_tag, "CREATE FUNCTION");
+    }
+
+    #[test]
+    fn create_function_returns_table() {
+        run("CREATE FUNCTION my_tbl(msg JSONB) RETURNS TABLE(price TEXT, qty TEXT) AS $$ SELECT msg->>'p', msg->>'q' $$ LANGUAGE sql");
+    }
+
+    // === WebSocket extension tests ===
+
+    #[test]
+    fn ws_connect_returns_id() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT ws.connect('wss://example.com')",
+        ]);
+        assert_eq!(results[1].rows.len(), 1);
+        assert_eq!(results[1].rows[0][0], ScalarValue::Int(1));
+    }
+
+    #[test]
+    fn ws_connections_virtual_table() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT ws.connect('wss://example.com')",
+            "SELECT id, url, state FROM ws.connections",
+        ]);
+        assert_eq!(results[2].rows.len(), 1);
+        assert_eq!(results[2].rows[0][0], ScalarValue::Int(1));
+        assert_eq!(results[2].rows[0][1], ScalarValue::Text("wss://example.com".to_string()));
+        assert_eq!(results[2].rows[0][2], ScalarValue::Text("connecting".to_string()));
+    }
+
+    #[test]
+    fn ws_send_on_valid_connection() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT ws.connect('wss://example.com')",
+            "SELECT ws.send(1, 'hello')",
+        ]);
+        assert_eq!(results[2].rows[0][0], ScalarValue::Bool(true));
+    }
+
+    #[test]
+    fn ws_close_marks_connection_closed() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT ws.connect('wss://example.com')",
+            "SELECT ws.close(1)",
+            "SELECT state FROM ws.connections WHERE id = 1",
+        ]);
+        assert_eq!(results[2].rows[0][0], ScalarValue::Bool(true));
+        assert_eq!(results[3].rows[0][0], ScalarValue::Text("closed".to_string()));
+    }
+
+    #[test]
+    fn ws_send_on_invalid_id_errors() {
+        with_isolated_state(|| {
+            run_statement("CREATE EXTENSION ws", &[]);
+            let stmt = parse_statement("SELECT ws.send(999, 'hello')").unwrap();
+            let planned = plan_statement(stmt).unwrap();
+            let result = execute_planned_query(&planned, &[]);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn ws_connect_without_extension_errors() {
+        with_isolated_state(|| {
+            let stmt = parse_statement("SELECT ws.connect('wss://example.com')").unwrap();
+            let planned = plan_statement(stmt).unwrap();
+            let result = execute_planned_query(&planned, &[]);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn ws_multiple_connections() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT ws.connect('wss://a.com')",
+            "SELECT ws.connect('wss://b.com')",
+            "SELECT count(*) FROM ws.connections",
+        ]);
+        assert_eq!(results[1].rows[0][0], ScalarValue::Int(1));
+        assert_eq!(results[2].rows[0][0], ScalarValue::Int(2));
+        assert_eq!(results[3].rows[0][0], ScalarValue::Int(2));
+    }
+
+    #[test]
+    fn ws_drop_extension_clears_connections() {
+        let results = run_batch(&[
+            "CREATE EXTENSION ws",
+            "SELECT ws.connect('wss://example.com')",
+            "DROP EXTENSION ws",
+            "CREATE EXTENSION ws",
+            "SELECT count(*) FROM ws.connections",
+        ]);
+        assert_eq!(results[4].rows[0][0], ScalarValue::Int(0));
+    }
+
+    #[test]
+    fn ws_callback_on_message() {
+        with_isolated_state(|| {
+            run_statement("CREATE EXTENSION ws", &[]);
+            run_statement(
+                "CREATE FUNCTION handle_msg(msg JSONB) RETURNS TABLE(price TEXT) AS $$ SELECT msg->>'p' $$ LANGUAGE sql",
+                &[],
+            );
+            run_statement(
+                "SELECT ws.connect('wss://example.com', NULL, 'handle_msg', NULL)",
+                &[],
+            );
+            // Simulate a message arriving
+            let results = ws_simulate_message(1, r#"{"p":"100.5","q":"2.0"}"#).unwrap();
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].rows[0][0], ScalarValue::Text("100.5".to_string()));
+        });
+    }
+
+    #[test]
+    fn ws_send_on_closed_connection_errors() {
+        with_isolated_state(|| {
+            run_statement("CREATE EXTENSION ws", &[]);
+            run_statement("SELECT ws.connect('wss://example.com')", &[]);
+            run_statement("SELECT ws.close(1)", &[]);
+            let stmt = parse_statement("SELECT ws.send(1, 'hello')").unwrap();
+            let planned = plan_statement(stmt).unwrap();
+            let result = execute_planned_query(&planned, &[]);
+            assert!(result.is_err());
+        });
     }
 }

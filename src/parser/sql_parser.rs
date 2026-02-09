@@ -14,6 +14,8 @@ use crate::parser::ast::{
     WindowFrameBound, WindowFrameUnits, WindowSpec, WithClause,
     ExplainStatement, SetStatement, ShowStatement, DiscardStatement, DoStatement,
     ListenStatement, NotifyStatement, UnlistenStatement,
+    CreateExtensionStatement, DropExtensionStatement,
+    CreateFunctionStatement, FunctionParam, FunctionReturnType,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -174,6 +176,26 @@ impl Parser {
         };
         let unique = self.consume_keyword(Keyword::Unique);
         let materialized = self.consume_keyword(Keyword::Materialized);
+        if self.consume_keyword(Keyword::Extension) {
+            if or_replace || unique || materialized {
+                return Err(self.error_at_current("unexpected modifier before CREATE EXTENSION"));
+            }
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT")?;
+                true
+            } else {
+                false
+            };
+            let name = self.parse_identifier()?;
+            return Ok(Statement::CreateExtension(CreateExtensionStatement { name, if_not_exists }));
+        }
+        if self.consume_keyword(Keyword::Function) {
+            if unique || materialized {
+                return Err(self.error_at_current("unexpected modifier before CREATE FUNCTION"));
+            }
+            return self.parse_create_function(or_replace);
+        }
         if self.consume_keyword(Keyword::Index) {
             if or_replace {
                 return Err(self.error_at_current("OR REPLACE is only supported for CREATE VIEW"));
@@ -765,7 +787,29 @@ impl Parser {
                 behavior,
             }));
         }
-        Err(self.error_at_current("expected TABLE, SCHEMA, INDEX, SEQUENCE, or VIEW after DROP"))
+        if self.consume_keyword(Keyword::Extension) {
+            let if_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF in DROP EXTENSION")?;
+                true
+            } else {
+                false
+            };
+            let name = self.parse_identifier()?;
+            return Ok(Statement::DropExtension(DropExtensionStatement { name, if_exists }));
+        }
+        if self.consume_keyword(Keyword::Function) {
+            // DROP FUNCTION name - simple form only
+            let name = self.parse_qualified_name()?;
+            // consume optional parameter list
+            if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
+                while !self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+                    self.advance();
+                }
+            }
+            // We don't actually implement DROP FUNCTION yet, just parse it
+            return Err(self.error_at_current("DROP FUNCTION is not yet supported"));
+        }
+        Err(self.error_at_current("expected TABLE, SCHEMA, INDEX, SEQUENCE, VIEW, or EXTENSION after DROP"))
     }
 
     fn parse_truncate_statement(&mut self) -> Result<Statement, ParseError> {
@@ -2740,6 +2784,130 @@ impl Parser {
             value: "DEFAULT".to_string(),
             is_local: false,
         }))
+    }
+
+    fn parse_create_function(&mut self, or_replace: bool) -> Result<Statement, ParseError> {
+        let name = self.parse_qualified_name()?;
+        // Parse parameter list
+        self.expect_token(|k| matches!(k, TokenKind::LParen), "expected '(' after function name")?;
+        let mut params = Vec::new();
+        if !self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+            loop {
+                // Try name TYPE or just TYPE
+                let first_ident = self.parse_identifier()?;
+                let (param_name, data_type) = if let Ok(dt) = self.try_parse_type_name(&first_ident) {
+                    (None, dt)
+                } else {
+                    // first_ident is param name, next is type
+                    let type_ident = self.parse_identifier()?;
+                    let dt = self.try_parse_type_name(&type_ident).map_err(|_| {
+                        self.error_at_current(&format!("unknown type: {}", type_ident))
+                    })?;
+                    (Some(first_ident), dt)
+                };
+                // Check for DEFAULT
+                if self.consume_keyword(Keyword::Default) {
+                    // Skip the default expression (simple: just consume until , or ))
+                    while !matches!(self.current_kind(), TokenKind::Comma | TokenKind::RParen | TokenKind::Eof) {
+                        self.advance();
+                    }
+                }
+                params.push(FunctionParam { name: param_name, data_type });
+                if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                    self.expect_token(|k| matches!(k, TokenKind::RParen), "expected ')' or ',' in parameter list")?;
+                    break;
+                }
+            }
+        }
+        // Parse RETURNS
+        let return_type = if self.consume_keyword(Keyword::Returns) {
+            if self.consume_keyword(Keyword::Table) {
+                // RETURNS TABLE(col type, ...)
+                self.expect_token(|k| matches!(k, TokenKind::LParen), "expected '(' after TABLE")?;
+                let mut cols = Vec::new();
+                loop {
+                    let col_name = self.parse_identifier()?;
+                    let type_ident = self.parse_identifier()?;
+                    let dt = self.try_parse_type_name(&type_ident).map_err(|_| {
+                        self.error_at_current(&format!("unknown type: {}", type_ident))
+                    })?;
+                    cols.push(ColumnDefinition {
+                        name: col_name,
+                        data_type: dt,
+                        nullable: true,
+                        identity: false,
+                        primary_key: false,
+                        unique: false,
+                        references: None,
+                        check: None,
+                        default: None,
+                    });
+                    if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                        self.expect_token(|k| matches!(k, TokenKind::RParen), "expected ')'")?;
+                        break;
+                    }
+                }
+                Some(FunctionReturnType::Table(cols))
+            } else {
+                let type_ident = self.parse_identifier()?;
+                let dt = self.try_parse_type_name(&type_ident).map_err(|_| {
+                    self.error_at_current(&format!("unknown return type: {}", type_ident))
+                })?;
+                Some(FunctionReturnType::Type(dt))
+            }
+        } else {
+            None
+        };
+        // Parse AS $$ body $$
+        self.expect_keyword(Keyword::As, "expected AS before function body")?;
+        let body = match &self.tokens[self.idx].kind {
+            TokenKind::String(s) => {
+                let b = s.clone();
+                self.advance();
+                b
+            }
+            _ => return Err(self.error_at_current("expected dollar-quoted or string function body")),
+        };
+        // Optional LANGUAGE
+        let language = if self.consume_keyword(Keyword::Language) {
+            self.parse_identifier()?
+        } else {
+            "sql".to_string()
+        };
+        Ok(Statement::CreateFunction(CreateFunctionStatement {
+            name,
+            params,
+            return_type,
+            body,
+            language,
+            or_replace,
+        }))
+    }
+
+    fn try_parse_type_name(&self, ident: &str) -> Result<TypeName, ()> {
+        match ident.to_ascii_lowercase().as_str() {
+            "bool" | "boolean" => Ok(TypeName::Bool),
+            "int2" | "smallint" => Ok(TypeName::Int2),
+            "int4" | "integer" | "int" => Ok(TypeName::Int4),
+            "int8" | "bigint" => Ok(TypeName::Int8),
+            "float4" | "real" => Ok(TypeName::Float4),
+            "float8" | "double" => Ok(TypeName::Float8),
+            "text" => Ok(TypeName::Text),
+            "varchar" => Ok(TypeName::Varchar),
+            "char" => Ok(TypeName::Char),
+            "bytea" => Ok(TypeName::Bytea),
+            "uuid" => Ok(TypeName::Uuid),
+            "json" => Ok(TypeName::Json),
+            "jsonb" => Ok(TypeName::Jsonb),
+            "date" => Ok(TypeName::Date),
+            "timestamp" => Ok(TypeName::Timestamp),
+            "timestamptz" => Ok(TypeName::TimestampTz),
+            "interval" => Ok(TypeName::Interval),
+            "serial" => Ok(TypeName::Serial),
+            "bigserial" => Ok(TypeName::BigSerial),
+            "numeric" | "decimal" => Ok(TypeName::Numeric),
+            _ => Err(()),
+        }
     }
 
     fn parse_discard_statement(&mut self) -> Result<Statement, ParseError> {

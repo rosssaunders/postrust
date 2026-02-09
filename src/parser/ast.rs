@@ -28,6 +28,9 @@ pub enum Statement {
     Listen(ListenStatement),
     Notify(NotifyStatement),
     Unlisten(UnlistenStatement),
+    CreateExtension(CreateExtensionStatement),
+    DropExtension(DropExtensionStatement),
+    CreateFunction(CreateFunctionStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -659,4 +662,38 @@ pub enum BinaryOp {
     JsonHasAny,
     JsonHasAll,
     JsonDeletePath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateExtensionStatement {
+    pub name: String,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DropExtensionStatement {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionParam {
+    pub name: Option<String>,
+    pub data_type: TypeName,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FunctionReturnType {
+    Type(TypeName),
+    Table(Vec<ColumnDefinition>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFunctionStatement {
+    pub name: Vec<String>,
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<FunctionReturnType>,
+    pub body: String,
+    pub language: String,
+    pub or_replace: bool,
 }
