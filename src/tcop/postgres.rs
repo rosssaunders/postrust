@@ -1975,6 +1975,15 @@ fn starts_like_engine_statement(query: &str) -> bool {
         || first == "TRUNCATE"
         || first == "ALTER"
         || first == "REFRESH"
+        || first == "EXPLAIN"
+        || first == "SET"
+        || first == "SHOW"
+        || first == "RESET"
+        || first == "DISCARD"
+        || first == "DO"
+        || first == "LISTEN"
+        || first == "NOTIFY"
+        || first == "UNLISTEN"
         || query.starts_with('(')
 }
 

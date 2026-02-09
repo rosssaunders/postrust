@@ -20,6 +20,60 @@ pub enum Statement {
     DropView(DropViewStatement),
     Truncate(TruncateStatement),
     AlterTable(AlterTableStatement),
+    Explain(ExplainStatement),
+    Set(SetStatement),
+    Show(ShowStatement),
+    Discard(DiscardStatement),
+    Do(DoStatement),
+    Listen(ListenStatement),
+    Notify(NotifyStatement),
+    Unlisten(UnlistenStatement),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplainStatement {
+    pub analyze: bool,
+    pub verbose: bool,
+    pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetStatement {
+    pub name: String,
+    pub value: String,
+    pub is_local: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShowStatement {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscardStatement {
+    pub target: String, // ALL, PLANS, SEQUENCES, TEMP
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DoStatement {
+    pub body: String,
+    pub language: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListenStatement {
+    pub channel: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotifyStatement {
+    pub channel: String,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnlistenStatement {
+    pub channel: Option<String>, // None means UNLISTEN *
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

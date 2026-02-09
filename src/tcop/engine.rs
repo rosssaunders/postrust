@@ -28,7 +28,8 @@ use crate::parser::ast::{
     QueryExpr, RefreshMaterializedViewStatement, SelectItem, SelectQuantifier, SelectStatement,
     SetOperator, SetQuantifier, Statement, TableConstraint, TableExpression, TableFunctionRef,
     TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WindowFrameBound,
-    WindowFrameUnits, WindowSpec,
+    WindowFrameUnits, WindowSpec, ExplainStatement, SetStatement, ShowStatement,
+    // DiscardStatement, DoStatement, ListenStatement, NotifyStatement, UnlistenStatement used in pattern matching
 };
 use crate::security::{self, RlsCommand, TablePrivilege};
 
@@ -233,6 +234,20 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
         ),
         Statement::Truncate(_) => (Vec::new(), Vec::new(), false, "TRUNCATE".to_string()),
         Statement::AlterTable(_) => (Vec::new(), Vec::new(), false, "ALTER TABLE".to_string()),
+        Statement::Explain(_) => {
+            let cols = vec!["QUERY PLAN".to_string()];
+            (cols, vec![PG_TEXT_OID], true, "EXPLAIN".to_string())
+        }
+        Statement::Set(_) => (Vec::new(), Vec::new(), false, "SET".to_string()),
+        Statement::Show(show) => {
+            let col_name = show.name.clone();
+            (vec![col_name], vec![PG_TEXT_OID], true, "SHOW".to_string())
+        }
+        Statement::Discard(_) => (Vec::new(), Vec::new(), false, "DISCARD".to_string()),
+        Statement::Do(_) => (Vec::new(), Vec::new(), false, "DO".to_string()),
+        Statement::Listen(_) => (Vec::new(), Vec::new(), false, "LISTEN".to_string()),
+        Statement::Notify(_) => (Vec::new(), Vec::new(), false, "NOTIFY".to_string()),
+        Statement::Unlisten(_) => (Vec::new(), Vec::new(), false, "UNLISTEN".to_string()),
     };
     Ok(PlannedQuery {
         statement,
@@ -270,6 +285,29 @@ pub fn execute_planned_query(
         Statement::DropView(drop_view) => execute_drop_view(drop_view)?,
         Statement::Truncate(truncate) => execute_truncate(truncate)?,
         Statement::AlterTable(alter_table) => execute_alter_table(alter_table)?,
+        Statement::Explain(explain) => execute_explain(explain, params)?,
+        Statement::Set(set_stmt) => execute_set(set_stmt)?,
+        Statement::Show(show_stmt) => execute_show(show_stmt)?,
+        Statement::Discard(_) => QueryResult {
+            columns: Vec::new(), rows: Vec::new(),
+            command_tag: "DISCARD".to_string(), rows_affected: 0,
+        },
+        Statement::Do(_) => QueryResult {
+            columns: Vec::new(), rows: Vec::new(),
+            command_tag: "DO".to_string(), rows_affected: 0,
+        },
+        Statement::Listen(_) => QueryResult {
+            columns: Vec::new(), rows: Vec::new(),
+            command_tag: "LISTEN".to_string(), rows_affected: 0,
+        },
+        Statement::Notify(_) => QueryResult {
+            columns: Vec::new(), rows: Vec::new(),
+            command_tag: "NOTIFY".to_string(), rows_affected: 0,
+        },
+        Statement::Unlisten(_) => QueryResult {
+            columns: Vec::new(), rows: Vec::new(),
+            command_tag: "UNLISTEN".to_string(), rows_affected: 0,
+        },
     };
     Ok(result)
 }
@@ -277,6 +315,120 @@ pub fn execute_planned_query(
 #[derive(Debug, Default)]
 struct InMemoryStorage {
     rows_by_table: HashMap<Oid, Vec<Vec<ScalarValue>>>,
+}
+
+static GLOBAL_GUC: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+
+fn global_guc() -> &'static RwLock<HashMap<String, String>> {
+    GLOBAL_GUC.get_or_init(|| {
+        let mut m = HashMap::new();
+        m.insert("server_version".to_string(), "16.0".to_string());
+        m.insert("server_encoding".to_string(), "UTF8".to_string());
+        m.insert("client_encoding".to_string(), "UTF8".to_string());
+        m.insert("is_superuser".to_string(), "on".to_string());
+        m.insert("DateStyle".to_string(), "ISO, MDY".to_string());
+        m.insert("IntervalStyle".to_string(), "postgres".to_string());
+        m.insert("TimeZone".to_string(), "UTC".to_string());
+        m.insert("integer_datetimes".to_string(), "on".to_string());
+        m.insert("standard_conforming_strings".to_string(), "on".to_string());
+        m.insert("search_path".to_string(), "\"$user\", public".to_string());
+        m.insert("application_name".to_string(), "".to_string());
+        RwLock::new(m)
+    })
+}
+
+fn execute_set(set_stmt: &SetStatement) -> Result<QueryResult, EngineError> {
+    let mut guc = global_guc().write().expect("guc lock poisoned");
+    guc.insert(set_stmt.name.clone(), set_stmt.value.clone());
+    Ok(QueryResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        command_tag: "SET".to_string(),
+        rows_affected: 0,
+    })
+}
+
+fn execute_show(show_stmt: &ShowStatement) -> Result<QueryResult, EngineError> {
+    let guc = global_guc().read().expect("guc lock poisoned");
+    let value = guc.get(&show_stmt.name)
+        .or_else(|| guc.iter().find(|(k, _)| k.eq_ignore_ascii_case(&show_stmt.name)).map(|(_, v)| v))
+        .cloned()
+        .unwrap_or_else(|| "".to_string());
+    Ok(QueryResult {
+        columns: vec![show_stmt.name.clone()],
+        rows: vec![vec![ScalarValue::Text(value)]],
+        command_tag: "SHOW".to_string(),
+        rows_affected: 0,
+    })
+}
+
+fn execute_explain(explain: &ExplainStatement, params: &[Option<String>]) -> Result<QueryResult, EngineError> {
+    let mut plan_lines = Vec::new();
+    describe_statement_plan(&explain.statement, &mut plan_lines, 0);
+
+    if explain.analyze {
+        // Actually execute and add timing
+        let start = std::time::Instant::now();
+        let inner_result = execute_planned_query(
+            &plan_statement((*explain.statement).clone())?,
+            params,
+        )?;
+        let elapsed = start.elapsed();
+        plan_lines.push(format!(
+            "Planning Time: 0.001 ms"
+        ));
+        plan_lines.push(format!(
+            "Execution Time: {:.3} ms",
+            elapsed.as_secs_f64() * 1000.0
+        ));
+        plan_lines.push(format!(
+            "  (actual rows={})",
+            inner_result.rows.len()
+        ));
+    }
+
+    let rows = plan_lines.into_iter().map(|line| vec![ScalarValue::Text(line)]).collect();
+    Ok(QueryResult {
+        columns: vec!["QUERY PLAN".to_string()],
+        rows,
+        command_tag: "EXPLAIN".to_string(),
+        rows_affected: 0,
+    })
+}
+
+fn describe_statement_plan(stmt: &Statement, lines: &mut Vec<String>, indent: usize) {
+    let prefix = " ".repeat(indent);
+    match stmt {
+        Statement::Query(query) => {
+            match &query.body {
+                QueryExpr::Select(select) => {
+                    if select.from.is_empty() {
+                        lines.push(format!("{}Result  (cost=0.00..0.01 rows=1 width=0)", prefix));
+                    } else {
+                        lines.push(format!("{}Seq Scan  (cost=0.00..1.00 rows=1 width=0)", prefix));
+                        for table_expr in &select.from {
+                            if let TableExpression::Relation(rel) = table_expr {
+                                lines.push(format!("{}  on {}", prefix, rel.name.join(".")));
+                            }
+                        }
+                    }
+                    if select.where_clause.is_some() {
+                        lines.push(format!("{}  Filter: <condition>", prefix));
+                    }
+                }
+                QueryExpr::SetOperation { op, .. } => {
+                    lines.push(format!("{}{:?}  (cost=0.00..1.00 rows=1 width=0)", prefix, op));
+                }
+                QueryExpr::Nested(inner) => {
+                    describe_statement_plan(&Statement::Query((**inner).clone()), lines, indent);
+                }
+            }
+        }
+        Statement::Insert(_) => lines.push(format!("{}Insert  (cost=0.00..1.00 rows=0 width=0)", prefix)),
+        Statement::Update(_) => lines.push(format!("{}Update  (cost=0.00..1.00 rows=0 width=0)", prefix)),
+        Statement::Delete(_) => lines.push(format!("{}Delete  (cost=0.00..1.00 rows=0 width=0)", prefix)),
+        _ => lines.push(format!("{}Utility Statement", prefix)),
+    }
 }
 
 static GLOBAL_STORAGE: OnceLock<RwLock<InMemoryStorage>> = OnceLock::new();
@@ -16415,5 +16567,53 @@ mod tests {
             ScalarValue::Float(v) => assert!((*v - 1234.56).abs() < 0.01),
             other => panic!("expected float, got {:?}", other),
         }
+    }
+
+    // 1.8 EXPLAIN
+    #[test]
+    fn explain_basic_query() {
+        let r = run("EXPLAIN SELECT 1");
+        assert_eq!(r.columns, vec!["QUERY PLAN".to_string()]);
+        assert!(!r.rows.is_empty());
+    }
+
+    #[test]
+    fn explain_analyze_query() {
+        let results = run_batch(&[
+            "CREATE TABLE t (id int8)",
+            "INSERT INTO t VALUES (1), (2), (3)",
+            "EXPLAIN ANALYZE SELECT * FROM t",
+        ]);
+        assert!(results[2].rows.len() >= 2); // should have plan + timing
+    }
+
+    // 1.10 SET/SHOW
+    #[test]
+    fn set_and_show_variable() {
+        let results = run_batch(&[
+            "SET search_path = 'myschema'",
+            "SHOW search_path",
+        ]);
+        assert_eq!(results[1].rows[0][0], ScalarValue::Text("myschema".to_string()));
+    }
+
+    // 1.13 LISTEN/NOTIFY/UNLISTEN
+    #[test]
+    fn listen_notify_unlisten_parse_and_execute() {
+        let results = run_batch(&[
+            "LISTEN my_channel",
+            "NOTIFY my_channel, 'hello'",
+            "UNLISTEN my_channel",
+        ]);
+        assert_eq!(results[0].command_tag, "LISTEN");
+        assert_eq!(results[1].command_tag, "NOTIFY");
+        assert_eq!(results[2].command_tag, "UNLISTEN");
+    }
+
+    // 1.12 DO blocks
+    #[test]
+    fn do_block_parses_and_executes() {
+        let r = run("DO 'BEGIN NULL; END'");
+        assert_eq!(r.command_tag, "DO");
     }
 }

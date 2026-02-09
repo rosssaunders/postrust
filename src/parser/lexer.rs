@@ -114,6 +114,16 @@ pub enum Keyword {
     Restart,
     Start,
     With,
+    Explain,
+    Analyze,
+    Verbose,
+    Show,
+    Discard,
+    Listen,
+    Notify,
+    Unlisten,
+    Local,
+    Reset,
 }
 
 impl Keyword {
@@ -229,6 +239,16 @@ impl Keyword {
             "restart" => Some(Self::Restart),
             "start" => Some(Self::Start),
             "with" => Some(Self::With),
+            "explain" => Some(Self::Explain),
+            "analyze" => Some(Self::Analyze),
+            "verbose" => Some(Self::Verbose),
+            "show" => Some(Self::Show),
+            "discard" => Some(Self::Discard),
+            "listen" => Some(Self::Listen),
+            "notify" => Some(Self::Notify),
+            "unlisten" => Some(Self::Unlisten),
+            "local" => Some(Self::Local),
+            "reset" => Some(Self::Reset),
             _ => None,
         }
     }

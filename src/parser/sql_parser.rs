@@ -12,6 +12,8 @@ use crate::parser::ast::{
     SetQuantifier, Statement, SubqueryRef, TableConstraint, TableExpression, TableFunctionRef,
     TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WindowFrame,
     WindowFrameBound, WindowFrameUnits, WindowSpec, WithClause,
+    ExplainStatement, SetStatement, ShowStatement, DiscardStatement, DoStatement,
+    ListenStatement, NotifyStatement, UnlistenStatement,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -93,6 +95,42 @@ impl Parser {
         if self.peek_keyword(Keyword::Alter) {
             self.advance();
             return self.parse_alter_statement();
+        }
+        if self.peek_keyword(Keyword::Explain) {
+            self.advance();
+            return self.parse_explain_statement();
+        }
+        if self.peek_keyword(Keyword::Set) {
+            self.advance();
+            return self.parse_set_statement();
+        }
+        if self.peek_keyword(Keyword::Show) {
+            self.advance();
+            return self.parse_show_statement();
+        }
+        if self.peek_keyword(Keyword::Reset) {
+            self.advance();
+            return self.parse_reset_statement();
+        }
+        if self.peek_keyword(Keyword::Discard) {
+            self.advance();
+            return self.parse_discard_statement();
+        }
+        if self.peek_keyword(Keyword::Do) {
+            self.advance();
+            return self.parse_do_statement();
+        }
+        if self.peek_keyword(Keyword::Listen) {
+            self.advance();
+            return self.parse_listen_statement();
+        }
+        if self.peek_keyword(Keyword::Notify) {
+            self.advance();
+            return self.parse_notify_statement();
+        }
+        if self.peek_keyword(Keyword::Unlisten) {
+            self.advance();
+            return self.parse_unlisten_statement();
         }
 
         let query = self.parse_query()?;
@@ -2543,6 +2581,148 @@ impl Parser {
             position: self.tokens[self.idx].start,
         }
     }
+
+    fn parse_explain_statement(&mut self) -> Result<Statement, ParseError> {
+        let mut analyze = false;
+        let mut verbose = false;
+        // Check for EXPLAIN (options) or EXPLAIN ANALYZE VERBOSE
+        if self.consume_keyword(Keyword::Analyze) {
+            analyze = true;
+        }
+        if self.consume_keyword(Keyword::Verbose) {
+            verbose = true;
+        }
+        let inner = self.parse_top_level_statement()?;
+        Ok(Statement::Explain(ExplainStatement {
+            analyze,
+            verbose,
+            statement: Box::new(inner),
+        }))
+    }
+
+    fn parse_set_statement(&mut self) -> Result<Statement, ParseError> {
+        let is_local = self.consume_keyword(Keyword::Local);
+        let name = self.parse_identifier()?;
+        // Accept = or TO
+        if !self.consume_if(|k| matches!(k, TokenKind::Equal)) {
+            if !self.consume_keyword(Keyword::To) {
+                return Err(self.error_at_current("expected = or TO after SET variable name"));
+            }
+        }
+        // Collect the rest as value
+        let mut value_parts = Vec::new();
+        while !matches!(self.current_kind(), TokenKind::Eof) && !matches!(self.current_kind(), TokenKind::Semicolon) {
+            let token = &self.tokens[self.idx];
+            match &token.kind {
+                TokenKind::Keyword(kw) => value_parts.push(format!("{:?}", kw).to_lowercase()),
+                TokenKind::Identifier(s) => value_parts.push(s.clone()),
+                TokenKind::String(s) => value_parts.push(s.clone()),
+                TokenKind::Integer(i) => value_parts.push(i.to_string()),
+                TokenKind::Float(s) => value_parts.push(s.clone()),
+                TokenKind::Comma => value_parts.push(",".to_string()),
+                _ => value_parts.push(format!("{:?}", token.kind)),
+            }
+            self.advance();
+        }
+        Ok(Statement::Set(SetStatement {
+            name,
+            value: value_parts.join(" "),
+            is_local,
+        }))
+    }
+
+    fn parse_show_statement(&mut self) -> Result<Statement, ParseError> {
+        let name = if self.consume_keyword(Keyword::All) {
+            "all".to_string()
+        } else {
+            self.parse_identifier()?
+        };
+        Ok(Statement::Show(ShowStatement { name }))
+    }
+
+    fn parse_reset_statement(&mut self) -> Result<Statement, ParseError> {
+        let name = if self.consume_keyword(Keyword::All) {
+            "all".to_string()
+        } else {
+            self.parse_identifier()?
+        };
+        Ok(Statement::Set(SetStatement {
+            name,
+            value: "DEFAULT".to_string(),
+            is_local: false,
+        }))
+    }
+
+    fn parse_discard_statement(&mut self) -> Result<Statement, ParseError> {
+        let target = if self.consume_keyword(Keyword::All) {
+            "ALL".to_string()
+        } else {
+            self.parse_identifier()?.to_uppercase()
+        };
+        Ok(Statement::Discard(DiscardStatement { target }))
+    }
+
+    fn parse_do_statement(&mut self) -> Result<Statement, ParseError> {
+        // DO 'body' [LANGUAGE lang]
+        let body = match &self.tokens[self.idx].kind {
+            TokenKind::String(s) => {
+                let b = s.clone();
+                self.advance();
+                b
+            }
+            _ => return Err(self.error_at_current("expected string body after DO")),
+        };
+        // Optional LANGUAGE clause
+        let language = if !matches!(self.current_kind(), TokenKind::Eof) && !matches!(self.current_kind(), TokenKind::Semicolon) {
+            if let Some(token) = self.tokens.get(self.idx) {
+                if let TokenKind::Identifier(id) = &token.kind {
+                    if id.eq_ignore_ascii_case("language") {
+                        self.advance();
+                        self.parse_identifier()?
+                    } else {
+                        "plpgsql".to_string()
+                    }
+                } else {
+                    "plpgsql".to_string()
+                }
+            } else {
+                "plpgsql".to_string()
+            }
+        } else {
+            "plpgsql".to_string()
+        };
+        Ok(Statement::Do(DoStatement { body, language }))
+    }
+
+    fn parse_listen_statement(&mut self) -> Result<Statement, ParseError> {
+        let channel = self.parse_identifier()?;
+        Ok(Statement::Listen(ListenStatement { channel }))
+    }
+
+    fn parse_notify_statement(&mut self) -> Result<Statement, ParseError> {
+        let channel = self.parse_identifier()?;
+        let payload = if self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+            match &self.tokens[self.idx].kind {
+                TokenKind::String(s) => {
+                    let p = s.clone();
+                    self.advance();
+                    Some(p)
+                }
+                _ => return Err(self.error_at_current("expected string payload after NOTIFY channel,")),
+            }
+        } else {
+            None
+        };
+        Ok(Statement::Notify(NotifyStatement { channel, payload }))
+    }
+
+    fn parse_unlisten_statement(&mut self) -> Result<Statement, ParseError> {
+        if self.consume_if(|k| matches!(k, TokenKind::Star)) {
+            return Ok(Statement::Unlisten(UnlistenStatement { channel: None }));
+        }
+        let channel = self.parse_identifier()?;
+        Ok(Statement::Unlisten(UnlistenStatement { channel: Some(channel) }))
+    }
 }
 
 #[cfg(test)]
@@ -4088,5 +4268,89 @@ mod tests {
             function.column_alias_types,
             vec![Some("int8".to_string()), Some("text".to_string())]
         );
+    }
+
+    #[test]
+    fn parses_explain_statement() {
+        let stmt = parse_statement("EXPLAIN SELECT 1").unwrap();
+        assert!(matches!(stmt, Statement::Explain(_)));
+    }
+
+    #[test]
+    fn parses_explain_analyze() {
+        let stmt = parse_statement("EXPLAIN ANALYZE SELECT 1").unwrap();
+        match stmt {
+            Statement::Explain(e) => assert!(e.analyze),
+            _ => panic!("expected EXPLAIN"),
+        }
+    }
+
+    #[test]
+    fn parses_set_statement() {
+        let stmt = parse_statement("SET search_path = public").unwrap();
+        match stmt {
+            Statement::Set(s) => {
+                assert_eq!(s.name, "search_path");
+                assert_eq!(s.value, "public");
+            }
+            _ => panic!("expected SET"),
+        }
+    }
+
+    #[test]
+    fn parses_set_to_syntax() {
+        let stmt = parse_statement("SET timezone TO 'UTC'").unwrap();
+        match stmt {
+            Statement::Set(s) => {
+                assert_eq!(s.name, "timezone");
+                assert_eq!(s.value, "UTC");
+            }
+            _ => panic!("expected SET"),
+        }
+    }
+
+    #[test]
+    fn parses_show_statement() {
+        let stmt = parse_statement("SHOW search_path").unwrap();
+        match stmt {
+            Statement::Show(s) => assert_eq!(s.name, "search_path"),
+            _ => panic!("expected SHOW"),
+        }
+    }
+
+    #[test]
+    fn parses_listen_notify_unlisten() {
+        let stmt = parse_statement("LISTEN my_channel").unwrap();
+        assert!(matches!(stmt, Statement::Listen(_)));
+
+        let stmt = parse_statement("NOTIFY my_channel, 'payload'").unwrap();
+        match stmt {
+            Statement::Notify(n) => {
+                assert_eq!(n.channel, "my_channel");
+                assert_eq!(n.payload, Some("payload".to_string()));
+            }
+            _ => panic!("expected NOTIFY"),
+        }
+
+        let stmt = parse_statement("UNLISTEN *").unwrap();
+        match stmt {
+            Statement::Unlisten(u) => assert!(u.channel.is_none()),
+            _ => panic!("expected UNLISTEN"),
+        }
+    }
+
+    #[test]
+    fn parses_do_block() {
+        let stmt = parse_statement("DO 'BEGIN NULL; END'").unwrap();
+        match stmt {
+            Statement::Do(d) => assert_eq!(d.body, "BEGIN NULL; END"),
+            _ => panic!("expected DO"),
+        }
+    }
+
+    #[test]
+    fn parses_discard_all() {
+        let stmt = parse_statement("DISCARD ALL").unwrap();
+        assert!(matches!(stmt, Statement::Discard(_)));
     }
 }
