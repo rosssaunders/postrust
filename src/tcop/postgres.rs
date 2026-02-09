@@ -2820,106 +2820,59 @@ fn first_keyword_uppercase(query: &str) -> Option<String> {
         .map(|kw| kw.trim_matches(';').to_ascii_uppercase())
 }
 
+/// Split a SimpleQuery SQL string into individual statements using the lexer.
+///
+/// This delegates to `lex_sql` which already handles comments (`--`, `/* */`),
+/// string literals, dollar-quoted strings, and all other SQL syntax. We simply
+/// look for `Semicolon` tokens and extract the source text between them.
 fn split_simple_query_statements(query: &str) -> Vec<String> {
+    use crate::parser::lexer::{TokenKind, lex_sql};
+
+    let tokens = match lex_sql(query) {
+        Ok(tokens) => tokens,
+        Err(_) => {
+            // If lexing fails, return the whole query as a single statement
+            // and let the parser produce a proper error message.
+            let trimmed = query.trim();
+            if trimmed.is_empty() {
+                return Vec::new();
+            }
+            return vec![trimmed.to_string()];
+        }
+    };
+
     let mut statements = Vec::new();
-    let mut current = String::new();
+    // Track the start of the first token in each statement
+    let mut first_token_start: Option<usize> = None;
+    let mut last_token_end: usize = 0;
 
-    let chars: Vec<char> = query.chars().collect();
-    let mut i = 0usize;
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-
-    while i < chars.len() {
-        let ch = chars[i];
-
-        // Handle line comments (-- ...)
-        if in_line_comment {
-            if ch == '\n' {
-                in_line_comment = false;
-                current.push(' ');
-            }
-            i += 1;
-            continue;
-        }
-
-        // Handle block comments (/* ... */)
-        if in_block_comment {
-            if ch == '*' && i + 1 < chars.len() && chars[i + 1] == '/' {
-                in_block_comment = false;
-                current.push(' ');
-                i += 2;
-            } else {
-                i += 1;
-            }
-            continue;
-        }
-
-        if in_single {
-            current.push(ch);
-            if ch == '\'' {
-                if i + 1 < chars.len() && chars[i + 1] == '\'' {
-                    current.push(chars[i + 1]);
-                    i += 1;
-                } else {
-                    in_single = false;
+    for token in &tokens {
+        match &token.kind {
+            TokenKind::Semicolon => {
+                if let Some(start) = first_token_start {
+                    let fragment = query[start..last_token_end].trim();
+                    if !fragment.is_empty() {
+                        statements.push(fragment.to_string());
+                    }
                 }
+                first_token_start = None;
             }
-            i += 1;
-            continue;
-        }
-
-        if in_double {
-            current.push(ch);
-            if ch == '"' {
-                if i + 1 < chars.len() && chars[i + 1] == '"' {
-                    current.push(chars[i + 1]);
-                    i += 1;
-                } else {
-                    in_double = false;
+            TokenKind::Eof => break,
+            _ => {
+                if first_token_start.is_none() {
+                    first_token_start = Some(token.start);
                 }
+                last_token_end = token.end;
             }
-            i += 1;
-            continue;
         }
-
-        // Detect comment starts
-        if ch == '-' && i + 1 < chars.len() && chars[i + 1] == '-' {
-            in_line_comment = true;
-            i += 2;
-            continue;
-        }
-        if ch == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            in_block_comment = true;
-            i += 2;
-            continue;
-        }
-
-        match ch {
-            '\'' => {
-                in_single = true;
-                current.push(ch);
-            }
-            '"' => {
-                in_double = true;
-                current.push(ch);
-            }
-            ';' => {
-                let trimmed = current.trim();
-                if !trimmed.is_empty() {
-                    statements.push(trimmed.to_string());
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-        i += 1;
     }
 
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        statements.push(trimmed.to_string());
+    // Trailing statement without semicolon
+    if let Some(start) = first_token_start {
+        let fragment = query[start..last_token_end].trim();
+        if !fragment.is_empty() {
+            statements.push(fragment.to_string());
+        }
     }
 
     statements
