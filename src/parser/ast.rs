@@ -31,6 +31,7 @@ pub enum Statement {
     CreateExtension(CreateExtensionStatement),
     DropExtension(DropExtensionStatement),
     CreateFunction(CreateFunctionStatement),
+    Transaction(TransactionStatement),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +39,16 @@ pub struct ExplainStatement {
     pub analyze: bool,
     pub verbose: bool,
     pub statement: Box<Statement>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransactionStatement {
+    Begin,
+    Commit,
+    Rollback,
+    Savepoint(String),
+    ReleaseSavepoint(String),
+    RollbackToSavepoint(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

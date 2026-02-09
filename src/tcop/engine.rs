@@ -271,6 +271,12 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
         Statement::CreateExtension(_) => (Vec::new(), Vec::new(), false, "CREATE EXTENSION".to_string()),
         Statement::DropExtension(_) => (Vec::new(), Vec::new(), false, "DROP EXTENSION".to_string()),
         Statement::CreateFunction(_) => (Vec::new(), Vec::new(), false, "CREATE FUNCTION".to_string()),
+        Statement::Transaction(_) => {
+            return Err(EngineError {
+                message: "transaction statements must be executed via the session protocol"
+                    .to_string(),
+            });
+        }
     };
     Ok(PlannedQuery {
         statement,
@@ -335,6 +341,12 @@ pub fn execute_planned_query<'a>(
         Statement::CreateExtension(create) => execute_create_extension(create).await?,
         Statement::DropExtension(drop_ext) => execute_drop_extension(drop_ext).await?,
         Statement::CreateFunction(create) => execute_create_function(create).await?,
+        Statement::Transaction(_) => {
+            return Err(EngineError {
+                message: "transaction statements must be executed via the session protocol"
+                    .to_string(),
+            });
+        }
     };
     Ok(result)
     })

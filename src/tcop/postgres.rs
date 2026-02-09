@@ -22,7 +22,7 @@ use crate::tcop::engine::{
     copy_table_binary_snapshot, copy_table_column_oids, execute_planned_query, plan_statement,
     restore_state, snapshot_state, type_oid_size,
 };
-use crate::txn::TransactionState;
+use crate::txn::TransactionContext;
 use crate::txn::visibility::VisibilityMode;
 
 pub type PgType = u32;
@@ -272,9 +272,7 @@ impl PlannedOperation {
         matches!(
             self,
             Self::Transaction(
-                TransactionCommand::Commit
-                    | TransactionCommand::Rollback
-                    | TransactionCommand::RollbackToSavepoint(_)
+                TransactionCommand::Rollback | TransactionCommand::RollbackToSavepoint(_)
             )
         )
     }
@@ -420,7 +418,7 @@ pub struct PostgresSession {
     prepared_statements: HashMap<String, PreparedStatement>,
     portals: HashMap<String, Portal>,
     xact_started: bool,
-    tx_state: TransactionState,
+    tx_state: TransactionContext,
     ignore_till_sync: bool,
     doing_extended_query_message: bool,
     send_ready_for_query: bool,
@@ -440,7 +438,7 @@ impl Default for PostgresSession {
             prepared_statements: HashMap::new(),
             portals: HashMap::new(),
             xact_started: false,
-            tx_state: TransactionState::default(),
+            tx_state: TransactionContext::default(),
             ignore_till_sync: false,
             doing_extended_query_message: false,
             send_ready_for_query: true,
@@ -1882,7 +1880,9 @@ impl PostgresSession {
                 Ok(())
             }
             TransactionCommand::Rollback => {
-                self.tx_state.rollback();
+                if let Some(snapshot) = self.tx_state.rollback() {
+                    restore_state(snapshot);
+                }
                 Ok(())
             }
             TransactionCommand::Savepoint(name) => {
@@ -4561,6 +4561,57 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(data_rows, vec![vec!["1".to_string()]]);
+    }
+
+    #[test]
+    fn release_savepoint_keeps_prior_frames() {
+        let out = with_isolated_state(|| {
+            let mut session = PostgresSession::new();
+            session.run_sync([
+                FrontendMessage::Query {
+                    sql: "BEGIN".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "CREATE TABLE t (id int8)".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "SAVEPOINT s1".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "INSERT INTO t VALUES (1)".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "SAVEPOINT s2".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "INSERT INTO t VALUES (2)".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "RELEASE SAVEPOINT s2".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "ROLLBACK TO SAVEPOINT s1".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "SELECT * FROM t ORDER BY 1".to_string(),
+                },
+                FrontendMessage::Query {
+                    sql: "COMMIT".to_string(),
+                },
+            ])
+        });
+
+        let data_rows = out
+            .iter()
+            .filter_map(|message| {
+                if let BackendMessage::DataRow { values } = message {
+                    Some(values.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(data_rows.is_empty());
     }
 
     #[test]

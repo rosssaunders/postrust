@@ -12,44 +12,86 @@ struct SavepointFrame {
     snapshot: EngineStateSnapshot,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct TransactionState {
-    explicit_block: bool,
-    failed_block: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionState {
+    Idle,
+    InTransaction,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionContext {
+    state: TransactionState,
     snapshots: Option<TransactionSnapshots>,
     savepoints: Vec<SavepointFrame>,
 }
 
-impl TransactionState {
+impl Default for TransactionContext {
+    fn default() -> Self {
+        Self {
+            state: TransactionState::Idle,
+            snapshots: None,
+            savepoints: Vec::new(),
+        }
+    }
+}
+
+impl TransactionContext {
     pub fn begin(&mut self) {
-        if self.explicit_block {
+        if self.state != TransactionState::Idle {
             return;
         }
-        self.explicit_block = true;
-        self.failed_block = false;
+        self.state = TransactionState::InTransaction;
         self.snapshots = Some(TransactionSnapshots::capture());
         self.savepoints.clear();
     }
 
     pub fn commit(&mut self) -> Option<EngineStateSnapshot> {
-        if !self.explicit_block {
-            return None;
+        match self.state {
+            TransactionState::Idle => None,
+            TransactionState::InTransaction => {
+                let committed = self
+                    .snapshots
+                    .as_ref()
+                    .map(|snapshots| snapshots.working().clone());
+                self.clear();
+                committed
+            }
+            TransactionState::Failed => {
+                let restored = self
+                    .snapshots
+                    .as_ref()
+                    .map(|snapshots| snapshots.base().clone());
+                self.clear();
+                restored
+            }
         }
-        let committed = self
-            .snapshots
-            .as_ref()
-            .map(|snapshots| snapshots.working().clone());
-        self.clear();
-        committed
     }
 
-    pub fn rollback(&mut self) {
+    pub fn rollback(&mut self) -> Option<EngineStateSnapshot> {
+        if self.state == TransactionState::Idle {
+            return None;
+        }
+        let restored = self
+            .snapshots
+            .as_ref()
+            .map(|snapshots| snapshots.base().clone());
         self.clear();
+        restored
     }
 
     pub fn savepoint(&mut self, name: String) -> Result<(), String> {
-        if !self.explicit_block {
-            return Err("SAVEPOINT can only be used in transaction blocks".to_string());
+        match self.state {
+            TransactionState::InTransaction => {}
+            TransactionState::Idle => {
+                return Err("SAVEPOINT can only be used in transaction blocks".to_string())
+            }
+            TransactionState::Failed => {
+                return Err(
+                    "current transaction is aborted, commands ignored until end of transaction block"
+                        .to_string(),
+                )
+            }
         }
         let Some(snapshots) = &self.snapshots else {
             return Err("transaction state missing working snapshot".to_string());
@@ -62,8 +104,17 @@ impl TransactionState {
     }
 
     pub fn release_savepoint(&mut self, name: String) -> Result<(), String> {
-        if !self.explicit_block {
-            return Err("RELEASE SAVEPOINT can only be used in transaction blocks".to_string());
+        match self.state {
+            TransactionState::InTransaction => {}
+            TransactionState::Idle => {
+                return Err("RELEASE SAVEPOINT can only be used in transaction blocks".to_string())
+            }
+            TransactionState::Failed => {
+                return Err(
+                    "current transaction is aborted, commands ignored until end of transaction block"
+                        .to_string(),
+                )
+            }
         }
         let normalized = name.to_ascii_lowercase();
         let Some(idx) = self
@@ -81,7 +132,7 @@ impl TransactionState {
         &mut self,
         name: String,
     ) -> Result<Option<EngineStateSnapshot>, String> {
-        if !self.explicit_block {
+        if self.state == TransactionState::Idle {
             return Err("ROLLBACK TO SAVEPOINT can only be used in transaction blocks".to_string());
         }
         let normalized = name.to_ascii_lowercase();
@@ -97,7 +148,7 @@ impl TransactionState {
             snapshots.set_working(snapshot.clone());
         }
         self.savepoints.truncate(idx + 1);
-        self.failed_block = false;
+        self.state = TransactionState::InTransaction;
         Ok(Some(snapshot))
     }
 
@@ -116,25 +167,27 @@ impl TransactionState {
     }
 
     pub fn mark_failed(&mut self) {
-        if self.explicit_block {
-            self.failed_block = true;
+        if self.state == TransactionState::InTransaction {
+            self.state = TransactionState::Failed;
         }
     }
 
     pub fn clear_failed(&mut self) {
-        self.failed_block = false;
+        if self.state == TransactionState::Failed {
+            self.state = TransactionState::InTransaction;
+        }
     }
 
     pub fn in_explicit_block(&self) -> bool {
-        self.explicit_block
+        self.state != TransactionState::Idle
     }
 
     pub fn is_aborted(&self) -> bool {
-        self.explicit_block && self.failed_block
+        self.state == TransactionState::Failed
     }
 
     pub fn visibility_mode(&self) -> VisibilityMode {
-        if self.explicit_block {
+        if self.state != TransactionState::Idle {
             VisibilityMode::TransactionLocal
         } else {
             VisibilityMode::Global
@@ -142,8 +195,7 @@ impl TransactionState {
     }
 
     fn clear(&mut self) {
-        self.explicit_block = false;
-        self.failed_block = false;
+        self.state = TransactionState::Idle;
         self.snapshots = None;
         self.savepoints.clear();
     }

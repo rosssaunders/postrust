@@ -17,6 +17,7 @@ use crate::parser::ast::{
     ListenStatement, NotifyStatement, UnlistenStatement,
     CreateExtensionStatement, DropExtensionStatement,
     CreateFunctionStatement, FunctionParam, FunctionReturnType, GroupByExpr,
+    TransactionStatement,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -134,6 +135,16 @@ impl Parser {
         if self.peek_keyword(Keyword::Unlisten) {
             self.advance();
             return self.parse_unlisten_statement();
+        }
+        if self.peek_keyword(Keyword::Begin)
+            || self.peek_keyword(Keyword::Start)
+            || self.peek_keyword(Keyword::Commit)
+            || self.peek_keyword(Keyword::End)
+            || self.peek_keyword(Keyword::Rollback)
+            || self.peek_keyword(Keyword::Savepoint)
+            || self.peek_keyword(Keyword::Release)
+        {
+            return self.parse_transaction_statement();
         }
 
         let query = self.parse_query()?;
@@ -3222,6 +3233,39 @@ impl Parser {
         let channel = self.parse_identifier()?;
         Ok(Statement::Unlisten(UnlistenStatement { channel: Some(channel) }))
     }
+
+    fn parse_transaction_statement(&mut self) -> Result<Statement, ParseError> {
+        if self.consume_keyword(Keyword::Begin) || self.consume_keyword(Keyword::Start) {
+            self.consume_keyword(Keyword::Transaction);
+            return Ok(Statement::Transaction(TransactionStatement::Begin));
+        }
+        if self.consume_keyword(Keyword::Commit) || self.consume_keyword(Keyword::End) {
+            self.consume_keyword(Keyword::Transaction);
+            return Ok(Statement::Transaction(TransactionStatement::Commit));
+        }
+        if self.consume_keyword(Keyword::Rollback) {
+            if self.consume_keyword(Keyword::To) {
+                self.consume_keyword(Keyword::Savepoint);
+                let name = self.parse_identifier()?;
+                return Ok(Statement::Transaction(
+                    TransactionStatement::RollbackToSavepoint(name),
+                ));
+            }
+            return Ok(Statement::Transaction(TransactionStatement::Rollback));
+        }
+        if self.consume_keyword(Keyword::Savepoint) {
+            let name = self.parse_identifier()?;
+            return Ok(Statement::Transaction(TransactionStatement::Savepoint(name)));
+        }
+        if self.consume_keyword(Keyword::Release) {
+            self.consume_keyword(Keyword::Savepoint);
+            let name = self.parse_identifier()?;
+            return Ok(Statement::Transaction(
+                TransactionStatement::ReleaseSavepoint(name),
+            ));
+        }
+        Err(self.error_at_current("expected transaction statement"))
+    }
 }
 
 #[cfg(test)]
@@ -4895,5 +4939,56 @@ mod tests {
     fn parses_discard_all() {
         let stmt = parse_statement("DISCARD ALL").unwrap();
         assert!(matches!(stmt, Statement::Discard(_)));
+    }
+
+    #[test]
+    fn parses_transaction_statements() {
+        let stmt = parse_statement("BEGIN").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::Begin)
+        ));
+
+        let stmt = parse_statement("START TRANSACTION").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::Begin)
+        ));
+
+        let stmt = parse_statement("COMMIT").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::Commit)
+        ));
+
+        let stmt = parse_statement("END").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::Commit)
+        ));
+
+        let stmt = parse_statement("ROLLBACK").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::Rollback)
+        ));
+
+        let stmt = parse_statement("SAVEPOINT s1").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::Savepoint(name)) if name == "s1"
+        ));
+
+        let stmt = parse_statement("RELEASE SAVEPOINT s1").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::ReleaseSavepoint(name)) if name == "s1"
+        ));
+
+        let stmt = parse_statement("ROLLBACK TO SAVEPOINT s1").unwrap();
+        assert!(matches!(
+            stmt,
+            Statement::Transaction(TransactionStatement::RollbackToSavepoint(name)) if name == "s1"
+        ));
     }
 }
