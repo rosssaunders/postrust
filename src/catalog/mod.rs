@@ -1,4 +1,4 @@
-use crate::parser::ast::{Expr, Query, QueryExpr, TableExpression};
+use crate::parser::ast::{Expr, GroupByExpr, Query, QueryExpr, TableExpression};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 #[cfg(test)]
@@ -1608,10 +1608,16 @@ fn query_expr_references_sequence(expr: &QueryExpr, sequence_name: &str) -> bool
                     .where_clause
                     .as_ref()
                     .is_some_and(|expr| expr_references_sequence(expr, sequence_name))
-                || select
-                    .group_by
-                    .iter()
-                    .any(|expr| expr_references_sequence(expr, sequence_name))
+                || select.group_by.iter().any(|group_expr| match group_expr {
+                    GroupByExpr::Expr(expr) => expr_references_sequence(expr, sequence_name),
+                    GroupByExpr::GroupingSets(sets) => sets.iter().any(|set| {
+                        set.iter()
+                            .any(|expr| expr_references_sequence(expr, sequence_name))
+                    }),
+                    GroupByExpr::Rollup(exprs) | GroupByExpr::Cube(exprs) => exprs
+                        .iter()
+                        .any(|expr| expr_references_sequence(expr, sequence_name)),
+                })
                 || select
                     .having
                     .as_ref()

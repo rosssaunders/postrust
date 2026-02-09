@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::catalog::oid::Oid;
 use crate::catalog::{Catalog, CatalogError, SearchPath, TableKind};
-use crate::parser::ast::{Expr, JoinCondition, Query, QueryExpr, TableExpression};
+use crate::parser::ast::{Expr, GroupByExpr, JoinCondition, Query, QueryExpr, TableExpression};
 
 #[derive(Debug, Clone)]
 pub struct TableRefByOid {
@@ -310,7 +310,21 @@ fn collect_query_expr_relation_refs(
                 collect_expr_relation_refs(where_clause, ctes, out);
             }
             for group_expr in &select.group_by {
-                collect_expr_relation_refs(group_expr, ctes, out);
+                match group_expr {
+                    GroupByExpr::Expr(expr) => collect_expr_relation_refs(expr, ctes, out),
+                    GroupByExpr::GroupingSets(sets) => {
+                        for set in sets {
+                            for expr in set {
+                                collect_expr_relation_refs(expr, ctes, out);
+                            }
+                        }
+                    }
+                    GroupByExpr::Rollup(exprs) | GroupByExpr::Cube(exprs) => {
+                        for expr in exprs {
+                            collect_expr_relation_refs(expr, ctes, out);
+                        }
+                    }
+                }
             }
             if let Some(having) = &select.having {
                 collect_expr_relation_refs(having, ctes, out);

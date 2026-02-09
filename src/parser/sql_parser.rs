@@ -15,7 +15,7 @@ use crate::parser::ast::{
     ExplainStatement, SetStatement, ShowStatement, DiscardStatement, DoStatement,
     ListenStatement, NotifyStatement, UnlistenStatement,
     CreateExtensionStatement, DropExtensionStatement,
-    CreateFunctionStatement, FunctionParam, FunctionReturnType,
+    CreateFunctionStatement, FunctionParam, FunctionReturnType, GroupByExpr,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -1680,7 +1680,7 @@ impl Parser {
 
         let group_by = if self.consume_keyword(Keyword::Group) {
             self.expect_keyword(Keyword::By, "expected BY after GROUP")?;
-            self.parse_expr_list()?
+            self.parse_group_by_list()?
         } else {
             Vec::new()
         };
@@ -1946,6 +1946,88 @@ impl Parser {
         Ok(out)
     }
 
+    fn parse_group_by_list(&mut self) -> Result<Vec<GroupByExpr>, ParseError> {
+        let mut items = Vec::new();
+        loop {
+            if self.consume_keyword(Keyword::Grouping) {
+                self.expect_keyword(Keyword::Sets, "expected SETS after GROUPING")?;
+                items.push(GroupByExpr::GroupingSets(self.parse_grouping_sets()?));
+            } else if self.consume_keyword(Keyword::Rollup) {
+                self.expect_token(
+                    |k| matches!(k, TokenKind::LParen),
+                    "expected '(' after ROLLUP",
+                )?;
+                let exprs = if self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+                    Vec::new()
+                } else {
+                    let exprs = self.parse_expr_list()?;
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after ROLLUP list",
+                    )?;
+                    exprs
+                };
+                items.push(GroupByExpr::Rollup(exprs));
+            } else if self.consume_keyword(Keyword::Cube) {
+                self.expect_token(
+                    |k| matches!(k, TokenKind::LParen),
+                    "expected '(' after CUBE",
+                )?;
+                let exprs = if self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+                    Vec::new()
+                } else {
+                    let exprs = self.parse_expr_list()?;
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after CUBE list",
+                    )?;
+                    exprs
+                };
+                items.push(GroupByExpr::Cube(exprs));
+            } else {
+                items.push(GroupByExpr::Expr(self.parse_expr()?));
+            }
+
+            if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                break;
+            }
+        }
+        Ok(items)
+    }
+
+    fn parse_grouping_sets(&mut self) -> Result<Vec<Vec<Expr>>, ParseError> {
+        self.expect_token(
+            |k| matches!(k, TokenKind::LParen),
+            "expected '(' after GROUPING SETS",
+        )?;
+        let mut sets = Vec::new();
+        loop {
+            self.expect_token(
+                |k| matches!(k, TokenKind::LParen),
+                "expected '(' to start grouping set",
+            )?;
+            if self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+                sets.push(Vec::new());
+            } else {
+                let exprs = self.parse_expr_list()?;
+                self.expect_token(
+                    |k| matches!(k, TokenKind::RParen),
+                    "expected ')' to close grouping set",
+                )?;
+                sets.push(exprs);
+            }
+
+            if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                break;
+            }
+        }
+        self.expect_token(
+            |k| matches!(k, TokenKind::RParen),
+            "expected ')' after GROUPING SETS",
+        )?;
+        Ok(sets)
+    }
+
     fn parse_expr(&mut self) -> Result<Expr, ParseError> {
         self.parse_expr_bp(0)
     }
@@ -2196,7 +2278,11 @@ impl Parser {
             }
             TokenKind::Identifier(_)
             | TokenKind::Keyword(
-                Keyword::Left | Keyword::Right | Keyword::Replace | Keyword::Filter,
+                Keyword::Left
+                    | Keyword::Right
+                    | Keyword::Replace
+                    | Keyword::Filter
+                    | Keyword::Grouping,
             ) => self.parse_identifier_expr(),
             _ => Err(self.error_at_current("expected expression")),
         }
@@ -2510,6 +2596,10 @@ impl Parser {
             TokenKind::Keyword(Keyword::Filter) => {
                 self.advance();
                 Ok("filter".to_string())
+            }
+            TokenKind::Keyword(Keyword::Grouping) => {
+                self.advance();
+                Ok("grouping".to_string())
             }
             _ => Err(self.error_at_current("expected identifier")),
         }

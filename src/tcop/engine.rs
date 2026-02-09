@@ -32,7 +32,7 @@ use crate::parser::ast::{
     TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WindowFrameBound,
     WindowFrameUnits, WindowSpec, ExplainStatement, SetStatement, ShowStatement,
     CreateExtensionStatement, DropExtensionStatement, CreateFunctionStatement,
-    FunctionParam, FunctionReturnType,
+    FunctionParam, FunctionReturnType, GroupByExpr,
     // DiscardStatement, DoStatement, ListenStatement, NotifyStatement, UnlistenStatement used in pattern matching
 };
 use crate::security::{self, RlsCommand, TablePrivilege};
@@ -5436,10 +5436,16 @@ fn query_expr_references_relation(expr: &QueryExpr, relation_name: &str) -> bool
                     .where_clause
                     .as_ref()
                     .is_some_and(|expr| expr_references_relation(expr, relation_name))
-                || select
-                    .group_by
-                    .iter()
-                    .any(|expr| expr_references_relation(expr, relation_name))
+                || select.group_by.iter().any(|group_expr| match group_expr {
+                    GroupByExpr::Expr(expr) => expr_references_relation(expr, relation_name),
+                    GroupByExpr::GroupingSets(sets) => sets.iter().any(|set| {
+                        set.iter()
+                            .any(|expr| expr_references_relation(expr, relation_name))
+                    }),
+                    GroupByExpr::Rollup(exprs) | GroupByExpr::Cube(exprs) => exprs
+                        .iter()
+                        .any(|expr| expr_references_relation(expr, relation_name)),
+                })
                 || select
                     .having
                     .as_ref()
@@ -6693,7 +6699,7 @@ async fn execute_select(
             message: "window functions are not allowed in WHERE".to_string(),
         });
     }
-    if select.group_by.iter().any(contains_window_expr) {
+    if group_by_contains_window_expr(&select.group_by) {
         return Err(EngineError {
             message: "window functions are not allowed in GROUP BY".to_string(),
         });
@@ -6722,67 +6728,93 @@ async fn execute_select(
             });
         }
 
-        for expr in &select.group_by {
+        for expr in group_by_exprs(&select.group_by) {
             if contains_aggregate_expr(expr) {
                 return Err(EngineError {
                     message: "aggregate functions are not allowed in GROUP BY".to_string(),
                 });
             }
         }
+        let grouping_sets = expand_grouping_sets(&select.group_by);
+        let all_grouping = collect_grouping_identifiers(&select.group_by);
 
-        let mut groups: Vec<Vec<EvalScope>> = Vec::new();
-        if select.group_by.is_empty() {
-            groups.push(filtered_rows);
-        } else {
-            let mut index_by_key: HashMap<String, usize> = HashMap::new();
-            for scope in filtered_rows {
-                let key_values = select
-                    .group_by
-                    .iter()
-                    .map(|expr| eval_expr(expr, &scope, params))
-                    .collect::<Vec<_>>();
-                let key_values = {
-                    let mut values = Vec::with_capacity(key_values.len());
-                    for value in key_values {
-                        values.push(value.await?);
+        for grouping_set in grouping_sets {
+            let current_grouping: HashSet<String> = grouping_set
+                .iter()
+                .filter_map(|expr| identifier_key(expr))
+                .collect();
+            let grouping_context = GroupingContext {
+                current_grouping,
+                all_grouping: all_grouping.clone(),
+            };
+
+            let mut groups: Vec<Vec<EvalScope>> = Vec::new();
+            if grouping_set.is_empty() {
+                groups.push(filtered_rows.clone());
+            } else {
+                let mut index_by_key: HashMap<String, usize> = HashMap::new();
+                for scope in &filtered_rows {
+                    let key_values = grouping_set
+                        .iter()
+                        .map(|expr| eval_expr(expr, scope, params))
+                        .collect::<Vec<_>>();
+                    let key_values = {
+                        let mut values = Vec::with_capacity(key_values.len());
+                        for value in key_values {
+                            values.push(value.await?);
+                        }
+                        values
+                    };
+                    let key = row_key(&key_values);
+                    let idx = if let Some(existing) = index_by_key.get(&key) {
+                        *existing
+                    } else {
+                        let idx = groups.len();
+                        groups.push(Vec::new());
+                        index_by_key.insert(key, idx);
+                        idx
+                    };
+                    groups[idx].push(scope.clone());
+                }
+            }
+
+            for group_rows in groups {
+                let representative = group_rows.first().cloned().unwrap_or_default();
+                if let Some(having) = &select.having {
+                    let having_value = eval_group_expr(
+                        having,
+                        &group_rows,
+                        &representative,
+                        params,
+                        &grouping_context,
+                    )
+                    .await?;
+                    if !truthy(&having_value) {
+                        continue;
                     }
-                    values
-                };
-                let key = row_key(&key_values);
-                let idx = if let Some(existing) = index_by_key.get(&key) {
-                    *existing
-                } else {
-                    let idx = groups.len();
-                    groups.push(Vec::new());
-                    index_by_key.insert(key, idx);
-                    idx
-                };
-                groups[idx].push(scope);
-            }
-        }
-
-        for group_rows in groups {
-            let representative = group_rows.first().cloned().unwrap_or_default();
-            if let Some(having) = &select.having {
-                let having_value =
-                    eval_group_expr(having, &group_rows, &representative, params).await?;
-                if !truthy(&having_value) {
-                    continue;
                 }
-            }
 
-            let mut row = Vec::new();
-            for target in &select.targets {
-                if matches!(target.expr, Expr::Wildcard) {
-                    return Err(EngineError {
-                        message: "wildcard target is not yet implemented in executor".to_string(),
-                    });
+                let mut row = Vec::new();
+                for target in &select.targets {
+                    if matches!(target.expr, Expr::Wildcard) {
+                        return Err(EngineError {
+                            message: "wildcard target is not yet implemented in executor"
+                                .to_string(),
+                        });
+                    }
+                    row.push(
+                        eval_group_expr(
+                            &target.expr,
+                            &group_rows,
+                            &representative,
+                            params,
+                            &grouping_context,
+                        )
+                        .await?,
+                    );
                 }
-                row.push(
-                    eval_group_expr(&target.expr, &group_rows, &representative, params).await?,
-                );
+                rows.push(row);
             }
-            rows.push(row);
         }
     } else if has_window {
         for (row_idx, scope) in filtered_rows.iter().enumerate() {
@@ -8140,6 +8172,111 @@ fn contains_window_bound_expr(bound: &WindowFrameBound) -> bool {
     }
 }
 
+fn group_by_contains_window_expr(group_by: &[GroupByExpr]) -> bool {
+    group_by.iter().any(|expr| match expr {
+        GroupByExpr::Expr(expr) => contains_window_expr(expr),
+        GroupByExpr::GroupingSets(sets) => sets
+            .iter()
+            .any(|set| set.iter().any(|expr| contains_window_expr(expr))),
+        GroupByExpr::Rollup(exprs) | GroupByExpr::Cube(exprs) => {
+            exprs.iter().any(|expr| contains_window_expr(expr))
+        }
+    })
+}
+
+fn group_by_exprs<'a>(group_by: &'a [GroupByExpr]) -> Vec<&'a Expr> {
+    let mut out = Vec::new();
+    for entry in group_by {
+        match entry {
+            GroupByExpr::Expr(expr) => out.push(expr),
+            GroupByExpr::GroupingSets(sets) => {
+                for set in sets {
+                    for expr in set {
+                        out.push(expr);
+                    }
+                }
+            }
+            GroupByExpr::Rollup(exprs) | GroupByExpr::Cube(exprs) => {
+                for expr in exprs {
+                    out.push(expr);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn identifier_key(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(parts) => Some(parts.join(".").to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn collect_grouping_identifiers(group_by: &[GroupByExpr]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for expr in group_by_exprs(group_by) {
+        if let Some(key) = identifier_key(expr) {
+            out.insert(key);
+        }
+    }
+    out
+}
+
+fn expand_grouping_sets<'a>(group_by: &'a [GroupByExpr]) -> Vec<Vec<&'a Expr>> {
+    if group_by.is_empty() {
+        return vec![Vec::new()];
+    }
+    let mut sets: Vec<Vec<&'a Expr>> = vec![Vec::new()];
+    for entry in group_by {
+        let element_sets: Vec<Vec<&'a Expr>> = match entry {
+            GroupByExpr::Expr(expr) => vec![vec![expr]],
+            GroupByExpr::GroupingSets(sets) => {
+                sets.iter().map(|set| set.iter().collect()).collect()
+            }
+            GroupByExpr::Rollup(exprs) => {
+                let mut rollup_sets = Vec::new();
+                for len in (0..=exprs.len()).rev() {
+                    rollup_sets.push(exprs[..len].iter().collect());
+                }
+                rollup_sets
+            }
+            GroupByExpr::Cube(exprs) => {
+                let mut cube_sets = Vec::new();
+                let count = exprs.len();
+                let max_mask = 1usize << count;
+                for mask in (0..max_mask).rev() {
+                    let mut set = Vec::new();
+                    for (idx, expr) in exprs.iter().enumerate() {
+                        if (mask & (1 << idx)) != 0 {
+                            set.push(expr);
+                        }
+                    }
+                    cube_sets.push(set);
+                }
+                cube_sets
+            }
+        };
+
+        let mut combined_sets = Vec::new();
+        for existing in &sets {
+            for element in &element_sets {
+                let mut merged = Vec::with_capacity(existing.len() + element.len());
+                merged.extend(existing.iter().copied());
+                merged.extend(element.iter().copied());
+                combined_sets.push(merged);
+            }
+        }
+        sets = combined_sets;
+    }
+    sets
+}
+
+struct GroupingContext {
+    current_grouping: HashSet<String>,
+    all_grouping: HashSet<String>,
+}
+
 fn is_aggregate_function(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
@@ -8171,6 +8308,7 @@ fn eval_group_expr<'a>(
     group_rows: &'a [EvalScope],
     representative: &'a EvalScope,
     params: &'a [Option<String>],
+    grouping: &'a GroupingContext,
 ) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
     Box::pin(async move {
         match expr {
@@ -8192,6 +8330,29 @@ fn eval_group_expr<'a>(
                 .last()
                 .map(|n| n.to_ascii_lowercase())
                 .unwrap_or_default();
+            if fn_name == "grouping" {
+                if *distinct || !order_by.is_empty() || filter.is_some() {
+                    return Err(EngineError {
+                        message: "grouping() does not accept aggregate modifiers".to_string(),
+                    });
+                }
+                if args.len() != 1 {
+                    return Err(EngineError {
+                        message: "grouping() expects exactly one argument".to_string(),
+                    });
+                }
+                let Some(key) = identifier_key(&args[0]) else {
+                    return Err(EngineError {
+                        message: "grouping() expects a column reference".to_string(),
+                    });
+                };
+                let value = if grouping.current_grouping.contains(&key) {
+                    0
+                } else {
+                    1
+                };
+                return Ok(ScalarValue::Int(value));
+            }
             if is_aggregate_function(&fn_name) {
                 return eval_aggregate_function(
                     &fn_name,
@@ -8215,21 +8376,23 @@ fn eval_group_expr<'a>(
 
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
-                values.push(eval_group_expr(arg, group_rows, representative, params).await?);
+                values.push(
+                    eval_group_expr(arg, group_rows, representative, params, grouping).await?,
+                );
             }
             eval_scalar_function(&fn_name, &values).await
         }
         Expr::Unary { op, expr } => {
-            let value = eval_group_expr(expr, group_rows, representative, params).await?;
+            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
             eval_unary(op.clone(), value)
         }
         Expr::Binary { left, op, right } => {
-            let lhs = eval_group_expr(left, group_rows, representative, params).await?;
-            let rhs = eval_group_expr(right, group_rows, representative, params).await?;
+            let lhs = eval_group_expr(left, group_rows, representative, params, grouping).await?;
+            let rhs = eval_group_expr(right, group_rows, representative, params, grouping).await?;
             eval_binary(op.clone(), lhs, rhs)
         }
         Expr::Cast { expr, type_name } => {
-            let value = eval_group_expr(expr, group_rows, representative, params).await?;
+            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
             eval_cast_scalar(value, type_name)
         }
         Expr::Between {
@@ -8238,9 +8401,9 @@ fn eval_group_expr<'a>(
             high,
             negated,
         } => {
-            let value = eval_group_expr(expr, group_rows, representative, params).await?;
-            let low_value = eval_group_expr(low, group_rows, representative, params).await?;
-            let high_value = eval_group_expr(high, group_rows, representative, params).await?;
+            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+            let low_value = eval_group_expr(low, group_rows, representative, params, grouping).await?;
+            let high_value = eval_group_expr(high, group_rows, representative, params, grouping).await?;
             eval_between_predicate(value, low_value, high_value, *negated)
         }
         Expr::Like {
@@ -8249,12 +8412,12 @@ fn eval_group_expr<'a>(
             case_insensitive,
             negated,
         } => {
-            let value = eval_group_expr(expr, group_rows, representative, params).await?;
-            let pattern_value = eval_group_expr(pattern, group_rows, representative, params).await?;
+            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+            let pattern_value = eval_group_expr(pattern, group_rows, representative, params, grouping).await?;
             eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
         }
         Expr::IsNull { expr, negated } => {
-            let value = eval_group_expr(expr, group_rows, representative, params).await?;
+            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
             let is_null = matches!(value, ScalarValue::Null);
             Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
         }
@@ -8263,8 +8426,8 @@ fn eval_group_expr<'a>(
             right,
             negated,
         } => {
-            let left_value = eval_group_expr(left, group_rows, representative, params).await?;
-            let right_value = eval_group_expr(right, group_rows, representative, params).await?;
+            let left_value = eval_group_expr(left, group_rows, representative, params, grouping).await?;
+            let right_value = eval_group_expr(right, group_rows, representative, params, grouping).await?;
             eval_is_distinct_from(left_value, right_value, *negated)
         }
         Expr::CaseSimple {
@@ -8273,21 +8436,22 @@ fn eval_group_expr<'a>(
             else_expr,
         } => {
             let operand_value =
-                eval_group_expr(operand, group_rows, representative, params).await?;
+                eval_group_expr(operand, group_rows, representative, params, grouping).await?;
             for (when_expr, then_expr) in when_then {
                 let when_value =
-                    eval_group_expr(when_expr, group_rows, representative, params).await?;
+                    eval_group_expr(when_expr, group_rows, representative, params, grouping).await?;
                 if matches!(operand_value, ScalarValue::Null)
                     || matches!(when_value, ScalarValue::Null)
                 {
                     continue;
                 }
                 if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_group_expr(then_expr, group_rows, representative, params).await;
+                    return eval_group_expr(then_expr, group_rows, representative, params, grouping)
+                        .await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_group_expr(else_expr, group_rows, representative, params).await
+                eval_group_expr(else_expr, group_rows, representative, params, grouping).await
             } else {
                 Ok(ScalarValue::Null)
             }
@@ -8298,15 +8462,30 @@ fn eval_group_expr<'a>(
         } => {
             for (when_expr, then_expr) in when_then {
                 let condition =
-                    eval_group_expr(when_expr, group_rows, representative, params).await?;
+                    eval_group_expr(when_expr, group_rows, representative, params, grouping).await?;
                 if truthy(&condition) {
-                    return eval_group_expr(then_expr, group_rows, representative, params).await;
+                    return eval_group_expr(then_expr, group_rows, representative, params, grouping)
+                        .await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_group_expr(else_expr, group_rows, representative, params).await
+                eval_group_expr(else_expr, group_rows, representative, params, grouping).await
             } else {
                 Ok(ScalarValue::Null)
+            }
+        }
+        Expr::Identifier(_) => {
+            if let Some(key) = identifier_key(expr) {
+                if grouping.all_grouping.contains(&key)
+                    && !grouping.current_grouping.contains(&key)
+                {
+                    return Ok(ScalarValue::Null);
+                }
+            }
+            if group_rows.is_empty() {
+                eval_expr(expr, &EvalScope::default(), params).await
+            } else {
+                eval_expr(expr, representative, params).await
             }
         }
         _ => {
@@ -16202,6 +16381,194 @@ mod tests {
         assert_eq!(
             result.rows,
             vec![vec![ScalarValue::Int(1), ScalarValue::Int(2)]]
+        );
+    }
+
+    #[test]
+    fn executes_filtered_aggregates() {
+        let results = run_batch(&[
+            "CREATE TABLE sales (region text, amount int, year int)",
+            "INSERT INTO sales VALUES ('East', 100, 2024), ('East', 200, 2025), ('West', 150, 2024), ('West', 300, 2025)",
+            "SELECT region, \
+             count(*) AS total, \
+             count(*) FILTER (WHERE year = 2025) AS count_2025, \
+             sum(amount) FILTER (WHERE year = 2024) AS sum_2024 \
+             FROM sales \
+             GROUP BY region \
+             ORDER BY region",
+        ]);
+
+        assert_eq!(
+            results[2].rows,
+            vec![
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Int(2),
+                    ScalarValue::Int(1),
+                    ScalarValue::Int(100),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Int(2),
+                    ScalarValue::Int(1),
+                    ScalarValue::Int(150),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn executes_grouping_sets_rollup_and_cube() {
+        let results = run_batch(&[
+            "CREATE TABLE sales (region text, amount int, year int)",
+            "INSERT INTO sales VALUES ('East', 100, 2024), ('East', 200, 2025), ('West', 150, 2024), ('West', 300, 2025)",
+            "SELECT region, year, sum(amount) \
+             FROM sales \
+             GROUP BY GROUPING SETS ((region, year), (region), ()) \
+             ORDER BY 1, 2",
+            "SELECT region, year, sum(amount) \
+             FROM sales \
+             GROUP BY ROLLUP (region, year) \
+             ORDER BY 1, 2",
+            "SELECT region, year, sum(amount) \
+             FROM sales \
+             GROUP BY CUBE (region, year) \
+             ORDER BY 1, 2",
+            "SELECT region, year, sum(amount), grouping(region) AS gr, grouping(year) AS gy \
+             FROM sales \
+             GROUP BY ROLLUP (region, year) \
+             ORDER BY 1, 2",
+        ]);
+
+        let rollup_rows = vec![
+            vec![ScalarValue::Null, ScalarValue::Null, ScalarValue::Int(750)],
+            vec![
+                ScalarValue::Text("East".to_string()),
+                ScalarValue::Null,
+                ScalarValue::Int(300),
+            ],
+            vec![
+                ScalarValue::Text("East".to_string()),
+                ScalarValue::Int(2024),
+                ScalarValue::Int(100),
+            ],
+            vec![
+                ScalarValue::Text("East".to_string()),
+                ScalarValue::Int(2025),
+                ScalarValue::Int(200),
+            ],
+            vec![
+                ScalarValue::Text("West".to_string()),
+                ScalarValue::Null,
+                ScalarValue::Int(450),
+            ],
+            vec![
+                ScalarValue::Text("West".to_string()),
+                ScalarValue::Int(2024),
+                ScalarValue::Int(150),
+            ],
+            vec![
+                ScalarValue::Text("West".to_string()),
+                ScalarValue::Int(2025),
+                ScalarValue::Int(300),
+            ],
+        ];
+
+        assert_eq!(results[2].rows, rollup_rows);
+        assert_eq!(results[3].rows, rollup_rows);
+
+        assert_eq!(
+            results[4].rows,
+            vec![
+                vec![ScalarValue::Null, ScalarValue::Null, ScalarValue::Int(750)],
+                vec![ScalarValue::Null, ScalarValue::Int(2024), ScalarValue::Int(250)],
+                vec![ScalarValue::Null, ScalarValue::Int(2025), ScalarValue::Int(500)],
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Null,
+                    ScalarValue::Int(300),
+                ],
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Int(2024),
+                    ScalarValue::Int(100),
+                ],
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Int(2025),
+                    ScalarValue::Int(200),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Null,
+                    ScalarValue::Int(450),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Int(2024),
+                    ScalarValue::Int(150),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Int(2025),
+                    ScalarValue::Int(300),
+                ],
+            ]
+        );
+
+        assert_eq!(
+            results[5].rows,
+            vec![
+                vec![
+                    ScalarValue::Null,
+                    ScalarValue::Null,
+                    ScalarValue::Int(750),
+                    ScalarValue::Int(1),
+                    ScalarValue::Int(1),
+                ],
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Null,
+                    ScalarValue::Int(300),
+                    ScalarValue::Int(0),
+                    ScalarValue::Int(1),
+                ],
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Int(2024),
+                    ScalarValue::Int(100),
+                    ScalarValue::Int(0),
+                    ScalarValue::Int(0),
+                ],
+                vec![
+                    ScalarValue::Text("East".to_string()),
+                    ScalarValue::Int(2025),
+                    ScalarValue::Int(200),
+                    ScalarValue::Int(0),
+                    ScalarValue::Int(0),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Null,
+                    ScalarValue::Int(450),
+                    ScalarValue::Int(0),
+                    ScalarValue::Int(1),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Int(2024),
+                    ScalarValue::Int(150),
+                    ScalarValue::Int(0),
+                    ScalarValue::Int(0),
+                ],
+                vec![
+                    ScalarValue::Text("West".to_string()),
+                    ScalarValue::Int(2025),
+                    ScalarValue::Int(300),
+                    ScalarValue::Int(0),
+                    ScalarValue::Int(0),
+                ],
+            ]
         );
     }
 
