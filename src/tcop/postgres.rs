@@ -468,7 +468,7 @@ impl PostgresSession {
     }
 
     /// Rust skeleton port of PostgreSQL's `PostgresMain` message loop.
-    pub fn run<I>(&mut self, messages: I) -> Vec<BackendMessage>
+    pub async fn run<I>(&mut self, messages: I) -> Vec<BackendMessage>
     where
         I: IntoIterator<Item = FrontendMessage>,
     {
@@ -491,7 +491,7 @@ impl PostgresSession {
 
             self.doing_extended_query_message = is_extended_query_message(&message);
 
-            match self.dispatch(message, &mut out) {
+            match self.dispatch(message, &mut out).await {
                 Ok(ControlFlow::Continue) => {}
                 Ok(ControlFlow::Break) => {
                     terminated = true;
@@ -519,7 +519,17 @@ impl PostgresSession {
         out
     }
 
-    fn dispatch(
+    #[cfg(test)]
+    fn run_sync<I>(&mut self, messages: I) -> Vec<BackendMessage>
+    where
+        I: IntoIterator<Item = FrontendMessage>,
+    {
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime should start")
+            .block_on(self.run(messages))
+    }
+
+    async fn dispatch(
         &mut self,
         message: FrontendMessage,
         out: &mut Vec<BackendMessage>,
@@ -596,7 +606,7 @@ impl PostgresSession {
                 Ok(ControlFlow::Continue)
             }
             FrontendMessage::Query { sql } => {
-                self.exec_simple_query(&sql, out)?;
+                self.exec_simple_query(&sql, out).await?;
                 self.send_ready_for_query = self.copy_in_state.is_none();
                 Ok(ControlFlow::Continue)
             }
@@ -629,7 +639,7 @@ impl PostgresSession {
                 portal_name,
                 max_rows,
             } => {
-                self.exec_execute_message(&portal_name, max_rows, out)?;
+                self.exec_execute_message(&portal_name, max_rows, out).await?;
                 Ok(ControlFlow::Continue)
             }
             FrontendMessage::DescribeStatement { statement_name } => {
@@ -653,7 +663,7 @@ impl PostgresSession {
                 Ok(ControlFlow::Continue)
             }
             FrontendMessage::CopyDone => {
-                self.exec_copy_done(out)?;
+                self.exec_copy_done(out).await?;
                 self.send_ready_for_query = true;
                 Ok(ControlFlow::Continue)
             }
@@ -950,7 +960,7 @@ impl PostgresSession {
         });
     }
 
-    fn exec_simple_query(
+    async fn exec_simple_query(
         &mut self,
         query_string: &str,
         out: &mut Vec<BackendMessage>,
@@ -975,7 +985,7 @@ impl PostgresSession {
                 });
             }
 
-            let outcome = self.execute_operation(&operation, &[])?;
+            let outcome = self.execute_operation(&operation, &[]).await?;
             let copy_in_started = matches!(outcome, ExecutionOutcome::CopyInStart { .. });
             Self::emit_outcome(out, outcome, i64::MAX, None, row_description.as_deref())?;
             if copy_in_started {
@@ -1098,7 +1108,7 @@ impl PostgresSession {
         Ok(())
     }
 
-    fn exec_execute_message(
+    async fn exec_execute_message(
         &mut self,
         portal_name: &str,
         max_rows: i64,
@@ -1135,7 +1145,7 @@ impl PostgresSession {
         let outcome = if let Some(result) = cached_result {
             ExecutionOutcome::Query(result)
         } else {
-            self.execute_operation(&operation, &params)?
+            self.execute_operation(&operation, &params).await?
         };
         let row_description = operation_row_description_fields(&operation, &result_formats)?;
 
@@ -1399,20 +1409,23 @@ impl PostgresSession {
         Ok(PlannedOperation::Utility(tag))
     }
 
-    fn execute_operation(
+    async fn execute_operation(
         &mut self,
         operation: &PlannedOperation,
         params: &[Option<String>],
     ) -> Result<ExecutionOutcome, SessionError> {
         let role = self.current_role.clone();
-        security::with_current_role(&role, || match operation {
+        security::with_current_role_async(&role, || async {
+            match operation {
             PlannedOperation::ParsedQuery(plan) => {
                 let result = match self.tx_state.visibility_mode() {
                     VisibilityMode::Global => {
-                        execute_planned_query(plan, params).map_err(SessionError::from)?
+                        execute_planned_query(plan, params)
+                            .await
+                            .map_err(SessionError::from)?
                     }
                     VisibilityMode::TransactionLocal => {
-                        self.execute_query_in_transaction_scope(plan, params)?
+                        self.execute_query_in_transaction_scope(plan, params).await?
                     }
                 };
                 if plan.returns_data() {
@@ -1467,9 +1480,9 @@ impl PostgresSession {
                 }
                 CopyDirection::ToStdout => {
                     let snapshot = match self.tx_state.visibility_mode() {
-                        VisibilityMode::Global => self.copy_snapshot(&command.table_name)?,
+                        VisibilityMode::Global => self.copy_snapshot(&command.table_name).await?,
                         VisibilityMode::TransactionLocal => {
-                            self.copy_snapshot_in_transaction_scope(&command.table_name)?
+                            self.copy_snapshot_in_transaction_scope(&command.table_name).await?
                         }
                     };
                     let snapshot_column_type_oids = snapshot
@@ -1511,7 +1524,9 @@ impl PostgresSession {
                 tag: "EMPTY".to_string(),
                 rows: 0,
             })),
+        }
         })
+        .await
     }
 
     fn fetch_prepared_statement(
@@ -1534,7 +1549,7 @@ impl PostgresSession {
             })
     }
 
-    fn execute_query_in_transaction_scope(
+    async fn execute_query_in_transaction_scope(
         &mut self,
         plan: &PlannedQuery,
         params: &[Option<String>],
@@ -1550,7 +1565,7 @@ impl PostgresSession {
             })?;
 
         restore_state(working);
-        let executed = execute_planned_query(plan, params);
+        let executed = execute_planned_query(plan, params).await;
         let next_working = executed.as_ref().ok().map(|_| snapshot_state());
         restore_state(baseline);
 
@@ -1728,17 +1743,18 @@ impl PostgresSession {
             .map_err(SessionError::from)
     }
 
-    fn copy_snapshot(
+    async fn copy_snapshot(
         &self,
         table_name: &[String],
     ) -> Result<crate::tcop::engine::CopyBinarySnapshot, SessionError> {
-        security::with_current_role(&self.current_role, || {
-            copy_table_binary_snapshot(table_name)
+        security::with_current_role_async(&self.current_role, || async {
+            copy_table_binary_snapshot(table_name).await
         })
+        .await
         .map_err(SessionError::from)
     }
 
-    fn copy_snapshot_in_transaction_scope(
+    async fn copy_snapshot_in_transaction_scope(
         &mut self,
         table_name: &[String],
     ) -> Result<crate::tcop::engine::CopyBinarySnapshot, SessionError> {
@@ -1752,9 +1768,10 @@ impl PostgresSession {
                 message: "transaction state missing working snapshot".to_string(),
             })?;
         restore_state(working);
-        let result = security::with_current_role(&self.current_role, || {
-            copy_table_binary_snapshot(table_name)
-        });
+        let result = security::with_current_role_async(&self.current_role, || async {
+            copy_table_binary_snapshot(table_name).await
+        })
+        .await;
         restore_state(baseline);
         result.map_err(SessionError::from)
     }
@@ -1769,7 +1786,7 @@ impl PostgresSession {
         Ok(())
     }
 
-    fn exec_copy_done(&mut self, out: &mut Vec<BackendMessage>) -> Result<(), SessionError> {
+    async fn exec_copy_done(&mut self, out: &mut Vec<BackendMessage>) -> Result<(), SessionError> {
         let state = self.copy_in_state.take().ok_or_else(|| SessionError {
             message: "COPY done was sent without COPY IN state".to_string(),
         })?;
@@ -1787,12 +1804,15 @@ impl PostgresSession {
         };
 
         let inserted = match self.tx_state.visibility_mode() {
-            VisibilityMode::Global => security::with_current_role(&self.current_role, || {
-                copy_insert_rows(&state.table_name, rows)
-            })
-            .map_err(SessionError::from)?,
+            VisibilityMode::Global => {
+                security::with_current_role_async(&self.current_role, || async {
+                    copy_insert_rows(&state.table_name, rows).await
+                })
+                .await
+                .map_err(SessionError::from)?
+            }
             VisibilityMode::TransactionLocal => {
-                self.copy_insert_rows_in_transaction_scope(&state.table_name, rows)?
+                self.copy_insert_rows_in_transaction_scope(&state.table_name, rows).await?
             }
         };
 
@@ -1804,7 +1824,7 @@ impl PostgresSession {
         Ok(())
     }
 
-    fn copy_insert_rows_in_transaction_scope(
+    async fn copy_insert_rows_in_transaction_scope(
         &mut self,
         table_name: &[String],
         rows: Vec<Vec<ScalarValue>>,
@@ -1819,8 +1839,10 @@ impl PostgresSession {
                 message: "transaction state missing working snapshot".to_string(),
             })?;
         restore_state(working);
-        let executed =
-            security::with_current_role(&self.current_role, || copy_insert_rows(table_name, rows));
+        let executed = security::with_current_role_async(&self.current_role, || async {
+            copy_insert_rows(table_name, rows).await
+        })
+        .await;
         let next_working = executed.as_ref().ok().map(|_| snapshot_state());
         restore_state(baseline);
         if let Some(snapshot) = next_working {
@@ -3939,7 +3961,7 @@ mod tests {
     fn simple_query_flow_emits_ready_and_completion() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([FrontendMessage::Query {
+            session.run_sync([FrontendMessage::Query {
                 sql: "SELECT 1".to_string(),
             }])
         });
@@ -3968,7 +3990,7 @@ mod tests {
     fn extended_query_flow_requires_sync_for_ready() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run(parse_bind_execute_sync_flow())
+            session.run_sync(parse_bind_execute_sync_flow())
         });
 
         assert_eq!(
@@ -3997,7 +4019,7 @@ mod tests {
     fn parse_infers_parameter_slots_when_type_oids_are_omitted() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
                     query: "SELECT $1 + 1".to_string(),
@@ -4023,7 +4045,7 @@ mod tests {
     fn bind_accepts_parameters_when_parse_omits_type_oids() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
                     query: "SELECT $1 + 1".to_string(),
@@ -4053,7 +4075,7 @@ mod tests {
     fn describe_statement_uses_planned_type_metadata() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
                     query: "SELECT 1::int8 AS id, 'x'::text AS name, true AS ok".to_string(),
@@ -4089,7 +4111,7 @@ mod tests {
     fn bind_supports_binary_result_format_codes() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
                     query:
@@ -4148,7 +4170,7 @@ mod tests {
     fn bind_supports_binary_parameter_formats() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
                     query: "SELECT $1::int8 + 1 AS n, $2::boolean AS ok, $3::text AS note"
@@ -4191,7 +4213,7 @@ mod tests {
     fn bind_supports_binary_date_and_timestamp_parameters() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "s1".to_string(),
                     query: "SELECT $1::date AS d, $2::timestamp AS ts".to_string(),
@@ -4239,7 +4261,7 @@ mod tests {
     fn extended_protocol_error_skips_until_sync() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Parse {
                     statement_name: "bad".to_string(),
                     query: "SELECT FROM".to_string(),
@@ -4270,7 +4292,7 @@ mod tests {
     fn parse_errors_include_sqlstate_and_position_metadata() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([FrontendMessage::Query {
+            session.run_sync([FrontendMessage::Query {
                 sql: "SELECT FROM".to_string(),
             }])
         });
@@ -4300,12 +4322,12 @@ mod tests {
     fn copy_text_from_stdin_and_to_stdout_round_trip() {
         with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([FrontendMessage::Query {
+            session.run_sync([FrontendMessage::Query {
                 sql: "CREATE TABLE copy_text_t (id int8, note text, ok boolean, score float8)"
                     .to_string(),
             }]);
 
-            let start = session.run([FrontendMessage::Query {
+            let start = session.run_sync([FrontendMessage::Query {
                 sql: "COPY copy_text_t FROM STDIN".to_string(),
             }]);
             assert!(start.iter().any(|message| {
@@ -4318,7 +4340,7 @@ mod tests {
                 )
             }));
 
-            let finish = session.run([
+            let finish = session.run_sync([
                 FrontendMessage::CopyData {
                     data: b"1\talpha\ttrue\t1.5\n2\tbeta\tfalse\t2.5\n".to_vec(),
                 },
@@ -4331,7 +4353,7 @@ mod tests {
                 )
             }));
 
-            let copy_out = session.run([FrontendMessage::Query {
+            let copy_out = session.run_sync([FrontendMessage::Query {
                 sql: "COPY copy_text_t TO STDOUT".to_string(),
             }]);
             assert!(copy_out.iter().any(|message| {
@@ -4363,11 +4385,11 @@ mod tests {
     fn copy_csv_from_stdin_and_to_stdout_round_trip() {
         with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([FrontendMessage::Query {
+            session.run_sync([FrontendMessage::Query {
                 sql: "CREATE TABLE copy_csv_t (id int8, note text, ok boolean)".to_string(),
             }]);
 
-            let start = session.run([FrontendMessage::Query {
+            let start = session.run_sync([FrontendMessage::Query {
                 sql: "COPY copy_csv_t FROM STDIN CSV".to_string(),
             }]);
             assert!(start.iter().any(|message| {
@@ -4380,7 +4402,7 @@ mod tests {
                 )
             }));
 
-            let finish = session.run([
+            let finish = session.run_sync([
                 FrontendMessage::CopyData {
                     data: b"1,\"hello,world\",true\n2,\"quote\"\"inside\",false\n".to_vec(),
                 },
@@ -4393,7 +4415,7 @@ mod tests {
                 )
             }));
 
-            let verify = session.run([FrontendMessage::Query {
+            let verify = session.run_sync([FrontendMessage::Query {
                 sql: "SELECT note FROM copy_csv_t WHERE id = 2".to_string(),
             }]);
             assert!(verify.iter().any(|message| {
@@ -4403,7 +4425,7 @@ mod tests {
                 )
             }));
 
-            let copy_out = session.run([FrontendMessage::Query {
+            let copy_out = session.run_sync([FrontendMessage::Query {
                 sql: "COPY copy_csv_t TO STDOUT CSV".to_string(),
             }]);
             let payload = copy_out
@@ -4426,7 +4448,7 @@ mod tests {
     fn aborted_transaction_block_allows_only_exit() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },
@@ -4464,7 +4486,7 @@ mod tests {
     fn rollback_restores_engine_state() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },
@@ -4501,7 +4523,7 @@ mod tests {
     fn rollback_to_savepoint_restores_partial_state() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },
@@ -4546,7 +4568,7 @@ mod tests {
     fn failed_transaction_can_recover_with_rollback_to_savepoint() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },
@@ -4580,7 +4602,7 @@ mod tests {
     fn refresh_materialized_view_concurrently_is_rejected_in_transaction_block() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "CREATE TABLE users (id int8 PRIMARY KEY)".to_string(),
                 },
@@ -4626,11 +4648,11 @@ mod tests {
             let mut session_a = PostgresSession::new();
             let mut session_b = PostgresSession::new();
 
-            session_a.run([FrontendMessage::Query {
+            session_a.run_sync([FrontendMessage::Query {
                 sql: "CREATE TABLE t (id int8)".to_string(),
             }]);
 
-            let a_uncommitted = session_a.run([
+            let a_uncommitted = session_a.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },
@@ -4645,18 +4667,18 @@ mod tests {
                 matches!(m, BackendMessage::DataRow { values } if values == &vec!["1".to_string()])
             }));
 
-            let b_before_commit = session_b.run([FrontendMessage::Query {
+            let b_before_commit = session_b.run_sync([FrontendMessage::Query {
                 sql: "SELECT count(*) FROM t".to_string(),
             }]);
             assert!(b_before_commit.iter().any(|m| {
                 matches!(m, BackendMessage::DataRow { values } if values == &vec!["0".to_string()])
             }));
 
-            session_a.run([FrontendMessage::Query {
+            session_a.run_sync([FrontendMessage::Query {
                 sql: "COMMIT".to_string(),
             }]);
 
-            let b_after_commit = session_b.run([FrontendMessage::Query {
+            let b_after_commit = session_b.run_sync([FrontendMessage::Query {
                 sql: "SELECT count(*) FROM t".to_string(),
             }]);
             assert!(b_after_commit.iter().any(|m| {
@@ -4671,11 +4693,11 @@ mod tests {
             let mut session_a = PostgresSession::new();
             let mut session_b = PostgresSession::new();
 
-            session_a.run([FrontendMessage::Query {
+            session_a.run_sync([FrontendMessage::Query {
                 sql: "CREATE TABLE t (id int8)".to_string(),
             }]);
 
-            session_a.run([
+            session_a.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },
@@ -4687,7 +4709,7 @@ mod tests {
                 },
             ]);
 
-            let b_after_rollback = session_b.run([FrontendMessage::Query {
+            let b_after_rollback = session_b.run_sync([FrontendMessage::Query {
                 sql: "SELECT count(*) FROM t".to_string(),
             }]);
             assert!(b_after_rollback.iter().any(|m| {
@@ -4700,7 +4722,7 @@ mod tests {
     fn table_privileges_can_be_granted_and_revoked() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "CREATE TABLE docs (id int8)".to_string(),
                 },
@@ -4763,7 +4785,7 @@ mod tests {
     fn rls_policies_filter_rows_and_enforce_with_check() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "CREATE TABLE docs (id int8, owner text)".to_string(),
                 },
@@ -4833,7 +4855,7 @@ mod tests {
     fn startup_required_session_performs_handshake_and_query() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new_startup_required();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Startup {
                     user: "postgres".to_string(),
                     database: Some("public".to_string()),
@@ -4858,12 +4880,12 @@ mod tests {
     fn startup_password_authentication_round_trip() {
         with_isolated_state(|| {
             let mut admin = PostgresSession::new();
-            admin.run([FrontendMessage::Query {
+            admin.run_sync([FrontendMessage::Query {
                 sql: "CREATE ROLE alice LOGIN PASSWORD 's3cr3t'".to_string(),
             }]);
 
             let mut session = PostgresSession::new_startup_required();
-            let startup_out = session.run([FrontendMessage::Startup {
+            let startup_out = session.run_sync([FrontendMessage::Startup {
                 user: "alice".to_string(),
                 database: None,
                 parameters: Vec::new(),
@@ -4876,7 +4898,7 @@ mod tests {
                 BackendMessage::AuthenticationSasl { .. }
             )));
 
-            let auth_out = session.run([
+            let auth_out = session.run_sync([
                 FrontendMessage::Password {
                     password: "s3cr3t".to_string(),
                 },
@@ -4899,7 +4921,7 @@ mod tests {
     fn security_changes_inside_transaction_rollback() {
         let out = with_isolated_state(|| {
             let mut session = PostgresSession::new();
-            session.run([
+            session.run_sync([
                 FrontendMessage::Query {
                     sql: "BEGIN".to_string(),
                 },

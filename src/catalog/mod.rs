@@ -2,6 +2,8 @@ use crate::parser::ast::{Expr, Query, QueryExpr, TableExpression};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 #[cfg(test)]
+use std::future::Future;
+#[cfg(test)]
 use std::sync::Mutex;
 use std::sync::{OnceLock, RwLock};
 
@@ -1775,6 +1777,20 @@ pub fn with_global_state_lock<T>(f: impl FnOnce() -> T) -> T {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     f()
+}
+
+#[cfg(test)]
+pub async fn with_global_state_lock_async<T, F, Fut>(f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    static TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+    let mutex = TEST_MUTEX.get_or_init(|| Mutex::new(()));
+    let _guard = mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    f().await
 }
 
 #[cfg(test)]

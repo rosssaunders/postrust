@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{OnceLock, RwLock};
 
 use crate::catalog::oid::Oid;
@@ -77,6 +78,23 @@ pub fn with_current_role<T>(role: &str, f: impl FnOnce() -> T) -> T {
         *slot.borrow_mut() = previous;
         out
     })
+}
+
+pub async fn with_current_role_async<T, F, Fut>(role: &str, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    let previous = CURRENT_ROLE.with(|slot| {
+        let previous = slot.borrow().clone();
+        *slot.borrow_mut() = normalize_identifier(role);
+        previous
+    });
+    let out = f().await;
+    CURRENT_ROLE.with(|slot| {
+        *slot.borrow_mut() = previous;
+    });
+    out
 }
 
 pub fn normalize_identifier(input: &str) -> String {

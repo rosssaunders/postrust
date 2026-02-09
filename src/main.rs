@@ -3,7 +3,8 @@ use postgrust::parser::sql_parser::parse_statement;
 use postgrust::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
 use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("ident") => {
@@ -41,7 +42,7 @@ fn main() {
                 }
             };
             let results = if params.is_empty() {
-                match execute_simple_query_via_session(&sql) {
+                match execute_simple_query_via_session(&sql).await {
                     Ok(results) => results,
                     Err(message) => {
                         eprintln!("execution error: {message}");
@@ -70,7 +71,7 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    let result = match execute_planned_query(&plan, &params) {
+                    let result = match execute_planned_query(&plan, &params).await {
                         Ok(result) => result,
                         Err(err) => {
                             eprintln!("execution error: {err}");
@@ -158,11 +159,13 @@ fn cli_result_from_engine(result: &QueryResult) -> CliQueryResult {
     }
 }
 
-fn execute_simple_query_via_session(sql: &str) -> Result<Vec<CliQueryResult>, String> {
+async fn execute_simple_query_via_session(sql: &str) -> Result<Vec<CliQueryResult>, String> {
     let mut session = PostgresSession::new();
-    let messages = session.run([FrontendMessage::Query {
+    let messages = session
+        .run([FrontendMessage::Query {
         sql: sql.to_string(),
-    }]);
+    }])
+        .await;
 
     let mut results = Vec::new();
     let mut current_columns: Option<Vec<String>> = None;

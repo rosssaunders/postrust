@@ -2,6 +2,8 @@ use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{OnceLock, RwLock};
 
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
@@ -47,6 +49,8 @@ impl fmt::Display for EngineError {
 }
 
 impl std::error::Error for EngineError {}
+
+type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
@@ -263,36 +267,36 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
     })
 }
 
-pub fn execute_planned_query(
+pub async fn execute_planned_query(
     plan: &PlannedQuery,
     params: &[Option<String>],
-) -> Result<QueryResult, EngineError> {
+).await -> Result<QueryResult, EngineError> {
     let result = match &plan.statement {
-        Statement::Query(query) => execute_query(query, params)?,
-        Statement::CreateTable(create) => execute_create_table(create)?,
-        Statement::CreateSchema(create) => execute_create_schema(create)?,
-        Statement::CreateIndex(create) => execute_create_index(create)?,
-        Statement::CreateSequence(create) => execute_create_sequence(create)?,
-        Statement::CreateView(create) => execute_create_view(create, params)?,
+        Statement::Query(query) => execute_query(query, params).await?,
+        Statement::CreateTable(create) => execute_create_table(create).await?,
+        Statement::CreateSchema(create) => execute_create_schema(create).await?,
+        Statement::CreateIndex(create) => execute_create_index(create).await?,
+        Statement::CreateSequence(create) => execute_create_sequence(create).await?,
+        Statement::CreateView(create) => execute_create_view(create, params).await?,
         Statement::RefreshMaterializedView(refresh) => {
-            execute_refresh_materialized_view(refresh, params)?
+            execute_refresh_materialized_view(refresh, params).await?
         }
-        Statement::AlterSequence(alter) => execute_alter_sequence(alter)?,
-        Statement::AlterView(alter) => execute_alter_view(alter)?,
-        Statement::Insert(insert) => execute_insert(insert, params)?,
-        Statement::Update(update) => execute_update(update, params)?,
-        Statement::Delete(delete) => execute_delete(delete, params)?,
-        Statement::Merge(merge) => execute_merge(merge, params)?,
-        Statement::DropTable(drop_table) => execute_drop_table(drop_table)?,
-        Statement::DropSchema(drop_schema) => execute_drop_schema(drop_schema)?,
-        Statement::DropIndex(drop_index) => execute_drop_index(drop_index)?,
-        Statement::DropSequence(drop_sequence) => execute_drop_sequence(drop_sequence)?,
-        Statement::DropView(drop_view) => execute_drop_view(drop_view)?,
-        Statement::Truncate(truncate) => execute_truncate(truncate)?,
-        Statement::AlterTable(alter_table) => execute_alter_table(alter_table)?,
-        Statement::Explain(explain) => execute_explain(explain, params)?,
-        Statement::Set(set_stmt) => execute_set(set_stmt)?,
-        Statement::Show(show_stmt) => execute_show(show_stmt)?,
+        Statement::AlterSequence(alter) => execute_alter_sequence(alter).await?,
+        Statement::AlterView(alter) => execute_alter_view(alter).await?,
+        Statement::Insert(insert) => execute_insert(insert, params).await?,
+        Statement::Update(update) => execute_update(update, params).await?,
+        Statement::Delete(delete) => execute_delete(delete, params).await?,
+        Statement::Merge(merge) => execute_merge(merge, params).await?,
+        Statement::DropTable(drop_table) => execute_drop_table(drop_table).await?,
+        Statement::DropSchema(drop_schema) => execute_drop_schema(drop_schema).await?,
+        Statement::DropIndex(drop_index) => execute_drop_index(drop_index).await?,
+        Statement::DropSequence(drop_sequence) => execute_drop_sequence(drop_sequence).await?,
+        Statement::DropView(drop_view) => execute_drop_view(drop_view).await?,
+        Statement::Truncate(truncate) => execute_truncate(truncate).await?,
+        Statement::AlterTable(alter_table) => execute_alter_table(alter_table).await?,
+        Statement::Explain(explain) => execute_explain(explain, params).await?,
+        Statement::Set(set_stmt) => execute_set(set_stmt).await?,
+        Statement::Show(show_stmt) => execute_show(show_stmt).await?,
         Statement::Discard(_) => QueryResult {
             columns: Vec::new(), rows: Vec::new(),
             command_tag: "DISCARD".to_string(), rows_affected: 0,
@@ -313,9 +317,9 @@ pub fn execute_planned_query(
             columns: Vec::new(), rows: Vec::new(),
             command_tag: "UNLISTEN".to_string(), rows_affected: 0,
         },
-        Statement::CreateExtension(create) => execute_create_extension(create)?,
-        Statement::DropExtension(drop_ext) => execute_drop_extension(drop_ext)?,
-        Statement::CreateFunction(create) => execute_create_function(create)?,
+        Statement::CreateExtension(create) => execute_create_extension(create).await?,
+        Statement::DropExtension(drop_ext) => execute_drop_extension(drop_ext).await?,
+        Statement::CreateFunction(create) => execute_create_function(create).await?,
     };
     Ok(result)
 }
@@ -345,7 +349,7 @@ fn global_guc() -> &'static RwLock<HashMap<String, String>> {
     })
 }
 
-fn execute_set(set_stmt: &SetStatement) -> Result<QueryResult, EngineError> {
+async fn execute_set(set_stmt: &SetStatement) -> Result<QueryResult, EngineError> {
     let mut guc = global_guc().write().expect("guc lock poisoned");
     guc.insert(set_stmt.name.clone(), set_stmt.value.clone());
     Ok(QueryResult {
@@ -356,7 +360,7 @@ fn execute_set(set_stmt: &SetStatement) -> Result<QueryResult, EngineError> {
     })
 }
 
-fn execute_show(show_stmt: &ShowStatement) -> Result<QueryResult, EngineError> {
+async fn execute_show(show_stmt: &ShowStatement) -> Result<QueryResult, EngineError> {
     let guc = global_guc().read().expect("guc lock poisoned");
     let value = guc.get(&show_stmt.name)
         .or_else(|| guc.iter().find(|(k, _)| k.eq_ignore_ascii_case(&show_stmt.name)).map(|(_, v)| v))
@@ -370,7 +374,10 @@ fn execute_show(show_stmt: &ShowStatement) -> Result<QueryResult, EngineError> {
     })
 }
 
-fn execute_explain(explain: &ExplainStatement, params: &[Option<String>]) -> Result<QueryResult, EngineError> {
+async fn execute_explain(
+    explain: &ExplainStatement,
+    params: &[Option<String>],
+) -> Result<QueryResult, EngineError> {
     let mut plan_lines = Vec::new();
     describe_statement_plan(&explain.statement, &mut plan_lines, 0);
 
@@ -378,9 +385,10 @@ fn execute_explain(explain: &ExplainStatement, params: &[Option<String>]) -> Res
         // Actually execute and add timing
         let start = std::time::Instant::now();
         let inner_result = execute_planned_query(
-            &plan_statement((*explain.statement).clone())?,
+            &plan_statement((*explain.statement).await.clone())?,
             params,
-        )?;
+        )
+        .await?;
         let elapsed = start.elapsed();
         plan_lines.push(format!(
             "Planning Time: 0.001 ms"
@@ -938,7 +946,7 @@ pub fn reset_global_storage_for_tests() {
     security::reset_global_security_for_tests();
 }
 
-pub fn copy_table_binary_snapshot(
+pub async fn copy_table_binary_snapshot(
     table_name: &[String],
 ) -> Result<CopyBinarySnapshot, EngineError> {
     let table = with_catalog_read(|catalog| {
@@ -967,12 +975,16 @@ pub fn copy_table_binary_snapshot(
             .cloned()
             .unwrap_or_default()
     });
-    rows = rows
-        .into_iter()
-        .filter(|row| {
-            relation_row_visible_for_command(&table, row, RlsCommand::Select, &[]).unwrap_or(false)
-        })
-        .collect();
+    let mut visible_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        if relation_row_visible_for_command(&table, &row, RlsCommand::Select, &[])
+            .await
+            .unwrap_or(false)
+        {
+            visible_rows.push(row);
+        }
+    }
+    rows = visible_rows;
 
     let columns = table
         .columns()
@@ -1014,7 +1026,7 @@ pub fn copy_table_column_oids(table_name: &[String]) -> Result<Vec<u32>, EngineE
         .collect())
 }
 
-pub fn copy_insert_rows(
+pub async fn copy_insert_rows(
     table_name: &[String],
     rows: Vec<Vec<ScalarValue>>,
 ) -> Result<u64, EngineError> {
@@ -1077,7 +1089,9 @@ pub fn copy_insert_rows(
                 });
             }
         }
-        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, &[])? {
+        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, &[])
+            .await?
+        {
             return Err(EngineError {
                 message: format!(
                     "new row violates row-level security policy for relation \"{}\"",
@@ -1089,7 +1103,7 @@ pub fn copy_insert_rows(
         accepted_rows.push(row);
     }
 
-    validate_table_constraints(&table, &candidate_rows)?;
+    validate_table_constraints(&table, &candidate_rows).await?;
     with_storage_write(|storage| {
         storage.rows_by_table.insert(table.oid(), candidate_rows);
     });
@@ -1112,7 +1126,7 @@ fn require_relation_privilege(
         .map_err(|message| EngineError { message })
 }
 
-fn relation_row_visible_for_command(
+async fn relation_row_visible_for_command(
     table: &crate::catalog::Table,
     row: &[ScalarValue],
     command: RlsCommand,
@@ -1132,14 +1146,14 @@ fn relation_row_visible_for_command(
         let Some(predicate) = policy.using_expr.as_ref() else {
             return Ok(true);
         };
-        if truthy(&eval_expr(predicate, &scope, params)?) {
+        if truthy(&eval_expr(predicate, &scope, params).await?) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn relation_row_passes_check_for_command(
+async fn relation_row_passes_check_for_command(
     table: &crate::catalog::Table,
     row: &[ScalarValue],
     command: RlsCommand,
@@ -1160,14 +1174,16 @@ fn relation_row_passes_check_for_command(
         let Some(predicate) = predicate else {
             return Ok(true);
         };
-        if truthy(&eval_expr(predicate, &scope, params)?) {
+        if truthy(&eval_expr(predicate, &scope, params).await?) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-fn execute_create_table(create: &CreateTableStatement) -> Result<QueryResult, EngineError> {
+async fn execute_create_table(
+    create: &CreateTableStatement,
+) -> Result<QueryResult, EngineError> {
     if create.columns.is_empty() {
         return Err(EngineError {
             message: "CREATE TABLE requires at least one column".to_string(),
@@ -1273,7 +1289,9 @@ fn execute_create_table(create: &CreateTableStatement) -> Result<QueryResult, En
     })
 }
 
-fn execute_create_schema(create: &CreateSchemaStatement) -> Result<QueryResult, EngineError> {
+async fn execute_create_schema(
+    create: &CreateSchemaStatement,
+) -> Result<QueryResult, EngineError> {
     let created = with_catalog_write(|catalog| catalog.create_schema(&create.name));
     match created {
         Ok(_) => Ok(QueryResult {
@@ -1296,7 +1314,9 @@ fn execute_create_schema(create: &CreateSchemaStatement) -> Result<QueryResult, 
     }
 }
 
-fn execute_create_index(create: &CreateIndexStatement) -> Result<QueryResult, EngineError> {
+async fn execute_create_index(
+    create: &CreateIndexStatement,
+) -> Result<QueryResult, EngineError> {
     let table = with_catalog_read(|catalog| {
         catalog
             .resolve_table(&create.table_name, &SearchPath::default())
@@ -1347,7 +1367,7 @@ fn execute_create_index(create: &CreateIndexStatement) -> Result<QueryResult, En
                 .cloned()
                 .unwrap_or_default()
         });
-        validate_table_constraints(&preview, &rows)?;
+        validate_table_constraints(&preview, &rows).await?;
 
         with_catalog_write(|catalog| {
             catalog.add_key_constraint(table.schema_name(), table.name(), key_spec)?;
@@ -1385,7 +1405,9 @@ fn execute_create_index(create: &CreateIndexStatement) -> Result<QueryResult, En
     })
 }
 
-fn execute_create_sequence(create: &CreateSequenceStatement) -> Result<QueryResult, EngineError> {
+async fn execute_create_sequence(
+    create: &CreateSequenceStatement,
+) -> Result<QueryResult, EngineError> {
     let key = normalize_sequence_name(&create.name)?;
     let increment = create.increment.unwrap_or(1);
     if increment == 0 {
@@ -1462,7 +1484,7 @@ fn execute_create_sequence(create: &CreateSequenceStatement) -> Result<QueryResu
     })
 }
 
-fn execute_create_view(
+async fn execute_create_view(
     create: &CreateViewStatement,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -1476,7 +1498,7 @@ fn execute_create_view(
     }
     let columns = derive_query_columns(&create.query)?;
     let rows = if create.materialized && create.with_data {
-        execute_query(&create.query, params)?.rows
+        execute_query(&create.query, params).await?.rows
     } else {
         Vec::new()
     };
@@ -1537,7 +1559,7 @@ fn execute_create_view(
     })
 }
 
-fn execute_refresh_materialized_view(
+async fn execute_refresh_materialized_view(
     refresh: &RefreshMaterializedViewStatement,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -1575,9 +1597,9 @@ fn execute_refresh_materialized_view(
     let _refresh_guard =
         acquire_refresh_execution_guard(relation.oid(), &relation.qualified_name())?;
     let rows = if refresh.concurrently {
-        evaluate_materialized_view_rows_concurrently(&relation, refresh.with_data, params)?
+        evaluate_materialized_view_rows_concurrently(&relation, refresh.with_data, params).await?
     } else {
-        evaluate_materialized_view_rows_live(&relation, refresh.with_data, params)?
+        evaluate_materialized_view_rows_live(&relation, refresh.with_data, params).await?
     };
     if refresh.concurrently {
         let still_valid = with_catalog_read(|catalog| {
@@ -1609,7 +1631,7 @@ fn execute_refresh_materialized_view(
     })
 }
 
-fn evaluate_materialized_view_rows_live(
+async fn evaluate_materialized_view_rows_live(
     relation: &crate::catalog::Table,
     with_data: bool,
     params: &[Option<String>],
@@ -1623,16 +1645,16 @@ fn evaluate_materialized_view_rows_live(
             relation.qualified_name()
         ),
     })?;
-    Ok(execute_query(definition, params)?.rows)
+    Ok(execute_query(definition, params).await?.rows)
 }
 
-fn evaluate_materialized_view_rows_concurrently(
+async fn evaluate_materialized_view_rows_concurrently(
     relation: &crate::catalog::Table,
     with_data: bool,
     params: &[Option<String>],
 ) -> Result<Vec<Vec<ScalarValue>>, EngineError> {
     let baseline = snapshot_state();
-    let evaluated = evaluate_materialized_view_rows_live(relation, with_data, params);
+    let evaluated = evaluate_materialized_view_rows_live(relation, with_data, params).await;
     let post_eval = snapshot_state();
     restore_state(baseline);
     with_sequences_write(|sequences| {
@@ -1641,7 +1663,7 @@ fn evaluate_materialized_view_rows_concurrently(
     evaluated
 }
 
-fn execute_alter_view(alter: &AlterViewStatement) -> Result<QueryResult, EngineError> {
+async fn execute_alter_view(alter: &AlterViewStatement) -> Result<QueryResult, EngineError> {
     let relation = with_catalog_read(|catalog| {
         catalog
             .resolve_table(&alter.name, &SearchPath::default())
@@ -1712,7 +1734,9 @@ fn execute_alter_view(alter: &AlterViewStatement) -> Result<QueryResult, EngineE
     })
 }
 
-fn execute_alter_sequence(alter: &AlterSequenceStatement) -> Result<QueryResult, EngineError> {
+async fn execute_alter_sequence(
+    alter: &AlterSequenceStatement,
+) -> Result<QueryResult, EngineError> {
     let key = normalize_sequence_name(&alter.name)?;
     with_sequences_write(|sequences| {
         let Some(state) = sequences.get_mut(&key) else {
@@ -1794,7 +1818,7 @@ fn execute_alter_sequence(alter: &AlterSequenceStatement) -> Result<QueryResult,
     })
 }
 
-fn execute_insert(
+async fn execute_insert(
     insert: &InsertStatement,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -1824,13 +1848,13 @@ fn execute_insert(
             for row_exprs in values_rows {
                 let mut row = Vec::with_capacity(row_exprs.len());
                 for expr in row_exprs {
-                    row.push(eval_expr(expr, &EvalScope::default(), params)?);
+                    row.push(eval_expr(expr, &EvalScope::default(), params).await?);
                 }
                 rows.push(row);
             }
             rows
         }
-        InsertSource::Query(query) => execute_query(query, params)?.rows,
+        InsertSource::Query(query) => execute_query(query, params).await?.rows,
     };
 
     let mut materialized = Vec::with_capacity(source_rows.len());
@@ -1856,7 +1880,7 @@ fn execute_insert(
         for (idx, column) in table.columns().iter().enumerate() {
             if !provided[idx] {
                 if let Some(default_expr) = column.default() {
-                    let raw = eval_expr(default_expr, &EvalScope::default(), params)?;
+                    let raw = eval_expr(default_expr, &EvalScope::default(), params).await?;
                     row[idx] = coerce_value_for_column(raw, column)?;
                 }
             }
@@ -1873,7 +1897,7 @@ fn execute_insert(
                 });
             }
         }
-        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, params)? {
+        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, params).await? {
             return Err(EngineError {
                 message: format!(
                     "new row violates row-level security policy for relation \"{}\"",
@@ -1896,7 +1920,7 @@ fn execute_insert(
     match &insert.on_conflict {
         None => {
             candidate_rows.extend(materialized.iter().cloned());
-            validate_table_constraints(&table, &candidate_rows)?;
+            validate_table_constraints(&table, &candidate_rows).await?;
             accepted_rows = materialized.clone();
         }
         Some(OnConflictClause::DoNothing { .. }) => {
@@ -1914,7 +1938,7 @@ fn execute_insert(
                 }
                 let mut trial = candidate_rows.clone();
                 trial.push(row.clone());
-                match validate_table_constraints(&table, &trial) {
+                match validate_table_constraints(&table, &trial).await {
                     Ok(()) => {
                         candidate_rows = trial;
                         accepted_rows.push(row.clone());
@@ -1957,7 +1981,7 @@ fn execute_insert(
                 else {
                     let mut trial = candidate_rows.clone();
                     trial.push(row.clone());
-                    validate_table_constraints(&table, &trial)?;
+                    validate_table_constraints(&table, &trial).await?;
                     candidate_rows = trial;
                     accepted_rows.push(row.clone());
                     continue;
@@ -1969,7 +1993,9 @@ fn execute_insert(
                     &existing_row,
                     RlsCommand::Update,
                     params,
-                )? {
+                )
+                .await?
+                {
                     continue;
                 }
                 let mut scope = scope_for_table_row_with_qualifiers(
@@ -1979,14 +2005,14 @@ fn execute_insert(
                 );
                 add_excluded_row_to_scope(&mut scope, &table, row);
                 if let Some(predicate) = where_clause {
-                    if !truthy(&eval_expr(predicate, &scope, params)?) {
+                    if !truthy(&eval_expr(predicate, &scope, params).await?) {
                         continue;
                     }
                 }
 
                 let mut updated_row = existing_row.clone();
                 for (col_idx, column, expr) in &assignment_targets {
-                    let raw = eval_expr(expr, &scope, params)?;
+                    let raw = eval_expr(expr, &scope, params).await?;
                     updated_row[*col_idx] = coerce_value_for_column(raw, column)?;
                 }
                 for (idx, column) in table.columns().iter().enumerate() {
@@ -2005,7 +2031,9 @@ fn execute_insert(
                     &updated_row,
                     RlsCommand::Update,
                     params,
-                )? {
+                )
+                .await?
+                {
                     return Err(EngineError {
                         message: format!(
                             "new row violates row-level security policy for relation \"{}\"",
@@ -2016,7 +2044,7 @@ fn execute_insert(
 
                 let mut trial = candidate_rows.clone();
                 trial[conflicting_row_idx] = updated_row.clone();
-                validate_table_constraints(&table, &trial)?;
+                validate_table_constraints(&table, &trial).await?;
                 candidate_rows = trial;
                 accepted_rows.push(updated_row);
             }
@@ -2037,10 +2065,13 @@ fn execute_insert(
     let returning_rows = if insert.returning.is_empty() {
         Vec::new()
     } else {
-        accepted_rows
-            .iter()
-            .map(|row| project_returning_row(&insert.returning, &table, row, params))
-            .collect::<Result<Vec<_>, _>>()?
+        {
+            let mut out = Vec::with_capacity(accepted_rows.len());
+            for row in &accepted_rows {
+                out.push(project_returning_row(&insert.returning, &table, row, params).await?);
+            }
+            out
+        }
     };
 
     Ok(QueryResult {
@@ -2051,7 +2082,7 @@ fn execute_insert(
     })
 }
 
-fn execute_update(
+async fn execute_update(
     update: &UpdateStatement,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -2115,21 +2146,21 @@ fn execute_update(
     let from_rows = if update.from.is_empty() {
         Vec::new()
     } else {
-        evaluate_from_clause(&update.from, params, None)?
+        evaluate_from_clause(&update.from, params, None).await?
     };
     let mut next_rows = current_rows.clone();
     let mut returning_base_rows = Vec::new();
     let mut updated = 0u64;
 
     for (row_idx, row) in current_rows.iter().enumerate() {
-        if !relation_row_visible_for_command(&table, row, RlsCommand::Update, params)? {
+        if !relation_row_visible_for_command(&table, row, RlsCommand::Update, params).await? {
             continue;
         }
         let base_scope = scope_for_table_row(&table, row);
         let mut matched_scope = None;
         if update.from.is_empty() {
             let matches = if let Some(predicate) = &update.where_clause {
-                truthy(&eval_expr(predicate, &base_scope, params)?)
+                truthy(&eval_expr(predicate, &base_scope, params).await?)
             } else {
                 true
             };
@@ -2140,7 +2171,7 @@ fn execute_update(
             for from_scope in &from_rows {
                 let combined = combine_scopes(&base_scope, from_scope, &HashSet::new());
                 let matches = if let Some(predicate) = &update.where_clause {
-                    truthy(&eval_expr(predicate, &combined, params)?)
+                    truthy(&eval_expr(predicate, &combined, params).await?)
                 } else {
                     true
                 };
@@ -2156,7 +2187,7 @@ fn execute_update(
 
         let mut new_row = row.clone();
         for (col_idx, column, expr) in &assignment_targets {
-            let raw = eval_expr(expr, &scope, params)?;
+            let raw = eval_expr(expr, &scope, params).await?;
             new_row[*col_idx] = coerce_value_for_column(raw, column)?;
         }
         for (idx, column) in table.columns().iter().enumerate() {
@@ -2170,7 +2201,9 @@ fn execute_update(
                 });
             }
         }
-        if !relation_row_passes_check_for_command(&table, &new_row, RlsCommand::Update, params)? {
+        if !relation_row_passes_check_for_command(&table, &new_row, RlsCommand::Update, params)
+            .await?
+        {
             return Err(EngineError {
                 message: format!(
                     "new row violates row-level security policy for relation \"{}\"",
@@ -2183,8 +2216,9 @@ fn execute_update(
         updated += 1;
     }
 
-    validate_table_constraints(&table, &next_rows)?;
-    let staged_updates = apply_on_update_actions(&table, &current_rows, next_rows.clone())?;
+    validate_table_constraints(&table, &next_rows).await?;
+    let staged_updates =
+        apply_on_update_actions(&table, &current_rows, next_rows.clone().await?;
 
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -2199,10 +2233,13 @@ fn execute_update(
     let returning_rows = if update.returning.is_empty() {
         Vec::new()
     } else {
-        returning_base_rows
-            .iter()
-            .map(|row| project_returning_row(&update.returning, &table, row, params))
-            .collect::<Result<Vec<_>, _>>()?
+        {
+            let mut out = Vec::with_capacity(returning_base_rows.len());
+            for row in &returning_base_rows {
+                out.push(project_returning_row(&update.returning, &table, row, params).await?);
+            }
+            out
+        }
     };
 
     Ok(QueryResult {
@@ -2213,7 +2250,7 @@ fn execute_update(
     })
 }
 
-fn execute_delete(
+async fn execute_delete(
     delete: &DeleteStatement,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -2246,20 +2283,20 @@ fn execute_delete(
     let using_rows = if delete.using.is_empty() {
         Vec::new()
     } else {
-        evaluate_from_clause(&delete.using, params, None)?
+        evaluate_from_clause(&delete.using, params, None).await?
     };
     let mut retained = Vec::with_capacity(current_rows.len());
     let mut removed_rows = Vec::new();
     let mut deleted = 0u64;
     for row in &current_rows {
-        if !relation_row_visible_for_command(&table, row, RlsCommand::Delete, params)? {
+        if !relation_row_visible_for_command(&table, row, RlsCommand::Delete, params).await? {
             retained.push(row.clone());
             continue;
         }
         let base_scope = scope_for_table_row(&table, row);
         let matches = if delete.using.is_empty() {
             if let Some(predicate) = &delete.where_clause {
-                truthy(&eval_expr(predicate, &base_scope, params)?)
+                truthy(&eval_expr(predicate, &base_scope, params).await?)
             } else {
                 true
             }
@@ -2268,7 +2305,7 @@ fn execute_delete(
             for using_scope in &using_rows {
                 let combined = combine_scopes(&base_scope, using_scope, &HashSet::new());
                 let passes = if let Some(predicate) = &delete.where_clause {
-                    truthy(&eval_expr(predicate, &combined, params)?)
+                    truthy(&eval_expr(predicate, &combined, params).await?)
                 } else {
                     true
                 };
@@ -2287,7 +2324,8 @@ fn execute_delete(
         }
     }
 
-    let staged_updates = apply_on_delete_actions(&table, retained, removed_rows.clone())?;
+    let staged_updates =
+        apply_on_delete_actions(&table, retained, removed_rows.clone().await?;
 
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -2302,10 +2340,13 @@ fn execute_delete(
     let returning_rows = if delete.returning.is_empty() {
         Vec::new()
     } else {
-        removed_rows
-            .iter()
-            .map(|row| project_returning_row(&delete.returning, &table, row, params))
-            .collect::<Result<Vec<_>, _>>()?
+        {
+            let mut out = Vec::with_capacity(removed_rows.len());
+            for row in &removed_rows {
+                out.push(project_returning_row(&delete.returning, &table, row, params).await?);
+            }
+            out
+        }
     };
 
     Ok(QueryResult {
@@ -2334,7 +2375,9 @@ fn drop_relations_by_oid_order(drop_order: &[Oid]) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn execute_drop_table(drop_table: &DropTableStatement) -> Result<QueryResult, EngineError> {
+async fn execute_drop_table(
+    drop_table: &DropTableStatement,
+) -> Result<QueryResult, EngineError> {
     let resolved = with_catalog_read(|catalog| {
         catalog
             .resolve_table(&drop_table.name, &SearchPath::default())
@@ -2397,7 +2440,9 @@ fn execute_drop_table(drop_table: &DropTableStatement) -> Result<QueryResult, En
     })
 }
 
-fn execute_drop_schema(drop_schema: &DropSchemaStatement) -> Result<QueryResult, EngineError> {
+async fn execute_drop_schema(
+    drop_schema: &DropSchemaStatement,
+) -> Result<QueryResult, EngineError> {
     let schema_name = drop_schema.name.to_ascii_lowercase();
     let schema_tables = with_catalog_read(|catalog| {
         catalog
@@ -2511,7 +2556,9 @@ fn execute_drop_schema(drop_schema: &DropSchemaStatement) -> Result<QueryResult,
     })
 }
 
-fn execute_drop_index(drop_index: &DropIndexStatement) -> Result<QueryResult, EngineError> {
+async fn execute_drop_index(
+    drop_index: &DropIndexStatement,
+) -> Result<QueryResult, EngineError> {
     let resolved = resolve_index_target(&drop_index.name)?;
     let Some(target) = resolved else {
         if drop_index.if_exists {
@@ -2578,7 +2625,7 @@ fn execute_drop_index(drop_index: &DropIndexStatement) -> Result<QueryResult, En
     })
 }
 
-fn execute_drop_sequence(
+async fn execute_drop_sequence(
     drop_sequence: &DropSequenceStatement,
 ) -> Result<QueryResult, EngineError> {
     let key = normalize_sequence_name(&drop_sequence.name)?;
@@ -2629,7 +2676,9 @@ fn execute_drop_sequence(
     })
 }
 
-fn execute_drop_view(drop_view: &DropViewStatement) -> Result<QueryResult, EngineError> {
+async fn execute_drop_view(
+    drop_view: &DropViewStatement,
+) -> Result<QueryResult, EngineError> {
     let expected_kind = if drop_view.materialized {
         TableKind::MaterializedView
     } else {
@@ -2723,7 +2772,7 @@ fn execute_drop_view(drop_view: &DropViewStatement) -> Result<QueryResult, Engin
     })
 }
 
-fn execute_merge(
+async fn execute_merge(
     merge: &MergeStatement,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -2767,7 +2816,7 @@ fn execute_merge(
         require_relation_privilege(&table, TablePrivilege::Delete)?;
     }
 
-    let source_eval = evaluate_table_expression(&merge.source, params, None)?;
+    let source_eval = evaluate_table_expression(&merge.source, params, None).await?;
     let current_rows = with_storage_read(|storage| {
         storage
             .rows_by_table
@@ -2815,7 +2864,7 @@ fn execute_merge(
             let target_scope =
                 scope_for_table_row_with_qualifiers(&table, &target_row.values, &target_qualifiers);
             let combined = combine_scopes(&target_scope, &source_scope, &HashSet::new());
-            if truthy(&eval_expr(&merge.on, &combined, params)?) {
+            if truthy(&eval_expr(&merge.on, &combined, params).await?) {
                 if matched_index.is_some() {
                     return Err(EngineError {
                         message: "MERGE matched more than one target row for a source row"
@@ -2842,7 +2891,9 @@ fn execute_merge(
                             &candidate_rows[target_idx].values,
                             RlsCommand::Update,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             continue;
                         }
                         let target_scope = scope_for_table_row_with_qualifiers(
@@ -2853,7 +2904,7 @@ fn execute_merge(
                         let combined =
                             combine_scopes(&target_scope, &source_scope, &HashSet::new());
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &combined, params)?) {
+                            if !truthy(&eval_expr(cond, &combined, params).await?) {
                                 continue;
                             }
                         }
@@ -2870,7 +2921,7 @@ fn execute_merge(
                             resolve_update_assignment_targets(&table, assignments)?;
                         let mut new_row = candidate_rows[target_idx].values.clone();
                         for (col_idx, column, expr) in &assignment_targets {
-                            let raw = eval_expr(expr, &combined, params)?;
+                            let raw = eval_expr(expr, &combined, params).await?;
                             new_row[*col_idx] = coerce_value_for_column(raw, column)?;
                         }
                         for (idx, column) in table.columns().iter().enumerate() {
@@ -2889,7 +2940,9 @@ fn execute_merge(
                             &new_row,
                             RlsCommand::Update,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             return Err(EngineError {
                                 message: format!(
                                     "new row violates row-level security policy for relation \"{}\"",
@@ -2905,7 +2958,8 @@ fn execute_merge(
                                 &candidate_rows[target_idx].values,
                                 &target_qualifiers,
                                 params,
-                            )?);
+                            )
+                            .await?);
                         }
                         changed += 1;
                         clause_applied = true;
@@ -2917,7 +2971,9 @@ fn execute_merge(
                             &candidate_rows[target_idx].values,
                             RlsCommand::Delete,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             continue;
                         }
                         let target_scope = scope_for_table_row_with_qualifiers(
@@ -2928,7 +2984,7 @@ fn execute_merge(
                         let combined =
                             combine_scopes(&target_scope, &source_scope, &HashSet::new());
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &combined, params)?) {
+                            if !truthy(&eval_expr(cond, &combined, params).await?) {
                                 continue;
                             }
                         }
@@ -2949,7 +3005,8 @@ fn execute_merge(
                                 &removed.values,
                                 &target_qualifiers,
                                 params,
-                            )?);
+                            )
+                            .await?);
                         }
                         if removed.source_row_index.is_some() {
                             deleted_rows.push(removed.values);
@@ -2967,7 +3024,7 @@ fn execute_merge(
                         let combined =
                             combine_scopes(&target_scope, &source_scope, &HashSet::new());
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &combined, params)?) {
+                            if !truthy(&eval_expr(cond, &combined, params).await?) {
                                 continue;
                             }
                         }
@@ -2989,7 +3046,7 @@ fn execute_merge(
                         values,
                     } => {
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &source_scope, params)?) {
+                            if !truthy(&eval_expr(cond, &source_scope, params).await?) {
                                 continue;
                             }
                         }
@@ -3006,7 +3063,7 @@ fn execute_merge(
                         let mut row = vec![ScalarValue::Null; table.columns().len()];
                         let mut provided = vec![false; table.columns().len()];
                         for (expr, col_idx) in values.iter().zip(target_indexes.iter()) {
-                            let raw = eval_expr(expr, &source_scope, params)?;
+                            let raw = eval_expr(expr, &source_scope, params).await?;
                             let column = &table.columns()[*col_idx];
                             row[*col_idx] = coerce_value_for_column(raw, column)?;
                             provided[*col_idx] = true;
@@ -3014,7 +3071,8 @@ fn execute_merge(
                         for (idx, column) in table.columns().iter().enumerate() {
                             if !provided[idx] {
                                 if let Some(default_expr) = column.default() {
-                                    let raw = eval_expr(default_expr, &source_scope, params)?;
+                                    let raw =
+                                        eval_expr(default_expr, &source_scope, params).await?;
                                     row[idx] = coerce_value_for_column(raw, column)?;
                                 }
                             }
@@ -3033,7 +3091,9 @@ fn execute_merge(
                             &row,
                             RlsCommand::Insert,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             return Err(EngineError {
                                 message: format!(
                                     "new row violates row-level security policy for relation \"{}\"",
@@ -3048,7 +3108,8 @@ fn execute_merge(
                                 &row,
                                 &target_qualifiers,
                                 params,
-                            )?);
+                            )
+                            .await?);
                         }
                         candidate_rows.push(MergeCandidateRow {
                             source_row_index: None,
@@ -3059,7 +3120,7 @@ fn execute_merge(
                     }
                     MergeWhenClause::NotMatchedDoNothing { condition } => {
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &source_scope, params)?) {
+                            if !truthy(&eval_expr(cond, &source_scope, params).await?) {
                                 continue;
                             }
                         }
@@ -3104,7 +3165,9 @@ fn execute_merge(
                             &candidate_rows[row_idx].values,
                             RlsCommand::Update,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             continue;
                         }
                         let scope = scope_for_table_row_with_qualifiers(
@@ -3113,7 +3176,7 @@ fn execute_merge(
                             &target_qualifiers,
                         );
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &scope, params)?) {
+                            if !truthy(&eval_expr(cond, &scope, params).await?) {
                                 continue;
                             }
                         }
@@ -3121,7 +3184,7 @@ fn execute_merge(
                             resolve_update_assignment_targets(&table, assignments)?;
                         let mut new_row = candidate_rows[row_idx].values.clone();
                         for (col_idx, column, expr) in &assignment_targets {
-                            let raw = eval_expr(expr, &scope, params)?;
+                            let raw = eval_expr(expr, &scope, params).await?;
                             new_row[*col_idx] = coerce_value_for_column(raw, column)?;
                         }
                         for (idx, column) in table.columns().iter().enumerate() {
@@ -3140,7 +3203,9 @@ fn execute_merge(
                             &new_row,
                             RlsCommand::Update,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             return Err(EngineError {
                                 message: format!(
                                     "new row violates row-level security policy for relation \"{}\"",
@@ -3156,7 +3221,8 @@ fn execute_merge(
                                 &candidate_rows[row_idx].values,
                                 &target_qualifiers,
                                 params,
-                            )?);
+                            )
+                            .await?);
                         }
                         changed += 1;
                         clause_applied = true;
@@ -3168,7 +3234,9 @@ fn execute_merge(
                             &candidate_rows[row_idx].values,
                             RlsCommand::Delete,
                             params,
-                        )? {
+                        )
+                        .await?
+                        {
                             continue;
                         }
                         let scope = scope_for_table_row_with_qualifiers(
@@ -3177,7 +3245,7 @@ fn execute_merge(
                             &target_qualifiers,
                         );
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &scope, params)?) {
+                            if !truthy(&eval_expr(cond, &scope, params).await?) {
                                 continue;
                             }
                         }
@@ -3189,7 +3257,8 @@ fn execute_merge(
                                 &removed.values,
                                 &target_qualifiers,
                                 params,
-                            )?);
+                            )
+                            .await?);
                         }
                         if removed.source_row_index.is_some() {
                             deleted_rows.push(removed.values);
@@ -3206,7 +3275,7 @@ fn execute_merge(
                             &target_qualifiers,
                         );
                         if let Some(cond) = condition {
-                            if !truthy(&eval_expr(cond, &scope, params)?) {
+                            if !truthy(&eval_expr(cond, &scope, params).await?) {
                                 continue;
                             }
                         }
@@ -3230,7 +3299,7 @@ fn execute_merge(
         .iter()
         .map(|candidate| candidate.values.clone())
         .collect::<Vec<_>>();
-    validate_table_constraints(&table, &final_rows)?;
+    validate_table_constraints(&table, &final_rows).await?;
 
     let mut update_changes = Vec::new();
     for candidate in &candidate_rows {
@@ -3249,14 +3318,16 @@ fn execute_merge(
         final_rows.clone(),
         update_changes,
         staged_seed,
-    )?;
+    )
+    .await?;
     if !deleted_rows.is_empty() {
         staged_updates = apply_on_delete_actions_with_staged(
             &table,
             final_rows.clone(),
             deleted_rows,
             staged_updates,
-        )?;
+        )
+        .await?;
     }
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -3272,7 +3343,9 @@ fn execute_merge(
     })
 }
 
-fn execute_truncate(truncate: &TruncateStatement) -> Result<QueryResult, EngineError> {
+async fn execute_truncate(
+    truncate: &TruncateStatement,
+) -> Result<QueryResult, EngineError> {
     let mut base_table_oids = Vec::with_capacity(truncate.table_names.len());
     for table_name in &truncate.table_names {
         let table = with_catalog_read(|catalog| {
@@ -3340,7 +3413,9 @@ fn execute_truncate(truncate: &TruncateStatement) -> Result<QueryResult, EngineE
     })
 }
 
-fn execute_alter_table(alter_table: &AlterTableStatement) -> Result<QueryResult, EngineError> {
+async fn execute_alter_table(
+    alter_table: &AlterTableStatement,
+) -> Result<QueryResult, EngineError> {
     let table = with_catalog_read(|catalog| {
         catalog
             .resolve_table(&alter_table.table_name, &SearchPath::default())
@@ -3364,7 +3439,7 @@ fn execute_alter_table(alter_table: &AlterTableStatement) -> Result<QueryResult,
         AlterTableAction::AddColumn(column_def) => {
             let column_spec = column_spec_from_ast(column_def)?;
             let default_value = if let Some(default_expr) = &column_spec.default {
-                let raw = eval_expr(default_expr, &EvalScope::default(), &[])?;
+                let raw = eval_expr(default_expr, &EvalScope::default(), &[]).await?;
                 Some(coerce_value_for_column_spec(raw, &column_spec)?)
             } else {
                 None
@@ -3408,7 +3483,7 @@ fn execute_alter_table(alter_table: &AlterTableStatement) -> Result<QueryResult,
                     .unwrap_or_default()
             });
             let preview = preview_table_with_added_constraint(&table, constraint)?;
-            validate_table_constraints(&preview, &current_rows)?;
+            validate_table_constraints(&preview, &current_rows).await?;
 
             match constraint {
                 TableConstraint::PrimaryKey { .. } | TableConstraint::Unique { .. } => {
@@ -3966,14 +4041,14 @@ fn resolve_on_conflict_target_indexes(
         .collect::<Result<Vec<_>, _>>()
 }
 
-fn validate_table_constraints(
+async fn validate_table_constraints(
     table: &crate::catalog::Table,
     candidate_rows: &[Vec<ScalarValue>],
 ) -> Result<(), EngineError> {
-    validate_table_constraints_with_overrides(table, candidate_rows, None)
+    validate_table_constraints_with_overrides(table, candidate_rows, None).await
 }
 
-fn validate_table_constraints_with_overrides(
+async fn validate_table_constraints_with_overrides(
     table: &crate::catalog::Table,
     candidate_rows: &[Vec<ScalarValue>],
     row_overrides: Option<&HashMap<Oid, Vec<Vec<ScalarValue>>>>,
@@ -3998,7 +4073,7 @@ fn validate_table_constraints_with_overrides(
             let Some(check_expr) = column.check() else {
                 continue;
             };
-            let check_value = eval_expr(check_expr, &scope, &[])?;
+            let check_value = eval_expr(check_expr, &scope, &[]).await?;
             let check_passed = match check_value {
                 ScalarValue::Bool(true) | ScalarValue::Null => true,
                 ScalarValue::Bool(false) => false,
@@ -4169,7 +4244,7 @@ struct ReferencingForeignKey {
     on_update: ForeignKeyAction,
 }
 
-fn apply_on_delete_actions(
+async fn apply_on_delete_actions(
     parent_table: &crate::catalog::Table,
     parent_rows_after: Vec<Vec<ScalarValue>>,
     deleted_parent_rows: Vec<Vec<ScalarValue>>,
@@ -4181,9 +4256,10 @@ fn apply_on_delete_actions(
         deleted_parent_rows,
         staged_rows,
     )
+    .await
 }
 
-fn apply_on_delete_actions_with_staged(
+async fn apply_on_delete_actions_with_staged(
     parent_table: &crate::catalog::Table,
     parent_rows_after: Vec<Vec<ScalarValue>>,
     deleted_parent_rows: Vec<Vec<ScalarValue>>,
@@ -4277,11 +4353,11 @@ fn apply_on_delete_actions_with_staged(
         }
     }
 
-    validate_staged_rows(&staged_rows)?;
+    validate_staged_rows(&staged_rows).await?;
     Ok(staged_rows)
 }
 
-fn apply_on_update_actions(
+async fn apply_on_update_actions(
     parent_table: &crate::catalog::Table,
     parent_rows_before: &[Vec<ScalarValue>],
     parent_rows_after: Vec<Vec<ScalarValue>>,
@@ -4299,9 +4375,10 @@ fn apply_on_update_actions(
         initial_changes,
         staged_rows,
     )
+    .await
 }
 
-fn apply_on_update_actions_with_staged(
+async fn apply_on_update_actions_with_staged(
     parent_table: &crate::catalog::Table,
     parent_rows_after: Vec<Vec<ScalarValue>>,
     initial_changes: Vec<(Vec<ScalarValue>, Vec<ScalarValue>)>,
@@ -4443,11 +4520,11 @@ fn apply_on_update_actions_with_staged(
         }
     }
 
-    validate_staged_rows(&staged_rows)?;
+    validate_staged_rows(&staged_rows).await?;
     Ok(staged_rows)
 }
 
-fn validate_staged_rows(
+async fn validate_staged_rows(
     staged_rows: &HashMap<Oid, Vec<Vec<ScalarValue>>>,
 ) -> Result<(), EngineError> {
     let tables = with_catalog_read(|catalog| {
@@ -4463,7 +4540,7 @@ fn validate_staged_rows(
             continue;
         }
         let rows = staged_rows.get(&table.oid()).cloned().unwrap_or_default();
-        validate_table_constraints_with_overrides(&table, &rows, Some(staged_rows))?;
+        validate_table_constraints_with_overrides(&table, &rows, Some(staged_rows).await?;
     }
     Ok(())
 }
@@ -5679,17 +5756,17 @@ fn derive_returning_columns_from_table(
     Ok(columns)
 }
 
-fn project_returning_row(
+async fn project_returning_row(
     returning: &[crate::parser::ast::SelectItem],
     table: &crate::catalog::Table,
     row: &[ScalarValue],
     params: &[Option<String>],
 ) -> Result<Vec<ScalarValue>, EngineError> {
     let scope = scope_for_table_row(table, row);
-    project_returning_row_from_scope(returning, row, &scope, params)
+    project_returning_row_from_scope(returning, row, &scope, params).await
 }
 
-fn project_returning_row_with_qualifiers(
+async fn project_returning_row_with_qualifiers(
     returning: &[crate::parser::ast::SelectItem],
     table: &crate::catalog::Table,
     row: &[ScalarValue],
@@ -5697,10 +5774,10 @@ fn project_returning_row_with_qualifiers(
     params: &[Option<String>],
 ) -> Result<Vec<ScalarValue>, EngineError> {
     let scope = scope_for_table_row_with_qualifiers(table, row, qualifiers);
-    project_returning_row_from_scope(returning, row, &scope, params)
+    project_returning_row_from_scope(returning, row, &scope, params).await
 }
 
-fn project_returning_row_from_scope(
+async fn project_returning_row_from_scope(
     returning: &[crate::parser::ast::SelectItem],
     row: &[ScalarValue],
     scope: &EvalScope,
@@ -5712,7 +5789,7 @@ fn project_returning_row_from_scope(
             out.extend(row.iter().cloned());
             continue;
         }
-        out.push(eval_expr(&target.expr, &scope, params)?);
+        out.push(eval_expr(&target.expr, &scope, params).await?);
     }
     Ok(out)
 }
@@ -5749,6 +5826,21 @@ fn with_cte_context<T>(ctes: HashMap<String, CteBinding>, f: impl FnOnce() -> T)
         stack.borrow_mut().pop();
         out
     })
+}
+
+async fn with_cte_context_async<T, F, Fut>(ctes: HashMap<String, CteBinding>, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+{
+    ACTIVE_CTE_STACK.with(|stack| {
+        stack.borrow_mut().push(ctes);
+    });
+    let out = f().await;
+    ACTIVE_CTE_STACK.with(|stack| {
+        stack.borrow_mut().pop();
+    });
+    out
 }
 
 fn active_cte_context() -> HashMap<String, CteBinding> {
@@ -6380,45 +6472,55 @@ fn table_function_output_type_oids(function: &TableFunctionRef, count: usize) ->
     oids
 }
 
-fn execute_query(query: &Query, params: &[Option<String>]) -> Result<QueryResult, EngineError> {
-    execute_query_with_outer(query, params, None)
-}
-
-fn execute_query_with_outer(
+async fn execute_query(
     query: &Query,
     params: &[Option<String>],
-    outer_scope: Option<&EvalScope>,
 ) -> Result<QueryResult, EngineError> {
-    let inherited_ctes = active_cte_context();
-    let mut local_ctes = inherited_ctes.clone();
+    execute_query_with_outer(query, params, None).await
+}
 
-    if let Some(with) = &query.with {
-        for cte in &with.ctes {
-            let cte_name = cte.name.to_ascii_lowercase();
-            let binding = if with.recursive && query_references_relation(&cte.query, &cte_name) {
-                evaluate_recursive_cte_binding(cte, params, outer_scope, &local_ctes)?
-            } else {
-                let cte_result = with_cte_context(local_ctes.clone(), || {
-                    execute_query_with_outer(&cte.query, params, outer_scope)
-                })?;
-                CteBinding {
-                    columns: cte_result.columns.clone(),
-                    rows: cte_result.rows.clone(),
-                }
-            };
-            local_ctes.insert(cte_name, binding);
+fn execute_query_with_outer<'a>(
+    query: &'a Query,
+    params: &'a [Option<String>],
+    outer_scope: Option<&'a EvalScope>,
+) -> EngineFuture<'a, Result<QueryResult, EngineError>> {
+    Box::pin(async move {
+        let inherited_ctes = active_cte_context();
+        let mut local_ctes = inherited_ctes.clone();
+
+        if let Some(with) = &query.with {
+            for cte in &with.ctes {
+                let cte_name = cte.name.to_ascii_lowercase();
+                let binding =
+                    if with.recursive && query_references_relation(&cte.query, &cte_name) {
+                        evaluate_recursive_cte_binding(cte, params, outer_scope, &local_ctes)
+                            .await?
+                    } else {
+                        let cte_result =
+                            with_cte_context_async(local_ctes.clone(), || async {
+                                execute_query_with_outer(&cte.query, params, outer_scope).await
+                            })
+                            .await?;
+                        CteBinding {
+                            columns: cte_result.columns.clone(),
+                            rows: cte_result.rows.clone(),
+                        }
+                    };
+                local_ctes.insert(cte_name, binding);
+            }
         }
-    }
 
-    with_cte_context(local_ctes, || {
-        let mut result = execute_query_expr_with_outer(&query.body, params, outer_scope)?;
-        apply_order_by(&mut result, query, params)?;
-        apply_offset_limit(&mut result, query, params)?;
-        Ok(result)
+        with_cte_context_async(local_ctes, || async {
+            let mut result = execute_query_expr_with_outer(&query.body, params, outer_scope).await?;
+            apply_order_by(&mut result, query, params).await?;
+            apply_offset_limit(&mut result, query, params).await?;
+            Ok(result)
+        })
+        .await
     })
 }
 
-fn evaluate_recursive_cte_binding(
+async fn evaluate_recursive_cte_binding(
     cte: &crate::parser::ast::CommonTableExpr,
     params: &[Option<String>],
     outer_scope: Option<&EvalScope>,
@@ -6449,9 +6551,10 @@ fn evaluate_recursive_cte_binding(
     }
     validate_recursive_cte_terms(&cte.name, &cte_name, left, right)?;
 
-    let seed = with_cte_context(inherited_ctes.clone(), || {
-        execute_query_expr_with_outer(left, params, outer_scope)
-    })?;
+    let seed = with_cte_context_async(inherited_ctes.clone(), || async {
+        execute_query_expr_with_outer(left, params, outer_scope).await
+    })
+    .await?;
     let columns = seed.columns.clone();
     let mut all_rows = if matches!(quantifier, SetQuantifier::Distinct) {
         dedupe_rows(seed.rows.clone())
@@ -6481,9 +6584,10 @@ fn evaluate_recursive_cte_binding(
                 rows: working_rows.clone(),
             },
         );
-        let recursive_term = with_cte_context(context, || {
-            execute_query_expr_with_outer(right, params, outer_scope)
-        })?;
+        let recursive_term = with_cte_context_async(context, || async {
+            execute_query_expr_with_outer(right, params, outer_scope).await
+        })
+        .await?;
 
         if recursive_term.columns.len() != columns.len() {
             return Err(EngineError {
@@ -6520,24 +6624,26 @@ fn evaluate_recursive_cte_binding(
     })
 }
 
-fn execute_query_expr_with_outer(
-    expr: &QueryExpr,
-    params: &[Option<String>],
-    outer_scope: Option<&EvalScope>,
-) -> Result<QueryResult, EngineError> {
-    match expr {
-        QueryExpr::Select(select) => execute_select(select, params, outer_scope),
-        QueryExpr::Nested(query) => execute_query_with_outer(query, params, outer_scope),
-        QueryExpr::SetOperation {
-            left,
-            op,
-            quantifier,
-            right,
-        } => execute_set_operation(left, *op, *quantifier, right, params, outer_scope),
-    }
+fn execute_query_expr_with_outer<'a>(
+    expr: &'a QueryExpr,
+    params: &'a [Option<String>],
+    outer_scope: Option<&'a EvalScope>,
+) -> EngineFuture<'a, Result<QueryResult, EngineError>> {
+    Box::pin(async move {
+        match expr {
+            QueryExpr::Select(select) => execute_select(select, params, outer_scope).await,
+            QueryExpr::Nested(query) => execute_query_with_outer(query, params, outer_scope).await,
+            QueryExpr::SetOperation {
+                left,
+                op,
+                quantifier,
+                right,
+            } => execute_set_operation(left, *op, *quantifier, right, params, outer_scope).await,
+        }
+    })
 }
 
-fn execute_select(
+async fn execute_select(
     select: &SelectStatement,
     params: &[Option<String>],
     outer_scope: Option<&EvalScope>,
@@ -6560,7 +6666,7 @@ fn execute_select(
     let mut source_rows = if select.from.is_empty() {
         vec![outer_scope.cloned().unwrap_or_default()]
     } else {
-        evaluate_from_clause(&select.from, params, outer_scope)?
+        evaluate_from_clause(&select.from, params, outer_scope).await?
     };
     if let Some(outer) = outer_scope {
         if !select.from.is_empty() {
@@ -6599,7 +6705,7 @@ fn execute_select(
     let mut filtered_rows = Vec::new();
     for scope in source_rows {
         if let Some(predicate) = &select.where_clause {
-            if !truthy(&eval_expr(predicate, &scope, params)?) {
+            if !truthy(&eval_expr(predicate, &scope, params).await?) {
                 continue;
             }
         }
@@ -6632,7 +6738,14 @@ fn execute_select(
                     .group_by
                     .iter()
                     .map(|expr| eval_expr(expr, &scope, params))
-                    .collect::<Result<Vec<_>, _>>()?;
+                    .collect::<Vec<_>>();
+                let key_values = {
+                    let mut values = Vec::with_capacity(key_values.len());
+                    for value in key_values {
+                        values.push(value.await?);
+                    }
+                    values
+                };
                 let key = row_key(&key_values);
                 let idx = if let Some(existing) = index_by_key.get(&key) {
                     *existing
@@ -6649,7 +6762,8 @@ fn execute_select(
         for group_rows in groups {
             let representative = group_rows.first().cloned().unwrap_or_default();
             if let Some(having) = &select.having {
-                let having_value = eval_group_expr(having, &group_rows, &representative, params)?;
+                let having_value =
+                    eval_group_expr(having, &group_rows, &representative, params).await?;
                 if !truthy(&having_value) {
                     continue;
                 }
@@ -6662,12 +6776,9 @@ fn execute_select(
                         message: "wildcard target is not yet implemented in executor".to_string(),
                     });
                 }
-                row.push(eval_group_expr(
-                    &target.expr,
-                    &group_rows,
-                    &representative,
-                    params,
-                )?);
+                row.push(
+                    eval_group_expr(&target.expr, &group_rows, &representative, params).await?,
+                );
             }
             rows.push(row);
         }
@@ -6680,12 +6791,19 @@ fn execute_select(
                 &filtered_rows,
                 params,
                 wildcard_columns.as_deref(),
-            )?;
+            )
+            .await?;
             rows.push(row);
         }
     } else {
         for scope in filtered_rows {
-            let row = project_select_row(&select.targets, &scope, params, wildcard_columns.as_deref())?;
+            let row = project_select_row(
+                &select.targets,
+                &scope,
+                params,
+                wildcard_columns.as_deref(),
+            )
+            .await?;
             rows.push(row);
         }
     }
@@ -6700,7 +6818,7 @@ fn execute_select(
                 let scope = scope_from_row(&columns, row, &[], &columns);
                 let mut key_parts = Vec::new();
                 for expr in &select.distinct_on {
-                    let val = eval_expr(expr, &scope, params)?;
+                    let val = eval_expr(expr, &scope, params).await?;
                     key_parts.push(val.render());
                 }
                 let key_str = key_parts.join("\0");
@@ -6729,7 +6847,7 @@ struct TableEval {
     null_scope: EvalScope,
 }
 
-fn evaluate_from_clause(
+async fn evaluate_from_clause(
     from: &[TableExpression],
     params: &[Option<String>],
     outer_scope: Option<&EvalScope>,
@@ -6745,14 +6863,15 @@ fn evaluate_from_clause(
                     if let Some(outer) = outer_scope {
                         merged_outer.inherit_outer(outer);
                     }
-                    let rhs = evaluate_table_expression(item, params, Some(&merged_outer))?;
+                    let rhs =
+                        evaluate_table_expression(item, params, Some(&merged_outer).await?;
                     for rhs_scope in &rhs.rows {
                         next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
                     }
                 }
             }
             _ => {
-                let rhs = evaluate_table_expression(item, params, outer_scope)?;
+                let rhs = evaluate_table_expression(item, params, outer_scope).await?;
                 for lhs_scope in &current {
                     for rhs_scope in &rhs.rows {
                         next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
@@ -6765,58 +6884,61 @@ fn evaluate_from_clause(
     Ok(current)
 }
 
-fn evaluate_table_expression(
-    table: &TableExpression,
-    params: &[Option<String>],
-    outer_scope: Option<&EvalScope>,
-) -> Result<TableEval, EngineError> {
-    match table {
-        TableExpression::Relation(rel) => evaluate_relation(rel, params, outer_scope),
-        TableExpression::Function(function) => {
-            evaluate_table_function(function, params, outer_scope)
-        }
-        TableExpression::Subquery(sub) => {
-            let result = execute_query_with_outer(&sub.query, params, outer_scope)?;
-            let qualifiers = sub
-                .alias
-                .as_ref()
-                .map(|alias| vec![alias.to_ascii_lowercase()])
-                .unwrap_or_default();
-            let mut rows = Vec::with_capacity(result.rows.len());
-            for row in &result.rows {
-                rows.push(scope_from_row(
-                    &result.columns,
-                    row,
-                    &qualifiers,
-                    &result.columns,
-                ));
+fn evaluate_table_expression<'a>(
+    table: &'a TableExpression,
+    params: &'a [Option<String>],
+    outer_scope: Option<&'a EvalScope>,
+) -> EngineFuture<'a, Result<TableEval, EngineError>> {
+    Box::pin(async move {
+        match table {
+            TableExpression::Relation(rel) => evaluate_relation(rel, params, outer_scope).await,
+            TableExpression::Function(function) => {
+                evaluate_table_function(function, params, outer_scope).await
             }
-            let null_values = vec![ScalarValue::Null; result.columns.len()];
-            let null_scope =
-                scope_from_row(&result.columns, &null_values, &qualifiers, &result.columns);
+            TableExpression::Subquery(sub) => {
+                let result = execute_query_with_outer(&sub.query, params, outer_scope).await?;
+                let qualifiers = sub
+                    .alias
+                    .as_ref()
+                    .map(|alias| vec![alias.to_ascii_lowercase()])
+                    .unwrap_or_default();
+                let mut rows = Vec::with_capacity(result.rows.len());
+                for row in &result.rows {
+                    rows.push(scope_from_row(
+                        &result.columns,
+                        row,
+                        &qualifiers,
+                        &result.columns,
+                    ));
+                }
+                let null_values = vec![ScalarValue::Null; result.columns.len()];
+                let null_scope =
+                    scope_from_row(&result.columns, &null_values, &qualifiers, &result.columns);
 
-            Ok(TableEval {
-                rows,
-                columns: result.columns,
-                null_scope,
-            })
+                Ok(TableEval {
+                    rows,
+                    columns: result.columns,
+                    null_scope,
+                })
+            }
+            TableExpression::Join(join) => {
+                let left = evaluate_table_expression(&join.left, params, outer_scope).await?;
+                let right = evaluate_table_expression(&join.right, params, outer_scope).await?;
+                evaluate_join(
+                    join.kind,
+                    join.condition.as_ref(),
+                    join.natural,
+                    &left,
+                    &right,
+                    params,
+                )
+                .await
+            }
         }
-        TableExpression::Join(join) => {
-            let left = evaluate_table_expression(&join.left, params, outer_scope)?;
-            let right = evaluate_table_expression(&join.right, params, outer_scope)?;
-            evaluate_join(
-                join.kind,
-                join.condition.as_ref(),
-                join.natural,
-                &left,
-                &right,
-                params,
-            )
-        }
-    }
+    })
 }
 
-fn evaluate_table_function(
+async fn evaluate_table_function(
     function: &TableFunctionRef,
     params: &[Option<String>],
     outer_scope: Option<&EvalScope>,
@@ -6828,10 +6950,10 @@ fn evaluate_table_function(
 
     let mut args = Vec::with_capacity(function.args.len());
     for arg in &function.args {
-        args.push(eval_expr(arg, &scope, params)?);
+        args.push(eval_expr(arg, &scope, params).await?);
     }
 
-    let (mut columns, rows) = evaluate_set_returning_function(function, &args)?;
+    let (mut columns, rows) = evaluate_set_returning_function(function, &args).await?;
     if !function.column_aliases.is_empty() {
         if function.column_aliases.len() != columns.len() {
             return Err(EngineError {
@@ -6875,7 +6997,7 @@ fn evaluate_table_function(
     })
 }
 
-fn evaluate_set_returning_function(
+async fn evaluate_set_returning_function(
     function: &TableFunctionRef,
     args: &[ScalarValue],
 ) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
@@ -6914,7 +7036,7 @@ fn evaluate_set_returning_function(
         "unnest" => eval_unnest_set_function(args, &fn_name),
         "pg_get_keywords" => eval_pg_get_keywords(),
         "messages" if function.name.len() == 2 && function.name[0].to_ascii_lowercase() == "ws" => {
-            execute_ws_messages(args)
+            execute_ws_messages(args).await
         }
         _ => Err(EngineError {
             message: format!(
@@ -7254,7 +7376,7 @@ fn eval_pg_get_keywords() -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), Engine
     Ok((columns, rows))
 }
 
-fn evaluate_relation(
+async fn evaluate_relation(
     rel: &TableRef,
     params: &[Option<String>],
     outer_scope: Option<&EvalScope>,
@@ -7347,7 +7469,7 @@ fn evaluate_relation(
                     table.qualified_name()
                 ),
             })?;
-            let result = execute_query_with_outer(definition, params, outer_scope)?;
+            let result = execute_query_with_outer(definition, params, outer_scope).await?;
             let columns = table
                 .columns()
                 .iter()
@@ -7368,7 +7490,9 @@ fn evaluate_relation(
         require_relation_privilege(&table, TablePrivilege::Select)?;
         let mut visible_rows = Vec::with_capacity(rows.len());
         for row in rows {
-            if relation_row_visible_for_command(&table, &row, RlsCommand::Select, params)? {
+            if relation_row_visible_for_command(&table, &row, RlsCommand::Select, params)
+                .await?
+            {
                 visible_rows.push(row);
             }
         }
@@ -7737,7 +7861,7 @@ fn information_schema_data_type(signature: TypeSignature) -> &'static str {
     }
 }
 
-fn evaluate_join(
+async fn evaluate_join(
     join_type: JoinType,
     condition: Option<&JoinCondition>,
     natural: bool,
@@ -7770,7 +7894,8 @@ fn evaluate_join(
             let matches = match join_type {
                 JoinType::Cross => true,
                 _ => {
-                    join_condition_matches(condition, &using_columns, left_row, right_row, params)?
+                    join_condition_matches(condition, &using_columns, left_row, right_row, params)
+                        .await?
                 }
             };
 
@@ -7810,7 +7935,7 @@ fn evaluate_join(
     })
 }
 
-fn project_select_row(
+async fn project_select_row(
     targets: &[crate::parser::ast::SelectItem],
     scope: &EvalScope,
     params: &[Option<String>],
@@ -7829,12 +7954,12 @@ fn project_select_row(
             }
             continue;
         }
-        row.push(eval_expr(&target.expr, scope, params)?);
+        row.push(eval_expr(&target.expr, scope, params).await?);
     }
     Ok(row)
 }
 
-fn project_select_row_with_window(
+async fn project_select_row_with_window(
     targets: &[crate::parser::ast::SelectItem],
     scope: &EvalScope,
     row_idx: usize,
@@ -7855,13 +7980,9 @@ fn project_select_row_with_window(
             }
             continue;
         }
-        row.push(eval_expr_with_window(
-            &target.expr,
-            scope,
-            row_idx,
-            all_rows,
-            params,
-        )?);
+        row.push(
+            eval_expr_with_window(&target.expr, scope, row_idx, all_rows, params).await?,
+        );
     }
     Ok(row)
 }
@@ -8043,13 +8164,14 @@ fn is_aggregate_function(name: &str) -> bool {
     )
 }
 
-fn eval_group_expr(
-    expr: &Expr,
-    group_rows: &[EvalScope],
-    representative: &EvalScope,
-    params: &[Option<String>],
-) -> Result<ScalarValue, EngineError> {
-    match expr {
+fn eval_group_expr<'a>(
+    expr: &'a Expr,
+    group_rows: &'a [EvalScope],
+    representative: &'a EvalScope,
+    params: &'a [Option<String>],
+) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
+    Box::pin(async move {
+        match expr {
         Expr::FunctionCall {
             name,
             args,
@@ -8077,7 +8199,8 @@ fn eval_group_expr(
                     filter.as_deref(),
                     group_rows,
                     params,
-                );
+                )
+                .await;
             }
             if *distinct || !order_by.is_empty() || filter.is_some() {
                 return Err(EngineError {
@@ -8090,21 +8213,21 @@ fn eval_group_expr(
 
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
-                values.push(eval_group_expr(arg, group_rows, representative, params)?);
+                values.push(eval_group_expr(arg, group_rows, representative, params).await?);
             }
-            eval_scalar_function(&fn_name, &values)
+            eval_scalar_function(&fn_name, &values).await
         }
         Expr::Unary { op, expr } => {
-            let value = eval_group_expr(expr, group_rows, representative, params)?;
+            let value = eval_group_expr(expr, group_rows, representative, params).await?;
             eval_unary(op.clone(), value)
         }
         Expr::Binary { left, op, right } => {
-            let lhs = eval_group_expr(left, group_rows, representative, params)?;
-            let rhs = eval_group_expr(right, group_rows, representative, params)?;
+            let lhs = eval_group_expr(left, group_rows, representative, params).await?;
+            let rhs = eval_group_expr(right, group_rows, representative, params).await?;
             eval_binary(op.clone(), lhs, rhs)
         }
         Expr::Cast { expr, type_name } => {
-            let value = eval_group_expr(expr, group_rows, representative, params)?;
+            let value = eval_group_expr(expr, group_rows, representative, params).await?;
             eval_cast_scalar(value, type_name)
         }
         Expr::Between {
@@ -8113,9 +8236,9 @@ fn eval_group_expr(
             high,
             negated,
         } => {
-            let value = eval_group_expr(expr, group_rows, representative, params)?;
-            let low_value = eval_group_expr(low, group_rows, representative, params)?;
-            let high_value = eval_group_expr(high, group_rows, representative, params)?;
+            let value = eval_group_expr(expr, group_rows, representative, params).await?;
+            let low_value = eval_group_expr(low, group_rows, representative, params).await?;
+            let high_value = eval_group_expr(high, group_rows, representative, params).await?;
             eval_between_predicate(value, low_value, high_value, *negated)
         }
         Expr::Like {
@@ -8124,12 +8247,12 @@ fn eval_group_expr(
             case_insensitive,
             negated,
         } => {
-            let value = eval_group_expr(expr, group_rows, representative, params)?;
-            let pattern_value = eval_group_expr(pattern, group_rows, representative, params)?;
+            let value = eval_group_expr(expr, group_rows, representative, params).await?;
+            let pattern_value = eval_group_expr(pattern, group_rows, representative, params).await?;
             eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
         }
         Expr::IsNull { expr, negated } => {
-            let value = eval_group_expr(expr, group_rows, representative, params)?;
+            let value = eval_group_expr(expr, group_rows, representative, params).await?;
             let is_null = matches!(value, ScalarValue::Null);
             Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
         }
@@ -8138,8 +8261,8 @@ fn eval_group_expr(
             right,
             negated,
         } => {
-            let left_value = eval_group_expr(left, group_rows, representative, params)?;
-            let right_value = eval_group_expr(right, group_rows, representative, params)?;
+            let left_value = eval_group_expr(left, group_rows, representative, params).await?;
+            let right_value = eval_group_expr(right, group_rows, representative, params).await?;
             eval_is_distinct_from(left_value, right_value, *negated)
         }
         Expr::CaseSimple {
@@ -8147,20 +8270,22 @@ fn eval_group_expr(
             when_then,
             else_expr,
         } => {
-            let operand_value = eval_group_expr(operand, group_rows, representative, params)?;
+            let operand_value =
+                eval_group_expr(operand, group_rows, representative, params).await?;
             for (when_expr, then_expr) in when_then {
-                let when_value = eval_group_expr(when_expr, group_rows, representative, params)?;
+                let when_value =
+                    eval_group_expr(when_expr, group_rows, representative, params).await?;
                 if matches!(operand_value, ScalarValue::Null)
                     || matches!(when_value, ScalarValue::Null)
                 {
                     continue;
                 }
                 if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_group_expr(then_expr, group_rows, representative, params);
+                    return eval_group_expr(then_expr, group_rows, representative, params).await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_group_expr(else_expr, group_rows, representative, params)
+                eval_group_expr(else_expr, group_rows, representative, params).await
             } else {
                 Ok(ScalarValue::Null)
             }
@@ -8170,25 +8295,27 @@ fn eval_group_expr(
             else_expr,
         } => {
             for (when_expr, then_expr) in when_then {
-                let condition = eval_group_expr(when_expr, group_rows, representative, params)?;
+                let condition =
+                    eval_group_expr(when_expr, group_rows, representative, params).await?;
                 if truthy(&condition) {
-                    return eval_group_expr(then_expr, group_rows, representative, params);
+                    return eval_group_expr(then_expr, group_rows, representative, params).await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_group_expr(else_expr, group_rows, representative, params)
+                eval_group_expr(else_expr, group_rows, representative, params).await
             } else {
                 Ok(ScalarValue::Null)
             }
         }
         _ => {
             if group_rows.is_empty() {
-                eval_expr(expr, &EvalScope::default(), params)
+                eval_expr(expr, &EvalScope::default(), params).await
             } else {
-                eval_expr(expr, representative, params)
+                eval_expr(expr, representative, params).await
             }
         }
     }
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -8197,7 +8324,7 @@ struct AggregateInputRow {
     order_keys: Vec<ScalarValue>,
 }
 
-fn build_aggregate_input_rows(
+async fn build_aggregate_input_rows(
     args: &[Expr],
     order_by: &[OrderByExpr],
     filter: Option<&Expr>,
@@ -8207,18 +8334,18 @@ fn build_aggregate_input_rows(
     let mut out = Vec::with_capacity(group_rows.len());
     for scope in group_rows {
         if let Some(predicate) = filter {
-            if !truthy(&eval_expr(predicate, scope, params)?) {
+            if !truthy(&eval_expr(predicate, scope, params).await?) {
                 continue;
             }
         }
 
         let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {
-            arg_values.push(eval_expr(arg, scope, params)?);
+            arg_values.push(eval_expr(arg, scope, params).await?);
         }
         let mut order_values = Vec::with_capacity(order_by.len());
         for order_expr in order_by {
-            order_values.push(eval_expr(&order_expr.expr, scope, params)?);
+            order_values.push(eval_expr(&order_expr.expr, scope, params).await?);
         }
         out.push(AggregateInputRow {
             args: arg_values,
@@ -8240,7 +8367,7 @@ fn sort_aggregate_rows(rows: &mut [AggregateInputRow], order_by: &[OrderByExpr])
     rows.sort_by(|left, right| compare_order_keys(&left.order_keys, &right.order_keys, order_by));
 }
 
-fn eval_aggregate_function(
+async fn eval_aggregate_function(
     fn_name: &str,
     args: &[Expr],
     distinct: bool,
@@ -8265,7 +8392,7 @@ fn eval_aggregate_function(
                 let mut count = 0i64;
                 for scope in group_rows {
                     if let Some(predicate) = filter {
-                        if !truthy(&eval_expr(predicate, scope, params)?) {
+                        if !truthy(&eval_expr(predicate, scope, params).await?) {
                             continue;
                         }
                     }
@@ -8278,7 +8405,7 @@ fn eval_aggregate_function(
                     message: "count() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8295,7 +8422,7 @@ fn eval_aggregate_function(
                     message: "sum() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8340,7 +8467,7 @@ fn eval_aggregate_function(
                     message: "avg() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8378,7 +8505,7 @@ fn eval_aggregate_function(
                     message: format!("{fn_name}() expects exactly one argument"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8413,7 +8540,7 @@ fn eval_aggregate_function(
                     message: format!("{fn_name}() expects exactly one argument"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8433,7 +8560,7 @@ fn eval_aggregate_function(
                     message: "string_agg() expects exactly two arguments".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8460,7 +8587,7 @@ fn eval_aggregate_function(
                     message: "array_agg() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8477,7 +8604,7 @@ fn eval_aggregate_function(
             if args.len() != 1 {
                 return Err(EngineError { message: format!("{fn_name}() expects one argument") });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let mut result = true;
             let mut saw_any = false;
             for row in &rows {
@@ -8493,7 +8620,7 @@ fn eval_aggregate_function(
             if args.len() != 1 {
                 return Err(EngineError { message: "bool_or() expects one argument".to_string() });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let mut result = false;
             let mut saw_any = false;
             for row in &rows {
@@ -8509,7 +8636,7 @@ fn eval_aggregate_function(
             if args.len() != 1 {
                 return Err(EngineError { message: format!("{fn_name}() expects one argument") });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
                 ScalarValue::Int(i) => Some(*i as f64),
                 ScalarValue::Float(f) => Some(*f),
@@ -8524,7 +8651,7 @@ fn eval_aggregate_function(
             if args.len() != 1 {
                 return Err(EngineError { message: "stddev_pop() expects one argument".to_string() });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
                 ScalarValue::Int(i) => Some(*i as f64),
                 ScalarValue::Float(f) => Some(*f),
@@ -8539,7 +8666,7 @@ fn eval_aggregate_function(
             if args.len() != 1 {
                 return Err(EngineError { message: format!("{fn_name}() expects one argument") });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
                 ScalarValue::Int(i) => Some(*i as f64),
                 ScalarValue::Float(f) => Some(*f),
@@ -8553,7 +8680,7 @@ fn eval_aggregate_function(
             if args.len() != 1 {
                 return Err(EngineError { message: "var_pop() expects one argument".to_string() });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
                 ScalarValue::Int(i) => Some(*i as f64),
                 ScalarValue::Float(f) => Some(*f),
@@ -8569,7 +8696,7 @@ fn eval_aggregate_function(
                     message: format!("{fn_name}() expects exactly two arguments"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params)?;
+            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -8594,7 +8721,7 @@ fn eval_aggregate_function(
     }
 }
 
-fn join_condition_matches(
+async fn join_condition_matches(
     condition: Option<&JoinCondition>,
     using_columns: &[String],
     left_row: &EvalScope,
@@ -8603,7 +8730,7 @@ fn join_condition_matches(
 ) -> Result<bool, EngineError> {
     if let Some(JoinCondition::On(expr)) = condition {
         let scope = combine_scopes(left_row, right_row, &HashSet::new());
-        return Ok(truthy(&eval_expr(expr, &scope, params)?));
+        return Ok(truthy(&eval_expr(expr, &scope, params).await?));
     }
 
     if !using_columns.is_empty() {
@@ -8695,7 +8822,7 @@ fn combine_scopes(
     out
 }
 
-fn execute_set_operation(
+async fn execute_set_operation(
     left: &QueryExpr,
     op: SetOperator,
     quantifier: SetQuantifier,
@@ -8703,8 +8830,8 @@ fn execute_set_operation(
     params: &[Option<String>],
     outer_scope: Option<&EvalScope>,
 ) -> Result<QueryResult, EngineError> {
-    let left_res = execute_query_expr_with_outer(left, params, outer_scope)?;
-    let right_res = execute_query_expr_with_outer(right, params, outer_scope)?;
+    let left_res = execute_query_expr_with_outer(left, params, outer_scope).await?;
+    let right_res = execute_query_expr_with_outer(right, params, outer_scope).await?;
     if left_res.columns.len() != right_res.columns.len() {
         return Err(EngineError {
             message: "set-operation inputs must have matching column counts".to_string(),
@@ -8845,7 +8972,7 @@ fn row_key(row: &[ScalarValue]) -> String {
         .join("|")
 }
 
-fn apply_order_by(
+async fn apply_order_by(
     result: &mut QueryResult,
     query: &Query,
     params: &[Option<String>],
@@ -8862,7 +8989,8 @@ fn apply_order_by(
         for spec in &query.order_by {
             keys.push(resolve_order_key(
                 &spec.expr, &scope, &columns, &row, params,
-            )?);
+            )
+            .await?);
         }
         decorated.push((keys, row));
     }
@@ -8905,7 +9033,7 @@ fn scalar_cmp(a: &ScalarValue, b: &ScalarValue) -> Ordering {
     }
 }
 
-fn resolve_order_key(
+async fn resolve_order_key(
     expr: &Expr,
     scope: &EvalScope,
     columns: &[String],
@@ -8934,23 +9062,26 @@ fn resolve_order_key(
         }
     }
 
-    eval_expr(expr, scope, params)
+    eval_expr(expr, scope, params).await
 }
 
-fn apply_offset_limit(
+async fn apply_offset_limit(
     result: &mut QueryResult,
     query: &Query,
     params: &[Option<String>],
 ) -> Result<(), EngineError> {
     let offset = if let Some(expr) = &query.offset {
-        parse_non_negative_int(&eval_expr(expr, &EvalScope::default(), params)?, "OFFSET")?
+        parse_non_negative_int(
+            &eval_expr(expr, &EvalScope::default(), params).await?,
+            "OFFSET",
+        )?
     } else {
         0usize
     };
 
     let limit = if let Some(expr) = &query.limit {
         Some(parse_non_negative_int(
-            &eval_expr(expr, &EvalScope::default(), params)?,
+            &eval_expr(expr, &EvalScope::default(), params).await?,
             "LIMIT",
         )?)
     } else {
@@ -9112,12 +9243,13 @@ impl EvalScope {
     }
 }
 
-fn eval_expr(
-    expr: &Expr,
-    scope: &EvalScope,
-    params: &[Option<String>],
-) -> Result<ScalarValue, EngineError> {
-    match expr {
+fn eval_expr<'a>(
+    expr: &'a Expr,
+    scope: &'a EvalScope,
+    params: &'a [Option<String>],
+) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
+    Box::pin(async move {
+        match expr {
         Expr::Null => Ok(ScalarValue::Null),
         Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
         Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
@@ -9131,20 +9263,20 @@ fn eval_expr(
         Expr::Parameter(idx) => parse_param(*idx, params),
         Expr::Identifier(parts) => scope.lookup_identifier(parts),
         Expr::Unary { op, expr } => {
-            let value = eval_expr(expr, scope, params)?;
+            let value = eval_expr(expr, scope, params).await?;
             eval_unary(op.clone(), value)
         }
         Expr::Binary { left, op, right } => {
-            let lhs = eval_expr(left, scope, params)?;
-            let rhs = eval_expr(right, scope, params)?;
+            let lhs = eval_expr(left, scope, params).await?;
+            let rhs = eval_expr(right, scope, params).await?;
             eval_binary(op.clone(), lhs, rhs)
         }
         Expr::Exists(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope))?;
+            let result = execute_query_with_outer(query, params, Some(scope).await?;
             Ok(ScalarValue::Bool(!result.rows.is_empty()))
         }
         Expr::ScalarSubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope))?;
+            let result = execute_query_with_outer(query, params, Some(scope).await?;
             if result.rows.is_empty() {
                 return Ok(ScalarValue::Null);
             }
@@ -9166,10 +9298,10 @@ fn eval_expr(
             list,
             negated,
         } => {
-            let lhs = eval_expr(expr, scope, params)?;
+            let lhs = eval_expr(expr, scope, params).await?;
             let mut rhs_values = Vec::with_capacity(list.len());
             for item in list {
-                rhs_values.push(eval_expr(item, scope, params)?);
+                rhs_values.push(eval_expr(item, scope, params).await?);
             }
             eval_in_membership(lhs, rhs_values, *negated)
         }
@@ -9178,8 +9310,8 @@ fn eval_expr(
             subquery,
             negated,
         } => {
-            let lhs = eval_expr(expr, scope, params)?;
-            let result = execute_query_with_outer(subquery, params, Some(scope))?;
+            let lhs = eval_expr(expr, scope, params).await?;
+            let result = execute_query_with_outer(subquery, params, Some(scope).await?;
             if !result.columns.is_empty() && result.columns.len() != 1 {
                 return Err(EngineError {
                     message: "subquery must return only one column".to_string(),
@@ -9198,9 +9330,9 @@ fn eval_expr(
             high,
             negated,
         } => {
-            let value = eval_expr(expr, scope, params)?;
-            let low_value = eval_expr(low, scope, params)?;
-            let high_value = eval_expr(high, scope, params)?;
+            let value = eval_expr(expr, scope, params).await?;
+            let low_value = eval_expr(low, scope, params).await?;
+            let high_value = eval_expr(high, scope, params).await?;
             eval_between_predicate(value, low_value, high_value, *negated)
         }
         Expr::Like {
@@ -9209,12 +9341,12 @@ fn eval_expr(
             case_insensitive,
             negated,
         } => {
-            let value = eval_expr(expr, scope, params)?;
-            let pattern_value = eval_expr(pattern, scope, params)?;
+            let value = eval_expr(expr, scope, params).await?;
+            let pattern_value = eval_expr(pattern, scope, params).await?;
             eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
         }
         Expr::IsNull { expr, negated } => {
-            let value = eval_expr(expr, scope, params)?;
+            let value = eval_expr(expr, scope, params).await?;
             let is_null = matches!(value, ScalarValue::Null);
             Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
         }
@@ -9223,8 +9355,8 @@ fn eval_expr(
             right,
             negated,
         } => {
-            let left_value = eval_expr(left, scope, params)?;
-            let right_value = eval_expr(right, scope, params)?;
+            let left_value = eval_expr(left, scope, params).await?;
+            let right_value = eval_expr(right, scope, params).await?;
             eval_is_distinct_from(left_value, right_value, *negated)
         }
         Expr::CaseSimple {
@@ -9232,20 +9364,20 @@ fn eval_expr(
             when_then,
             else_expr,
         } => {
-            let operand_value = eval_expr(operand, scope, params)?;
+            let operand_value = eval_expr(operand, scope, params).await?;
             for (when_expr, then_expr) in when_then {
-                let when_value = eval_expr(when_expr, scope, params)?;
+                let when_value = eval_expr(when_expr, scope, params).await?;
                 if matches!(operand_value, ScalarValue::Null)
                     || matches!(when_value, ScalarValue::Null)
                 {
                     continue;
                 }
                 if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_expr(then_expr, scope, params);
+                    return eval_expr(then_expr, scope, params).await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_expr(else_expr, scope, params)
+                eval_expr(else_expr, scope, params).await
             } else {
                 Ok(ScalarValue::Null)
             }
@@ -9255,19 +9387,19 @@ fn eval_expr(
             else_expr,
         } => {
             for (when_expr, then_expr) in when_then {
-                let condition = eval_expr(when_expr, scope, params)?;
+                let condition = eval_expr(when_expr, scope, params).await?;
                 if truthy(&condition) {
-                    return eval_expr(then_expr, scope, params);
+                    return eval_expr(then_expr, scope, params).await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_expr(else_expr, scope, params)
+                eval_expr(else_expr, scope, params).await
             } else {
                 Ok(ScalarValue::Null)
             }
         }
         Expr::Cast { expr, type_name } => {
-            let value = eval_expr(expr, scope, params)?;
+            let value = eval_expr(expr, scope, params).await?;
             eval_cast_scalar(value, type_name)
         }
         Expr::FunctionCall {
@@ -9286,21 +9418,24 @@ fn eval_expr(
             over.as_deref(),
             scope,
             params,
-        ),
+        )
+        .await,
         Expr::Wildcard => Err(EngineError {
             message: "wildcard expression requires FROM support".to_string(),
         }),
     }
+    })
 }
 
-fn eval_expr_with_window(
-    expr: &Expr,
-    scope: &EvalScope,
+fn eval_expr_with_window<'a>(
+    expr: &'a Expr,
+    scope: &'a EvalScope,
     row_idx: usize,
-    all_rows: &[EvalScope],
-    params: &[Option<String>],
-) -> Result<ScalarValue, EngineError> {
-    match expr {
+    all_rows: &'a [EvalScope],
+    params: &'a [Option<String>],
+) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
+    Box::pin(async move {
+        match expr {
         Expr::Null => Ok(ScalarValue::Null),
         Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
         Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
@@ -9314,20 +9449,20 @@ fn eval_expr_with_window(
         Expr::Parameter(idx) => parse_param(*idx, params),
         Expr::Identifier(parts) => scope.lookup_identifier(parts),
         Expr::Unary { op, expr } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
+            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
             eval_unary(op.clone(), value)
         }
         Expr::Binary { left, op, right } => {
-            let lhs = eval_expr_with_window(left, scope, row_idx, all_rows, params)?;
-            let rhs = eval_expr_with_window(right, scope, row_idx, all_rows, params)?;
+            let lhs = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
+            let rhs = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
             eval_binary(op.clone(), lhs, rhs)
         }
         Expr::Exists(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope))?;
+            let result = execute_query_with_outer(query, params, Some(scope).await?;
             Ok(ScalarValue::Bool(!result.rows.is_empty()))
         }
         Expr::ScalarSubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope))?;
+            let result = execute_query_with_outer(query, params, Some(scope).await?;
             if result.rows.is_empty() {
                 return Ok(ScalarValue::Null);
             }
@@ -9349,10 +9484,10 @@ fn eval_expr_with_window(
             list,
             negated,
         } => {
-            let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
+            let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
             let mut rhs = Vec::with_capacity(list.len());
             for item in list {
-                rhs.push(eval_expr_with_window(item, scope, row_idx, all_rows, params)?);
+                rhs.push(eval_expr_with_window(item, scope, row_idx, all_rows, params).await?);
             }
             eval_in_membership(lhs, rhs, *negated)
         }
@@ -9361,8 +9496,8 @@ fn eval_expr_with_window(
             subquery,
             negated,
         } => {
-            let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
-            let result = execute_query_with_outer(subquery, params, Some(scope))?;
+            let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+            let result = execute_query_with_outer(subquery, params, Some(scope).await?;
             if !result.columns.is_empty() && result.columns.len() != 1 {
                 return Err(EngineError {
                     message: "subquery must return only one column".to_string(),
@@ -9381,9 +9516,9 @@ fn eval_expr_with_window(
             high,
             negated,
         } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
-            let low_value = eval_expr_with_window(low, scope, row_idx, all_rows, params)?;
-            let high_value = eval_expr_with_window(high, scope, row_idx, all_rows, params)?;
+            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+            let low_value = eval_expr_with_window(low, scope, row_idx, all_rows, params).await?;
+            let high_value = eval_expr_with_window(high, scope, row_idx, all_rows, params).await?;
             eval_between_predicate(value, low_value, high_value, *negated)
         }
         Expr::Like {
@@ -9392,13 +9527,13 @@ fn eval_expr_with_window(
             case_insensitive,
             negated,
         } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
+            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
             let pattern_value =
-                eval_expr_with_window(pattern, scope, row_idx, all_rows, params)?;
+                eval_expr_with_window(pattern, scope, row_idx, all_rows, params).await?;
             eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
         }
         Expr::IsNull { expr, negated } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
+            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
             let is_null = matches!(value, ScalarValue::Null);
             Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
         }
@@ -9407,8 +9542,8 @@ fn eval_expr_with_window(
             right,
             negated,
         } => {
-            let left_value = eval_expr_with_window(left, scope, row_idx, all_rows, params)?;
-            let right_value = eval_expr_with_window(right, scope, row_idx, all_rows, params)?;
+            let left_value = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
+            let right_value = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
             eval_is_distinct_from(left_value, right_value, *negated)
         }
         Expr::CaseSimple {
@@ -9416,21 +9551,22 @@ fn eval_expr_with_window(
             when_then,
             else_expr,
         } => {
-            let operand_value = eval_expr_with_window(operand, scope, row_idx, all_rows, params)?;
+            let operand_value =
+                eval_expr_with_window(operand, scope, row_idx, all_rows, params).await?;
             for (when_expr, then_expr) in when_then {
                 let when_value =
-                    eval_expr_with_window(when_expr, scope, row_idx, all_rows, params)?;
+                    eval_expr_with_window(when_expr, scope, row_idx, all_rows, params).await?;
                 if matches!(operand_value, ScalarValue::Null)
                     || matches!(when_value, ScalarValue::Null)
                 {
                     continue;
                 }
                 if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params);
+                    return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params).await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_expr_with_window(else_expr, scope, row_idx, all_rows, params)
+                eval_expr_with_window(else_expr, scope, row_idx, all_rows, params).await
             } else {
                 Ok(ScalarValue::Null)
             }
@@ -9440,19 +9576,20 @@ fn eval_expr_with_window(
             else_expr,
         } => {
             for (when_expr, then_expr) in when_then {
-                let condition = eval_expr_with_window(when_expr, scope, row_idx, all_rows, params)?;
+                let condition =
+                    eval_expr_with_window(when_expr, scope, row_idx, all_rows, params).await?;
                 if truthy(&condition) {
-                    return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params);
+                    return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params).await;
                 }
             }
             if let Some(else_expr) = else_expr {
-                eval_expr_with_window(else_expr, scope, row_idx, all_rows, params)
+                eval_expr_with_window(else_expr, scope, row_idx, all_rows, params).await
             } else {
                 Ok(ScalarValue::Null)
             }
         }
         Expr::Cast { expr, type_name } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params)?;
+            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
             eval_cast_scalar(value, type_name)
         }
         Expr::FunctionCall {
@@ -9469,12 +9606,13 @@ fn eval_expr_with_window(
                     args,
                     *distinct,
                     order_by,
-                    filter.as_deref(),
-                    window,
-                    row_idx,
-                    all_rows,
-                    params,
-                )
+                filter.as_deref(),
+                window,
+                row_idx,
+                all_rows,
+                params,
+            )
+            .await
             } else {
                 let fn_name = name
                     .last()
@@ -9499,18 +9637,21 @@ fn eval_expr_with_window(
 
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
-                    values.push(eval_expr_with_window(arg, scope, row_idx, all_rows, params)?);
+                    values.push(
+                        eval_expr_with_window(arg, scope, row_idx, all_rows, params).await?,
+                    );
                 }
-                eval_scalar_function(&fn_name, &values)
+                eval_scalar_function(&fn_name, &values).await
             }
         }
         Expr::Wildcard => Err(EngineError {
             message: "wildcard expression requires FROM support".to_string(),
         }),
     }
+    })
 }
 
-fn eval_window_function(
+async fn eval_window_function(
     name: &[String],
     args: &[Expr],
     distinct: bool,
@@ -9525,8 +9666,8 @@ fn eval_window_function(
         .last()
         .map(|n| n.to_ascii_lowercase())
         .unwrap_or_default();
-    let mut partition = window_partition_rows(window, row_idx, all_rows, params)?;
-    let order_keys = window_order_keys(window, &mut partition, all_rows, params)?;
+    let mut partition = window_partition_rows(window, row_idx, all_rows, params).await?;
+    let order_keys = window_order_keys(window, &mut partition, all_rows, params).await?;
     let current_pos = partition
         .iter()
         .position(|entry| *entry == row_idx)
@@ -9588,7 +9729,7 @@ fn eval_window_function(
                 });
             }
             let offset = if let Some(offset_expr) = args.get(1) {
-                let offset_value = eval_expr(offset_expr, &all_rows[row_idx], params)?;
+                let offset_value = eval_expr(offset_expr, &all_rows[row_idx], params).await?;
                 if matches!(offset_value, ScalarValue::Null) {
                     return Ok(ScalarValue::Null);
                 }
@@ -9603,27 +9744,27 @@ fn eval_window_function(
             };
             let Some(target_pos) = target_pos else {
                 return Ok(if let Some(default_expr) = args.get(2) {
-                    eval_expr(default_expr, &all_rows[row_idx], params)?
+                    eval_expr(default_expr, &all_rows[row_idx], params).await?
                 } else {
                     ScalarValue::Null
                 });
             };
             if target_pos >= partition.len() {
                 return Ok(if let Some(default_expr) = args.get(2) {
-                    eval_expr(default_expr, &all_rows[row_idx], params)?
+                    eval_expr(default_expr, &all_rows[row_idx], params).await?
                 } else {
                     ScalarValue::Null
                 });
             }
             let target_row = partition[target_pos];
-            eval_expr(&args[0], &all_rows[target_row], params)
+            eval_expr(&args[0], &all_rows[target_row], params).await
         }
         "ntile" => {
             if args.len() != 1 {
                 return Err(EngineError { message: "ntile() expects exactly one argument".to_string() });
             }
             let n = {
-                let v = eval_expr(&args[0], &all_rows[row_idx], params)?;
+                let v = eval_expr(&args[0], &all_rows[row_idx], params).await?;
                 parse_i64_scalar(&v, "ntile() expects integer")? as usize
             };
             if n == 0 { return Err(EngineError { message: "ntile() argument must be positive".to_string() }); }
@@ -9657,18 +9798,22 @@ fn eval_window_function(
         }
         "first_value" => {
             if args.len() != 1 { return Err(EngineError { message: "first_value() expects one argument".to_string() }); }
-            let frame_rows = window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)?;
+            let frame_rows =
+                window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)
+                    .await?;
             if let Some(&first) = frame_rows.first() {
-                eval_expr(&args[0], &all_rows[first], params)
+                eval_expr(&args[0], &all_rows[first], params).await
             } else {
                 Ok(ScalarValue::Null)
             }
         }
         "last_value" => {
             if args.len() != 1 { return Err(EngineError { message: "last_value() expects one argument".to_string() }); }
-            let frame_rows = window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)?;
+            let frame_rows =
+                window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)
+                    .await?;
             if let Some(&last) = frame_rows.last() {
-                eval_expr(&args[0], &all_rows[last], params)
+                eval_expr(&args[0], &all_rows[last], params).await
             } else {
                 Ok(ScalarValue::Null)
             }
@@ -9676,13 +9821,15 @@ fn eval_window_function(
         "nth_value" => {
             if args.len() != 2 { return Err(EngineError { message: "nth_value() expects two arguments".to_string() }); }
             let n = {
-                let v = eval_expr(&args[1], &all_rows[row_idx], params)?;
+                let v = eval_expr(&args[1], &all_rows[row_idx], params).await?;
                 parse_i64_scalar(&v, "nth_value() expects integer")? as usize
             };
             if n == 0 { return Err(EngineError { message: "nth_value() argument must be positive".to_string() }); }
-            let frame_rows = window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)?;
+            let frame_rows =
+                window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)
+                    .await?;
             if let Some(&target) = frame_rows.get(n - 1) {
-                eval_expr(&args[0], &all_rows[target], params)
+                eval_expr(&args[0], &all_rows[target], params).await
             } else {
                 Ok(ScalarValue::Null)
             }
@@ -9695,7 +9842,8 @@ fn eval_window_function(
                 current_pos,
                 all_rows,
                 params,
-            )?;
+            )
+            .await?;
             let scoped_rows = frame_rows
                 .iter()
                 .map(|idx| all_rows[*idx].clone())
@@ -9709,6 +9857,7 @@ fn eval_window_function(
                 &scoped_rows,
                 params,
             )
+            .await
         }
         _ => Err(EngineError {
             message: format!("unsupported window function {}", fn_name),
@@ -9716,7 +9865,7 @@ fn eval_window_function(
     }
 }
 
-fn window_partition_rows(
+async fn window_partition_rows(
     window: &WindowSpec,
     row_idx: usize,
     all_rows: &[EvalScope],
@@ -9726,19 +9875,17 @@ fn window_partition_rows(
         return Ok((0..all_rows.len()).collect());
     }
     let current_scope = &all_rows[row_idx];
-    let current_key = window
-        .partition_by
-        .iter()
-        .map(|expr| eval_expr(expr, current_scope, params))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut current_key = Vec::with_capacity(window.partition_by.len());
+    for expr in &window.partition_by {
+        current_key.push(eval_expr(expr, current_scope, params).await?);
+    }
     let current_key = row_key(&current_key);
     let mut out = Vec::new();
     for (idx, scope) in all_rows.iter().enumerate() {
-        let key_values = window
-            .partition_by
-            .iter()
-            .map(|expr| eval_expr(expr, scope, params))
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut key_values = Vec::with_capacity(window.partition_by.len());
+        for expr in &window.partition_by {
+            key_values.push(eval_expr(expr, scope, params).await?);
+        }
         if row_key(&key_values) == current_key {
             out.push(idx);
         }
@@ -9746,7 +9893,7 @@ fn window_partition_rows(
     Ok(out)
 }
 
-fn window_order_keys(
+async fn window_order_keys(
     window: &WindowSpec,
     partition: &mut [usize],
     all_rows: &[EvalScope],
@@ -9759,7 +9906,7 @@ fn window_order_keys(
     for idx in partition.iter().copied() {
         let mut keys = Vec::with_capacity(window.order_by.len());
         for order in &window.order_by {
-            keys.push(eval_expr(&order.expr, &all_rows[idx], params)?);
+            keys.push(eval_expr(&order.expr, &all_rows[idx], params).await?);
         }
         decorated.push((idx, keys));
     }
@@ -9770,7 +9917,7 @@ fn window_order_keys(
     Ok(decorated.into_iter().map(|(_, keys)| keys).collect())
 }
 
-fn window_frame_rows(
+async fn window_frame_rows(
     window: &WindowSpec,
     partition: &[usize],
     order_keys: &[Vec<ScalarValue>],
@@ -9784,10 +9931,22 @@ fn window_frame_rows(
 
     match frame.units {
         WindowFrameUnits::Rows => {
-            let start =
-                frame_row_position(&frame.start, current_pos, partition.len(), &all_rows[partition[current_pos]], params)?;
-            let end =
-                frame_row_position(&frame.end, current_pos, partition.len(), &all_rows[partition[current_pos]], params)?;
+            let start = frame_row_position(
+                &frame.start,
+                current_pos,
+                partition.len(),
+                &all_rows[partition[current_pos]],
+                params,
+            )
+            .await?;
+            let end = frame_row_position(
+                &frame.end,
+                current_pos,
+                partition.len(),
+                &all_rows[partition[current_pos]],
+                params,
+            )
+            .await?;
             if start > end {
                 return Ok(Vec::new());
             }
@@ -9805,7 +9964,8 @@ fn window_frame_rows(
                 all_rows,
                 window,
                 params,
-            )?;
+            )
+            .await?;
             let effective_current = if ascending { current_value } else { -current_value };
             let start = range_bound_threshold(
                 &frame.start,
@@ -9813,14 +9973,16 @@ fn window_frame_rows(
                 true,
                 &all_rows[partition[current_pos]],
                 params,
-            )?;
+            )
+            .await?;
             let end = range_bound_threshold(
                 &frame.end,
                 effective_current,
                 false,
                 &all_rows[partition[current_pos]],
                 params,
-            )?;
+            )
+            .await?;
             if let (Some(start), Some(end)) = (start, end) {
                 if start > end {
                     return Ok(Vec::new());
@@ -9828,8 +9990,15 @@ fn window_frame_rows(
             }
             let mut out = Vec::new();
             for (pos, row_idx) in partition.iter().enumerate() {
-                let value =
-                    window_first_order_numeric_key(order_keys, pos, *row_idx, all_rows, window, params)?;
+                let value = window_first_order_numeric_key(
+                    order_keys,
+                    pos,
+                    *row_idx,
+                    all_rows,
+                    window,
+                    params,
+                )
+                .await?;
                 let effective = if ascending { value } else { -value };
                 if let Some(start) = start {
                     if effective < start {
@@ -9848,7 +10017,7 @@ fn window_frame_rows(
     }
 }
 
-fn frame_row_position(
+async fn frame_row_position(
     bound: &WindowFrameBound,
     current_pos: usize,
     partition_len: usize,
@@ -9861,31 +10030,31 @@ fn frame_row_position(
         WindowFrameBound::UnboundedFollowing => max_pos,
         WindowFrameBound::CurrentRow => current_pos,
         WindowFrameBound::OffsetPreceding(expr) => {
-            let offset = frame_bound_offset_usize(expr, current_scope, params)?;
+            let offset = frame_bound_offset_usize(expr, current_scope, params).await?;
             current_pos.saturating_sub(offset)
         }
         WindowFrameBound::OffsetFollowing(expr) => {
-            let offset = frame_bound_offset_usize(expr, current_scope, params)?;
+            let offset = frame_bound_offset_usize(expr, current_scope, params).await?;
             current_pos.saturating_add(offset).min(max_pos)
         }
     })
 }
 
-fn frame_bound_offset_usize(
+async fn frame_bound_offset_usize(
     expr: &Expr,
     current_scope: &EvalScope,
     params: &[Option<String>],
 ) -> Result<usize, EngineError> {
-    let value = eval_expr(expr, current_scope, params)?;
+    let value = eval_expr(expr, current_scope, params).await?;
     parse_non_negative_int(&value, "window frame offset")
 }
 
-fn frame_bound_offset_f64(
+async fn frame_bound_offset_f64(
     expr: &Expr,
     current_scope: &EvalScope,
     params: &[Option<String>],
 ) -> Result<f64, EngineError> {
-    let value = eval_expr(expr, current_scope, params)?;
+    let value = eval_expr(expr, current_scope, params).await?;
     let parsed = parse_f64_scalar(&value, "window frame offset must be numeric")?;
     if parsed < 0.0 {
         return Err(EngineError {
@@ -9895,7 +10064,7 @@ fn frame_bound_offset_f64(
     Ok(parsed)
 }
 
-fn range_bound_threshold(
+async fn range_bound_threshold(
     bound: &WindowFrameBound,
     current: f64,
     is_start: bool,
@@ -9909,10 +10078,10 @@ fn range_bound_threshold(
         WindowFrameBound::UnboundedPreceding if !is_start => Ok(Some(f64::NEG_INFINITY)),
         WindowFrameBound::CurrentRow => Ok(Some(current)),
         WindowFrameBound::OffsetPreceding(expr) => Ok(Some(
-            current - frame_bound_offset_f64(expr, current_scope, params)?,
+            current - frame_bound_offset_f64(expr, current_scope, params).await?,
         )),
         WindowFrameBound::OffsetFollowing(expr) => Ok(Some(
-            current + frame_bound_offset_f64(expr, current_scope, params)?,
+            current + frame_bound_offset_f64(expr, current_scope, params).await?,
         )),
         WindowFrameBound::UnboundedPreceding | WindowFrameBound::UnboundedFollowing => {
             Err(EngineError {
@@ -9922,7 +10091,7 @@ fn range_bound_threshold(
     }
 }
 
-fn window_first_order_numeric_key(
+async fn window_first_order_numeric_key(
     order_keys: &[Vec<ScalarValue>],
     pos: usize,
     row_idx: usize,
@@ -9934,7 +10103,7 @@ fn window_first_order_numeric_key(
         return parse_f64_scalar(value, "RANGE frame ORDER BY key must be numeric");
     }
     let expr = &window.order_by[0].expr;
-    let value = eval_expr(expr, &all_rows[row_idx], params)?;
+    let value = eval_expr(expr, &all_rows[row_idx], params).await?;
     parse_f64_scalar(&value, "RANGE frame ORDER BY key must be numeric")
 }
 
@@ -10359,7 +10528,7 @@ fn numeric_mod(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, Eng
     }
 }
 
-fn eval_function(
+async fn eval_function(
     name: &[String],
     args: &[Expr],
     distinct: bool,
@@ -10397,7 +10566,7 @@ fn eval_function(
 
     let mut values = Vec::with_capacity(args.len());
     for arg in args {
-        values.push(eval_expr(arg, scope, params)?);
+        values.push(eval_expr(arg, scope, params).await?);
     }
 
     // Handle schema-qualified extension functions (ws.connect, ws.send, ws.close)
@@ -10405,10 +10574,10 @@ fn eval_function(
         let schema = name[0].to_ascii_lowercase();
         if schema == "ws" {
             match fn_name.as_str() {
-                "connect" => return execute_ws_connect(&values),
-                "send" => return execute_ws_send(&values),
-                "close" => return execute_ws_close(&values),
-                "recv" => return execute_ws_recv(&values),
+                "connect" => return execute_ws_connect(&values).await,
+                "send" => return execute_ws_send(&values).await,
+                "close" => return execute_ws_close(&values).await,
+                "recv" => return execute_ws_recv(&values).await,
                 _ => {
                     return Err(EngineError {
                         message: format!("function ws.{}() does not exist", fn_name),
@@ -10418,12 +10587,15 @@ fn eval_function(
         }
     }
 
-    eval_scalar_function(&fn_name, &values)
+    eval_scalar_function(&fn_name, &values).await
 }
 
-fn eval_scalar_function(fn_name: &str, args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+async fn eval_scalar_function(
+    fn_name: &str,
+    args: &[ScalarValue],
+) -> Result<ScalarValue, EngineError> {
     match fn_name {
-        "http_get" if args.len() == 1 => eval_http_get_builtin(&args[0]),
+        "http_get" if args.len() == 1 => eval_http_get_builtin(&args[0]).await,
         "row" => Ok(ScalarValue::Text(
             JsonValue::Array(
                 args.iter()
@@ -13085,7 +13257,7 @@ fn eval_json_has_any_all_operator(
     Ok(ScalarValue::Bool(matched))
 }
 
-fn eval_http_get_builtin(url_value: &ScalarValue) -> Result<ScalarValue, EngineError> {
+async fn eval_http_get_builtin(url_value: &ScalarValue) -> Result<ScalarValue, EngineError> {
     if matches!(url_value, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -13097,10 +13269,16 @@ fn eval_http_get_builtin(url_value: &ScalarValue) -> Result<ScalarValue, EngineE
 
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let response = ureq::get(url).call().map_err(|err| EngineError {
+        let response = reqwest::get(url).await.map_err(|err| EngineError {
             message: format!("http_get request failed: {err}"),
         })?;
-        let body = response.into_string().map_err(|err| EngineError {
+        let status = response.status();
+        if !status.is_success() {
+            return Err(EngineError {
+                message: format!("http_get() request failed with status {status}"),
+            });
+        }
+        let body = response.text().await.map_err(|err| EngineError {
             message: format!("http_get body read failed: {err}"),
         })?;
         return Ok(ScalarValue::Text(body));
@@ -13108,34 +13286,42 @@ fn eval_http_get_builtin(url_value: &ScalarValue) -> Result<ScalarValue, EngineE
 
     #[cfg(target_arch = "wasm32")]
     {
-        // Synchronous XHR — works on main thread in browsers.
-        // This lets http_get() behave identically to native: a real SQL function
-        // that blocks until the response arrives.
         use wasm_bindgen::JsCast;
-        let xhr = web_sys::XmlHttpRequest::new().map_err(|_| EngineError {
-            message: "http_get(): failed to create XMLHttpRequest".to_string(),
+        use wasm_bindgen_futures::JsFuture;
+
+        let window = web_sys::window().ok_or_else(|| EngineError {
+            message: "http_get(): window is not available".to_string(),
         })?;
-        xhr.open_with_async("GET", url, false).map_err(|_| EngineError {
-            message: format!("http_get(): failed to open request to {url}"),
+        let resp_value = JsFuture::from(window.fetch_with_str(url))
+            .await
+            .map_err(|e| EngineError {
+                message: format!(
+                    "http_get() request failed: {}",
+                    e.as_string().unwrap_or_else(|| "unknown error".to_string())
+                ),
+            })?;
+        let resp: web_sys::Response = resp_value.dyn_into().map_err(|_| EngineError {
+            message: "http_get(): response was not a Response".to_string(),
         })?;
-        xhr.send().map_err(|e| EngineError {
-            message: format!(
-                "http_get() request failed: {}",
-                e.as_string().unwrap_or_else(|| "unknown error".to_string())
-            ),
-        })?;
-        let status = xhr.status().unwrap_or(0);
-        if status < 200 || status >= 300 {
+        if !resp.ok() {
             return Err(EngineError {
                 message: format!(
-                    "http_get() request failed with status {status} {}",
-                    xhr.status_text().unwrap_or_default()
+                    "http_get() request failed with status {} {}",
+                    resp.status(),
+                    resp.status_text()
                 ),
             });
         }
-        let body = xhr.response_text().map_err(|_| EngineError {
+        let text_promise = resp.text().map_err(|_| EngineError {
             message: "http_get(): failed to read response body".to_string(),
-        })?.unwrap_or_default();
+        })?;
+        let body = JsFuture::from(text_promise)
+            .await
+            .map_err(|_| EngineError {
+                message: "http_get(): failed to read response body".to_string(),
+            })?
+            .as_string()
+            .unwrap_or_default();
         Ok(ScalarValue::Text(body))
     }
 }
@@ -13816,7 +14002,9 @@ fn truthy(value: &ScalarValue) -> bool {
 
 // ── Extension & Function execution ──────────────────────────────────────────
 
-fn execute_create_extension(create: &CreateExtensionStatement) -> Result<QueryResult, EngineError> {
+async fn execute_create_extension(
+    create: &CreateExtensionStatement,
+) -> Result<QueryResult, EngineError> {
     let name = create.name.to_ascii_lowercase();
     with_ext_write(|ext| {
         if ext.extensions.iter().any(|e| e.name == name) {
@@ -13855,7 +14043,9 @@ fn execute_create_extension(create: &CreateExtensionStatement) -> Result<QueryRe
     })
 }
 
-fn execute_drop_extension(drop_ext: &DropExtensionStatement) -> Result<QueryResult, EngineError> {
+async fn execute_drop_extension(
+    drop_ext: &DropExtensionStatement,
+) -> Result<QueryResult, EngineError> {
     let name = drop_ext.name.to_ascii_lowercase();
     with_ext_write(|ext| {
         let before = ext.extensions.len();
@@ -13882,7 +14072,9 @@ fn execute_drop_extension(drop_ext: &DropExtensionStatement) -> Result<QueryResu
     })
 }
 
-fn execute_create_function(create: &CreateFunctionStatement) -> Result<QueryResult, EngineError> {
+async fn execute_create_function(
+    create: &CreateFunctionStatement,
+) -> Result<QueryResult, EngineError> {
     let uf = UserFunction {
         name: create.name.iter().map(|s| s.to_ascii_lowercase()).collect(),
         params: create.params.clone(),
@@ -13913,7 +14105,7 @@ fn is_ws_extension_loaded() -> bool {
     with_ext_read(|ext| ext.extensions.iter().any(|e| e.name == "ws"))
 }
 
-fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+async fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if !is_ws_extension_loaded() {
         return Err(EngineError {
             message: "extension \"ws\" is not loaded".to_string(),
@@ -13988,7 +14180,7 @@ fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> 
     Ok(ScalarValue::Int(id))
 }
 
-fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+async fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if !is_ws_extension_loaded() {
         return Err(EngineError {
             message: "extension \"ws\" is not loaded".to_string(),
@@ -14055,7 +14247,7 @@ fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     })
 }
 
-fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+async fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if !is_ws_extension_loaded() {
         return Err(EngineError {
             message: "extension \"ws\" is not loaded".to_string(),
@@ -14098,7 +14290,7 @@ fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     })
 }
 
-fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+async fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if !is_ws_extension_loaded() {
         return Err(EngineError {
             message: "extension \"ws\" is not loaded".to_string(),
@@ -14134,7 +14326,9 @@ fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     })
 }
 
-fn execute_ws_messages(args: &[ScalarValue]) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
+async fn execute_ws_messages(
+    args: &[ScalarValue],
+) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
     if !is_ws_extension_loaded() {
         return Err(EngineError {
             message: "extension \"ws\" is not loaded".to_string(),
@@ -14210,7 +14404,7 @@ pub fn ws_simulate_message(conn_id: i64, message: &str) -> Result<Vec<QueryResul
             let stmt = crate::parser::sql_parser::parse_statement(&substituted)
                 .map_err(|e| EngineError { message: format!("callback parse error: {}", e) })?;
             let planned = plan_statement(stmt)?;
-            let result = execute_planned_query(&planned, &[])?;
+            let result = execute_planned_query(&planned, &[]).await?;
             results.push(result);
         }
     }
@@ -14222,6 +14416,13 @@ mod tests {
     use super::*;
     use crate::catalog::{reset_global_catalog_for_tests, with_global_state_lock};
     use crate::parser::sql_parser::parse_statement;
+    use std::future::Future;
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime should start")
+            .block_on(future)
+    }
 
     fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
         with_global_state_lock(|| {
@@ -14234,7 +14435,7 @@ mod tests {
     fn run_statement(sql: &str, params: &[Option<String>]) -> QueryResult {
         let statement = parse_statement(sql).expect("statement should parse");
         let planned = plan_statement(statement).expect("statement should plan");
-        execute_planned_query(&planned, params).expect("query should execute")
+        block_on(execute_planned_query(&planned, params)).expect("query should execute")
     }
 
     fn run(sql: &str) -> QueryResult {
@@ -14479,7 +14680,7 @@ mod tests {
             let statement = parse_statement("SELECT 1 AND true").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("logical type mismatch expected");
+                block_on(execute_planned_query(&planned, &[])).expect_err("logical type mismatch expected");
             assert!(
                 err.message
                     .contains("argument of AND must be type boolean or null")
@@ -14503,7 +14704,7 @@ mod tests {
             let statement = parse_statement("SELECT 10 / 0").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("division by zero should error");
+                block_on(execute_planned_query(&planned, &[])).expect_err("division by zero should error");
             assert!(err.message.contains("division by zero"));
         });
 
@@ -14511,7 +14712,7 @@ mod tests {
             let statement = parse_statement("SELECT 10 % 0").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("modulo by zero should error");
+                block_on(execute_planned_query(&planned, &[])).expect_err("modulo by zero should error");
             assert!(err.message.contains("division by zero"));
         });
     }
@@ -14535,7 +14736,7 @@ mod tests {
             let statement = parse_statement("SELECT 'x' + 1").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("non-numeric coercion should fail");
+                block_on(execute_planned_query(&planned, &[])).expect_err("non-numeric coercion should fail");
             assert!(
                 err.message
                     .contains("numeric operation expects numeric values")
@@ -15012,7 +15213,7 @@ mod tests {
             let statement =
                 parse_statement("SELECT json_extract_path('not-json', 'a')").expect("parses");
             let planned = plan_statement(statement).expect("plans");
-            let err = execute_planned_query(&planned, &[]).expect_err("invalid json should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("invalid json should fail");
             assert!(err.message.contains("not valid JSON"));
         });
     }
@@ -15128,7 +15329,7 @@ mod tests {
             let statement =
                 parse_statement("SELECT * FROM json_each('{\"a\":1}') AS t(k)").expect("parses");
             let planned = plan_statement(statement).expect("plans");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("alias count mismatch should be rejected");
             assert!(err.message.contains("expects 2 column aliases"));
         });
@@ -15159,7 +15360,7 @@ mod tests {
                 parse_statement("SELECT * FROM json_array_elements('{\"a\":1}')").expect("parses");
             let planned = plan_statement(statement).expect("plans");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("non-array JSON input should fail");
+                block_on(execute_planned_query(&planned, &[])).expect_err("non-array JSON input should fail");
             assert!(err.message.contains("must be a JSON array"));
         });
     }
@@ -15169,7 +15370,7 @@ mod tests {
         with_isolated_state(|| {
             let statement = parse_statement("SELECT * FROM json_each('[1,2,3]')").expect("parses");
             let planned = plan_statement(statement).expect("plans");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("non-object JSON input should fail");
             assert!(err.message.contains("must be a JSON object"));
         });
@@ -15181,7 +15382,7 @@ mod tests {
             let statement =
                 parse_statement("SELECT * FROM json_to_record('{\"a\":1}')").expect("parses");
             let planned = plan_statement(statement).expect("plans");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("json_to_record should require aliases");
             assert!(err.message.contains("requires column aliases"));
         });
@@ -15230,7 +15431,7 @@ mod tests {
                 parse_statement("SELECT substring('abcdef', 2, -1)").expect("statement parses");
             let planned = plan_statement(statement).expect("statement should plan");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("negative length should fail");
+                block_on(execute_planned_query(&planned, &[])).expect_err("negative length should fail");
             assert!(err.message.contains("negative substring length"));
         });
     }
@@ -15309,7 +15510,7 @@ mod tests {
             )
             .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let result = execute_planned_query(&planned, &[]).expect("query should execute");
+            let result = block_on(execute_planned_query(&planned, &[])).expect("query should execute");
             assert_eq!(
                 result.rows,
                 vec![vec![ScalarValue::Int(1)], vec![ScalarValue::Int(2)]]
@@ -15358,7 +15559,7 @@ mod tests {
             let statement = parse_statement("CREATE OR REPLACE VIEW users AS SELECT 1")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("create or replace should fail for table relation");
             assert!(err.message.contains("not a view"));
         });
@@ -15430,7 +15631,7 @@ mod tests {
 
             let statement = parse_statement("SELECT name FROM v_users").expect("statement parses");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("old column name should not resolve");
             assert!(
                 err.message.contains("unknown column") || err.message.contains("does not exist")
@@ -15548,7 +15749,7 @@ mod tests {
             let statement = parse_statement("REFRESH MATERIALIZED VIEW v_users")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("refresh should fail for non-materialized view");
             assert!(err.message.contains("is not a materialized view"));
         });
@@ -15565,7 +15766,7 @@ mod tests {
             let statement = parse_statement("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_users")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("refresh concurrently should enforce unique index");
             assert!(err.message.contains("unique index"));
         });
@@ -15605,7 +15806,7 @@ mod tests {
                 parse_statement("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_users WITH NO DATA")
                     .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("refresh concurrently should reject WITH NO DATA");
             assert!(err.message.contains("WITH NO DATA"));
         });
@@ -15618,7 +15819,7 @@ mod tests {
             run_statement("CREATE VIEW v_users AS SELECT id FROM users", &[]);
             let statement = parse_statement("DROP TABLE users").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("drop should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("drop should fail");
             assert!(err.message.contains("depends on it"));
         });
     }
@@ -15646,7 +15847,7 @@ mod tests {
             let restrict =
                 parse_statement("DROP VIEW v_base RESTRICT").expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("drop restrict should fail for dependent view");
             assert!(err.message.contains("depends on it"));
 
@@ -15671,7 +15872,7 @@ mod tests {
             let restrict =
                 parse_statement("DROP VIEW v_base RESTRICT").expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("drop restrict should fail for dependent materialized view");
             assert!(err.message.contains("depends on it"));
 
@@ -15694,7 +15895,7 @@ mod tests {
 
             let statement = parse_statement("DROP TABLE users").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("drop should fail when view depends via scalar subquery");
             assert!(err.message.contains("depends on it"));
         });
@@ -15905,7 +16106,7 @@ mod tests {
             )
             .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[])
+            let err = block_on(execute_planned_query(&planned, &[]))
                 .expect_err("merge should fail when same target row is modified twice");
             assert!(err.message.contains("same target row"));
         });
@@ -16189,7 +16390,7 @@ mod tests {
                 parse_statement("SELECT json_object_agg(k, v) FROM (SELECT NULL AS k, 1 AS v) t")
                     .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("null key should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("null key should fail");
             assert!(err.message.contains("key cannot be null"));
         });
     }
@@ -16323,7 +16524,7 @@ mod tests {
             let duplicate = parse_statement("INSERT INTO users VALUES (2, 'a@example.com')")
                 .expect("statement should parse");
             let plan = plan_statement(duplicate).expect("statement should plan");
-            let err = execute_planned_query(&plan, &[]).expect_err("duplicate should fail");
+            let err = block_on(execute_planned_query(&plan, &[])).expect_err("duplicate should fail");
             assert!(err.message.contains("unique constraint"));
         });
     }
@@ -16342,7 +16543,7 @@ mod tests {
                     .expect("statement should parse");
             let duplicate_index_plan =
                 plan_statement(duplicate_index).expect("statement should plan");
-            let err = execute_planned_query(&duplicate_index_plan, &[])
+            let err = block_on(execute_planned_query(&duplicate_index_plan, &[]))
                 .expect_err("unique index build should fail over duplicate rows");
             assert!(err.message.contains("unique constraint"));
 
@@ -16414,7 +16615,7 @@ mod tests {
                 parse_statement("INSERT INTO users VALUES (2, 'a') ON CONFLICT (id) DO NOTHING")
                     .expect("statement should parse");
             let plan = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&plan, &[])
+            let err = block_on(execute_planned_query(&plan, &[]))
                 .expect_err("non-target unique conflict should fail");
             assert!(err.message.contains("unique constraint"));
         });
@@ -16499,7 +16700,7 @@ mod tests {
             let statement = parse_statement("INSERT INTO users (name) VALUES ('missing id')")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            execute_planned_query(&planned, &[]).expect_err("insert should fail")
+            block_on(execute_planned_query(&planned, &[])).expect_err("insert should fail")
         });
         assert!(err.message.contains("not-null"));
     }
@@ -16517,13 +16718,13 @@ mod tests {
                 .expect("statement should parse");
             let dup_pk_plan = plan_statement(dup_pk).expect("statement should plan");
             let err =
-                execute_planned_query(&dup_pk_plan, &[]).expect_err("duplicate pk should fail");
+                block_on(execute_planned_query(&dup_pk_plan, &[])).expect_err("duplicate pk should fail");
             assert!(err.message.contains("primary key"));
 
             let dup_unique = parse_statement("INSERT INTO users VALUES (2, 'a@example.com')")
                 .expect("statement should parse");
             let dup_unique_plan = plan_statement(dup_unique).expect("statement should plan");
-            let err = execute_planned_query(&dup_unique_plan, &[])
+            let err = block_on(execute_planned_query(&dup_unique_plan, &[]))
                 .expect_err("duplicate unique should fail");
             assert!(err.message.contains("unique constraint"));
         });
@@ -16545,14 +16746,14 @@ mod tests {
                 .expect("statement should parse");
             let dup_pk_plan = plan_statement(dup_pk).expect("statement should plan");
             let err =
-                execute_planned_query(&dup_pk_plan, &[]).expect_err("duplicate pk should fail");
+                block_on(execute_planned_query(&dup_pk_plan, &[])).expect_err("duplicate pk should fail");
             assert!(err.message.contains("primary key"));
 
             let dup_unique =
                 parse_statement("INSERT INTO membership VALUES (1, 11, 'a@example.com')")
                     .expect("statement should parse");
             let dup_unique_plan = plan_statement(dup_unique).expect("statement should plan");
-            let err = execute_planned_query(&dup_unique_plan, &[])
+            let err = block_on(execute_planned_query(&dup_unique_plan, &[]))
                 .expect_err("duplicate unique should fail");
             assert!(err.message.contains("unique constraint"));
         });
@@ -16573,14 +16774,14 @@ mod tests {
                 .expect("statement should parse");
             let bad_insert_plan = plan_statement(bad_insert).expect("statement should plan");
             let err =
-                execute_planned_query(&bad_insert_plan, &[]).expect_err("fk insert should fail");
+                block_on(execute_planned_query(&bad_insert_plan, &[])).expect_err("fk insert should fail");
             assert!(err.message.contains("foreign key"));
 
             let bad_update = parse_statement("UPDATE children SET parent_id = 999 WHERE id = 10")
                 .expect("statement should parse");
             let bad_update_plan = plan_statement(bad_update).expect("statement should plan");
             let err =
-                execute_planned_query(&bad_update_plan, &[]).expect_err("fk update should fail");
+                block_on(execute_planned_query(&bad_update_plan, &[])).expect_err("fk update should fail");
             assert!(err.message.contains("foreign key"));
         });
     }
@@ -16599,7 +16800,7 @@ mod tests {
             let statement = parse_statement("DELETE FROM parents WHERE id = 1")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("delete should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("delete should fail");
             assert!(err.message.contains("violates foreign key"));
         });
     }
@@ -16622,7 +16823,7 @@ mod tests {
                 .expect("statement should parse");
             let bad_insert_plan = plan_statement(bad_insert).expect("statement should plan");
             let err =
-                execute_planned_query(&bad_insert_plan, &[]).expect_err("fk insert should fail");
+                block_on(execute_planned_query(&bad_insert_plan, &[])).expect_err("fk insert should fail");
             assert!(err.message.contains("foreign key"));
         });
     }
@@ -16713,7 +16914,7 @@ mod tests {
             let statement = parse_statement("UPDATE parents SET id = 2 WHERE id = 1")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("update should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("update should fail");
             assert!(err.message.contains("violates foreign key"));
         });
     }
@@ -16731,7 +16932,7 @@ mod tests {
                 .expect("statement should parse");
             let duplicate_plan = plan_statement(duplicate).expect("statement should plan");
             let err =
-                execute_planned_query(&duplicate_plan, &[]).expect_err("duplicate should fail");
+                block_on(execute_planned_query(&duplicate_plan, &[])).expect_err("duplicate should fail");
             assert!(err.message.contains("unique constraint"));
 
             run_statement("ALTER TABLE users DROP CONSTRAINT uq_email", &[]);
@@ -16755,7 +16956,7 @@ mod tests {
                 .expect("statement should parse");
             let duplicate_plan = plan_statement(duplicate).expect("statement should plan");
             let err =
-                execute_planned_query(&duplicate_plan, &[]).expect_err("duplicate should fail");
+                block_on(execute_planned_query(&duplicate_plan, &[])).expect_err("duplicate should fail");
             assert!(err.message.contains("unique constraint"));
         });
     }
@@ -16776,7 +16977,7 @@ mod tests {
             )
             .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("alter should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("alter should fail");
             assert!(err.message.contains("foreign key"));
         });
     }
@@ -16793,13 +16994,13 @@ mod tests {
             let bad_insert = parse_statement("INSERT INTO metrics VALUES (2, -1)")
                 .expect("statement should parse");
             let bad_insert_plan = plan_statement(bad_insert).expect("statement should plan");
-            let err = execute_planned_query(&bad_insert_plan, &[]).expect_err("check should fail");
+            let err = block_on(execute_planned_query(&bad_insert_plan, &[])).expect_err("check should fail");
             assert!(err.message.contains("CHECK constraint"));
 
             let bad_update = parse_statement("UPDATE metrics SET score = -2 WHERE id = 1")
                 .expect("statement should parse");
             let bad_update_plan = plan_statement(bad_update).expect("statement should plan");
-            let err = execute_planned_query(&bad_update_plan, &[]).expect_err("check should fail");
+            let err = block_on(execute_planned_query(&bad_update_plan, &[])).expect_err("check should fail");
             assert!(err.message.contains("CHECK constraint"));
         });
     }
@@ -16967,7 +17168,7 @@ mod tests {
             let statement =
                 parse_statement("SELECT id FROM users").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("select should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("select should fail");
             assert!(err.message.contains("does not exist"));
         });
     }
@@ -16983,7 +17184,7 @@ mod tests {
 
             let statement = parse_statement("DROP TABLE parents").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("drop should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("drop should fail");
             assert!(err.message.contains("depends on it"));
         });
     }
@@ -16998,7 +17199,7 @@ mod tests {
             let restrict = parse_statement("DROP INDEX uq_users_email RESTRICT")
                 .expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("drop restrict should fail for constraint-backed index");
             assert!(err.message.contains("depends on it"));
 
@@ -17020,7 +17221,7 @@ mod tests {
             let restrict = parse_statement("DROP SEQUENCE seq_users_id RESTRICT")
                 .expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("drop sequence restrict should fail for dependent defaults");
             assert!(err.message.contains("depends on it"));
 
@@ -17042,7 +17243,7 @@ mod tests {
             let query =
                 parse_statement("SELECT nextval('seq_users_id')").expect("statement should parse");
             let plan = plan_statement(query).expect("statement should plan");
-            let err = execute_planned_query(&plan, &[]).expect_err("sequence should be dropped");
+            let err = block_on(execute_planned_query(&plan, &[])).expect_err("sequence should be dropped");
             assert!(err.message.contains("does not exist"));
         });
     }
@@ -17059,7 +17260,7 @@ mod tests {
             let restrict = parse_statement("DROP SEQUENCE seq_view_id RESTRICT")
                 .expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("drop sequence restrict should fail for dependent view");
             assert!(err.message.contains("depends on it"));
 
@@ -17105,7 +17306,7 @@ mod tests {
 
             let restrict = parse_statement("TRUNCATE parents").expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("truncate restrict should fail on referenced relation");
             assert!(err.message.contains("depends on it"));
 
@@ -17126,7 +17327,7 @@ mod tests {
             let restrict =
                 parse_statement("DROP SCHEMA app RESTRICT").expect("statement should parse");
             let restrict_plan = plan_statement(restrict).expect("statement should plan");
-            let err = execute_planned_query(&restrict_plan, &[])
+            let err = block_on(execute_planned_query(&restrict_plan, &[]))
                 .expect_err("drop schema restrict should fail when sequence exists");
             assert!(err.message.contains("is not empty"));
 
@@ -17137,7 +17338,7 @@ mod tests {
             let query =
                 parse_statement("SELECT nextval('app.seq1')").expect("statement should parse");
             let plan = plan_statement(query).expect("statement should plan");
-            let err = execute_planned_query(&plan, &[]).expect_err("sequence should be removed");
+            let err = block_on(execute_planned_query(&plan, &[])).expect_err("sequence should be removed");
             assert!(err.message.contains("does not exist"));
         });
     }
@@ -17187,7 +17388,7 @@ mod tests {
             let statement = parse_statement("ALTER TABLE parents DROP COLUMN code")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("alter should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("alter should fail");
             assert!(err.message.contains("referenced by foreign key"));
         });
     }
@@ -17238,7 +17439,7 @@ mod tests {
             let statement = parse_statement("ALTER TABLE users ADD COLUMN name text NOT NULL")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("alter should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("alter should fail");
             assert!(err.message.contains("NOT NULL"));
         });
     }
@@ -17297,7 +17498,7 @@ mod tests {
                 parse_statement("SELECT note FROM users").expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
             let err =
-                execute_planned_query(&planned, &[]).expect_err("old column name should fail");
+                block_on(execute_planned_query(&planned, &[])).expect_err("old column name should fail");
             assert!(err.message.contains("unknown column"));
         });
     }
@@ -17312,7 +17513,7 @@ mod tests {
             let statement = parse_statement("INSERT INTO users VALUES (2, NULL)")
                 .expect("statement should parse");
             let planned = plan_statement(statement).expect("statement should plan");
-            let err = execute_planned_query(&planned, &[]).expect_err("insert should fail");
+            let err = block_on(execute_planned_query(&planned, &[])).expect_err("insert should fail");
             assert!(err.message.contains("does not allow null values"));
 
             run_statement("ALTER TABLE users ALTER COLUMN note DROP NOT NULL", &[]);
@@ -17785,7 +17986,7 @@ mod tests {
             run_statement("CREATE EXTENSION ws", &[]);
             let result = parse_statement("CREATE EXTENSION ws")
                 .and_then(|s| plan_statement(s).map_err(|e| crate::parser::sql_parser::ParseError { message: e.message, position: 0 }))
-                .and_then(|p| execute_planned_query(&p, &[]).map_err(|e| crate::parser::sql_parser::ParseError { message: e.message, position: 0 }));
+                .and_then(|p| block_on(execute_planned_query(&p, &[])).map_err(|e| crate::parser::sql_parser::ParseError { message: e.message, position: 0 }));
             assert!(result.is_err());
         });
     }
@@ -17800,7 +18001,7 @@ mod tests {
         with_isolated_state(|| {
             let stmt = parse_statement("DROP EXTENSION ws").unwrap();
             let planned = plan_statement(stmt).unwrap();
-            let result = execute_planned_query(&planned, &[]);
+            let result = block_on(execute_planned_query(&planned, &[]));
             assert!(result.is_err());
         });
     }
@@ -17810,7 +18011,7 @@ mod tests {
         with_isolated_state(|| {
             let stmt = parse_statement("CREATE EXTENSION foobar").unwrap();
             let planned = plan_statement(stmt).unwrap();
-            let result = execute_planned_query(&planned, &[]);
+            let result = block_on(execute_planned_query(&planned, &[]));
             assert!(result.is_err());
         });
     }
@@ -17896,7 +18097,7 @@ mod tests {
             run_statement("CREATE EXTENSION ws", &[]);
             let stmt = parse_statement("SELECT ws.send(999, 'hello')").unwrap();
             let planned = plan_statement(stmt).unwrap();
-            let result = execute_planned_query(&planned, &[]);
+            let result = block_on(execute_planned_query(&planned, &[]));
             assert!(result.is_err());
         });
     }
@@ -17906,7 +18107,7 @@ mod tests {
         with_isolated_state(|| {
             let stmt = parse_statement("SELECT ws.connect('wss://example.com')").unwrap();
             let planned = plan_statement(stmt).unwrap();
-            let result = execute_planned_query(&planned, &[]);
+            let result = block_on(execute_planned_query(&planned, &[]));
             assert!(result.is_err());
         });
     }
@@ -17963,7 +18164,7 @@ mod tests {
             run_statement("SELECT ws.close(1)", &[]);
             let stmt = parse_statement("SELECT ws.send(1, 'hello')").unwrap();
             let planned = plan_statement(stmt).unwrap();
-            let result = execute_planned_query(&planned, &[]);
+            let result = block_on(execute_planned_query(&planned, &[]));
             assert!(result.is_err());
         });
     }

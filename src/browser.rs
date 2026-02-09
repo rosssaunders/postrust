@@ -26,48 +26,48 @@ struct BrowserQueryResult {
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
-pub fn execute_sql(sql: &str) -> String {
-    execute_sql_internal(sql, true)
+pub async fn execute_sql(sql: &str) -> String {
+    execute_sql_internal(sql, true).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = execute_sql_json))]
-pub fn execute_sql_json(sql: &str) -> String {
-    execute_sql_json_internal(sql, true)
+pub async fn execute_sql_json(sql: &str) -> String {
+    execute_sql_json_internal(sql, true).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = run_sql_json))]
-pub fn run_sql_json(sql: &str) -> String {
-    execute_sql_json(sql)
+pub async fn run_sql_json(sql: &str) -> String {
+    execute_sql_json(sql).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = exec_sql))]
-pub fn exec_sql(sql: &str) -> String {
-    execute_sql(sql)
+pub async fn exec_sql(sql: &str) -> String {
+    execute_sql(sql).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = run_sql))]
-pub fn run_sql(sql: &str) -> String {
-    execute_sql(sql)
+pub async fn run_sql(sql: &str) -> String {
+    execute_sql(sql).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = execute_sql_http))]
-pub fn execute_sql_http(sql: &str) -> String {
-    execute_sql(sql)
+pub async fn execute_sql_http(sql: &str) -> String {
+    execute_sql(sql).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = run_sql_http))]
-pub fn run_sql_http(sql: &str) -> String {
-    execute_sql_http(sql)
+pub async fn run_sql_http(sql: &str) -> String {
+    execute_sql_http(sql).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = execute_sql_http_json))]
-pub fn execute_sql_http_json(sql: &str) -> String {
-    execute_sql_json_internal(sql, true)
+pub async fn execute_sql_http_json(sql: &str) -> String {
+    execute_sql_json_internal(sql, true).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = run_sql_http_json))]
-pub fn run_sql_http_json(sql: &str) -> String {
-    execute_sql_json_internal(sql, true)
+pub async fn run_sql_http_json(sql: &str) -> String {
+    execute_sql_json_internal(sql, true).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = export_state_snapshot))]
@@ -113,15 +113,15 @@ pub fn reset_state() -> String {
     reset_state_snapshot()
 }
 
-fn execute_sql_internal(sql: &str, record_snapshot: bool) -> String {
-    match execute_sql_results_internal(sql, record_snapshot) {
+async fn execute_sql_internal(sql: &str, record_snapshot: bool) -> String {
+    match execute_sql_results_internal(sql, record_snapshot).await {
         Ok(results) => render_results(&results),
         Err(message) => format!("Execution error: {message}"),
     }
 }
 
-fn execute_sql_json_internal(sql: &str, record_snapshot: bool) -> String {
-    match execute_sql_results_internal(sql, record_snapshot) {
+async fn execute_sql_json_internal(sql: &str, record_snapshot: bool) -> String {
+    match execute_sql_results_internal(sql, record_snapshot).await {
         Ok(results) => render_results_json_payload(&results),
         Err(message) => json!({
             "ok": false,
@@ -133,12 +133,12 @@ fn execute_sql_json_internal(sql: &str, record_snapshot: bool) -> String {
     }
 }
 
-fn execute_sql_results_internal(
+async fn execute_sql_results_internal(
     sql: &str,
     record_snapshot: bool,
 ) -> Result<Vec<BrowserQueryResult>, String> {
     ensure_baseline_snapshot();
-    let results = execute_simple_query(sql)?;
+    let results = execute_simple_query(sql).await?;
     if record_snapshot {
         let trimmed = sql.trim();
         if !trimmed.is_empty() {
@@ -148,11 +148,13 @@ fn execute_sql_results_internal(
     Ok(results)
 }
 
-fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, String> {
+async fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, String> {
     let mut session = PostgresSession::new();
-    let messages = session.run([FrontendMessage::Query {
+    let messages = session
+        .run([FrontendMessage::Query {
         sql: sql.to_string(),
-    }]);
+    }])
+        .await;
 
     let mut results = Vec::new();
     let mut current_columns: Option<Vec<String>> = None;
@@ -372,17 +374,24 @@ mod tests {
         execute_sql, execute_sql_json, export_state_snapshot, import_state_snapshot,
         reset_browser_snapshot_state_for_tests, reset_state_snapshot,
     };
+    use std::future::Future;
+
+    fn block_on<T>(future: impl Future<Output = T>) -> T {
+        tokio::runtime::Runtime::new()
+            .expect("tokio runtime should start")
+            .block_on(future)
+    }
 
     #[test]
     fn browser_api_executes_multi_statement_sql() {
         crate::catalog::with_global_state_lock(|| {
             reset_browser_snapshot_state_for_tests();
 
-            let out = execute_sql(
+            let out = block_on(execute_sql(
                 "create table browser_users (id int8, name text);
                  insert into browser_users values (1, 'Ada');
                  select * from browser_users;",
-            );
+            ));
             assert!(out.contains("Ada"));
             assert!(out.contains("1\tAda"));
             assert!(!out.contains("-+-"));
@@ -394,10 +403,10 @@ mod tests {
         crate::catalog::with_global_state_lock(|| {
             reset_browser_snapshot_state_for_tests();
 
-            let create_out = execute_sql(
+            let create_out = block_on(execute_sql(
                 "create table browser_snap_users (id int8, name text);
                  insert into browser_snap_users values (1, 'Ada'), (2, 'Linus');",
-            );
+            ));
             assert!(!create_out.starts_with("Execution error:"));
 
             let snapshot = export_state_snapshot();
@@ -409,7 +418,8 @@ mod tests {
             let import_out = import_state_snapshot(&snapshot);
             assert!(!import_out.starts_with("Execution error:"));
 
-            let select_out = execute_sql("select * from browser_snap_users order by id;");
+            let select_out =
+                block_on(execute_sql("select * from browser_snap_users order by id;"));
             assert!(select_out.contains("Ada"));
             assert!(select_out.contains("Linus"));
         });
@@ -419,7 +429,7 @@ mod tests {
     fn execute_sql_json_returns_structured_results() {
         crate::catalog::with_global_state_lock(|| {
             reset_browser_snapshot_state_for_tests();
-            let out = execute_sql_json("select 1 as one, 2 as two;");
+            let out = block_on(execute_sql_json("select 1 as one, 2 as two;"));
             let parsed: serde_json::Value =
                 serde_json::from_str(&out).expect("json payload should parse");
 
