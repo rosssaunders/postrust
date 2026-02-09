@@ -453,7 +453,7 @@ pub struct SelectStatement {
     pub targets: Vec<SelectItem>,
     pub from: Vec<TableExpression>,
     pub where_clause: Option<Expr>,
-    pub group_by: Vec<Expr>,
+    pub group_by: Vec<GroupByExpr>,
     pub having: Option<Expr>,
 }
 
@@ -461,6 +461,14 @@ pub struct SelectStatement {
 pub struct SelectItem {
     pub expr: Expr,
     pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupByExpr {
+    Expr(Expr),
+    GroupingSets(Vec<Vec<Expr>>),
+    Rollup(Vec<Expr>),
+    Cube(Vec<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
