@@ -4580,7 +4580,9 @@ mod tests {
              doc @@ '$.a', \
              doc ? 'a', \
              doc ?| '{a,b}', \
+             doc ?| array['a','c'], \
              doc ?& '{a,b}', \
+             doc ?& array['a','b'], \
              doc #- '{a,b}' \
              FROM t",
         )
@@ -4605,6 +4607,8 @@ mod tests {
             BinaryOp::JsonPathMatch,
             BinaryOp::JsonHasKey,
             BinaryOp::JsonHasAny,
+            BinaryOp::JsonHasAny,
+            BinaryOp::JsonHasAll,
             BinaryOp::JsonHasAll,
             BinaryOp::JsonDeletePath,
         ];

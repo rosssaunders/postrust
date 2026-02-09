@@ -16479,13 +16479,18 @@ mod tests {
                 '{\"a\":{\"b\":[10,true,null]}}' #> '{a,b,1}', \
                 '{\"a\":{\"b\":[10,true,null]}}' #>> '{a,b,0}', \
                 '{\"a\":1}' || '{\"b\":2}', \
+                '[1,2]' || '[3,4]', \
+                '[1,2]' || '3', \
                 '{\"a\":1,\"b\":2}' @> '{\"a\":1}', \
                 '{\"a\":1}' <@ '{\"a\":1,\"b\":2}', \
                 '{\"a\":[{\"id\":1}],\"flag\":true}' @? '$.a[*].id', \
                 '{\"a\":[{\"id\":1}],\"flag\":true}' @@ '$.flag', \
                 '{\"a\":1,\"b\":2}' ? 'b', \
                 '{\"a\":1,\"b\":2}' ?| '{x,b}', \
+                '{\"a\":1,\"b\":2}' ?| array['a','c'], \
                 '{\"a\":1,\"b\":2}' ?& '{a,b}', \
+                '{\"a\":1,\"b\":2}' ?& array['a','b'], \
+                '[\"a\",\"b\"]' ? 'a', \
                 '{\"a\":1,\"b\":2}' - 'a', \
                 '[\"x\",\"y\",\"z\"]' - 1, \
                 '{\"a\":{\"b\":1,\"c\":2}}' #- '{a,b}'");
@@ -16499,6 +16504,11 @@ mod tests {
                 ScalarValue::Text("true".to_string()),
                 ScalarValue::Text("10".to_string()),
                 ScalarValue::Text("{\"a\":1,\"b\":2}".to_string()),
+                ScalarValue::Text("[1,2,3,4]".to_string()),
+                ScalarValue::Text("[1,2,3]".to_string()),
+                ScalarValue::Bool(true),
+                ScalarValue::Bool(true),
+                ScalarValue::Bool(true),
                 ScalarValue::Bool(true),
                 ScalarValue::Bool(true),
                 ScalarValue::Bool(true),
