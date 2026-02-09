@@ -370,16 +370,23 @@
         if (!snapshot) {
           return false;
         }
-        const out = await importFn(snapshot);
-        if (isExecutionErrorText(out)) {
+        try {
+          const out = await importFn(snapshot);
+          if (isExecutionErrorText(out)) {
+            localStorage.removeItem(SNAPSHOT_KEY);
+            const resetFn = resolveWasmFunction(["reset_state_snapshot", "reset_state"]);
+            if (typeof resetFn === "function") { await resetFn(); }
+            console.warn("Snapshot restore failed, cleared stale snapshot:", out);
+            return false;
+          }
+          return true;
+        } catch (err) {
           localStorage.removeItem(SNAPSHOT_KEY);
-          setResult(
-            out +
-              "\n\nStored browser snapshot was rejected and has been cleared from localStorage."
-          );
+          const resetFn = resolveWasmFunction(["reset_state_snapshot", "reset_state"]);
+          if (typeof resetFn === "function") { try { await resetFn(); } catch(_){} }
+          console.warn("Snapshot restore threw, cleared stale snapshot:", err);
           return false;
         }
-        return true;
       }
 
       async function tryLoadWasmApi() {
@@ -399,9 +406,9 @@
             ]) === "function";
           snapshotRestored = await restoreSnapshotFromLocalStorage();
           refreshStatus();
-          if (!snapshotRestored) {
-            setResult("WASM engine connected. Run SQL to see results.");
-          }
+          setResult(snapshotRestored
+            ? "WASM engine connected. Previous session restored."
+            : "WASM engine connected. Run SQL to see results.");
         } catch (err) {
           wasmStatus = "not found";
           refreshStatus();
