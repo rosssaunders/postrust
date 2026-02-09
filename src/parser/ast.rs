@@ -514,6 +514,15 @@ pub enum Expr {
         right: Box<Expr>,
         negated: bool,
     },
+    CaseSimple {
+        operand: Box<Expr>,
+        when_then: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
+    CaseSearched {
+        when_then: Vec<(Expr, Expr)>,
+        else_expr: Option<Box<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

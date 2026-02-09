@@ -4,6 +4,7 @@ use crate::parser::scansup::{downcase_truncate_identifier, scanner_isspace, trun
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Keyword {
+    Case,
     Add,
     All,
     Alter,
@@ -30,6 +31,8 @@ pub enum Keyword {
     Distinct,
     Do,
     Drop,
+    Else,
+    End,
     Except,
     Exists,
     False,
@@ -108,6 +111,7 @@ pub enum Keyword {
 impl Keyword {
     fn from_ident(ident: &str) -> Option<Self> {
         match ident {
+            "case" => Some(Self::Case),
             "add" => Some(Self::Add),
             "all" => Some(Self::All),
             "alter" => Some(Self::Alter),
@@ -134,6 +138,8 @@ impl Keyword {
             "distinct" => Some(Self::Distinct),
             "do" => Some(Self::Do),
             "drop" => Some(Self::Drop),
+            "else" => Some(Self::Else),
+            "end" => Some(Self::End),
             "except" => Some(Self::Except),
             "exists" => Some(Self::Exists),
             "false" => Some(Self::False),

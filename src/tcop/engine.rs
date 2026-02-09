@@ -4533,6 +4533,24 @@ fn infer_expr_type_oid(
         | Expr::Like { .. }
         | Expr::IsNull { .. }
         | Expr::IsDistinctFrom { .. } => PG_BOOL_OID,
+        Expr::CaseSimple {
+            when_then,
+            else_expr,
+            ..
+        }
+        | Expr::CaseSearched {
+            when_then,
+            else_expr,
+        } => {
+            let mut result_exprs = when_then
+                .iter()
+                .map(|(_, then_expr)| then_expr.clone())
+                .collect::<Vec<_>>();
+            if let Some(else_expr) = else_expr {
+                result_exprs.push((**else_expr).clone());
+            }
+            infer_common_type_oid(&result_exprs, scope, ctes)
+        }
         Expr::ScalarSubquery(query) => {
             let mut nested = ctes.clone();
             derive_query_output_columns_with_ctes(query, &mut nested)
@@ -4906,6 +4924,31 @@ fn expr_references_relation(expr: &Expr, relation_name: &str) -> bool {
         Expr::IsDistinctFrom { left, right, .. } => {
             expr_references_relation(left, relation_name)
                 || expr_references_relation(right, relation_name)
+        }
+        Expr::CaseSimple {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            expr_references_relation(operand, relation_name)
+                || when_then.iter().any(|(when_expr, then_expr)| {
+                    expr_references_relation(when_expr, relation_name)
+                        || expr_references_relation(then_expr, relation_name)
+                })
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| expr_references_relation(expr, relation_name))
+        }
+        Expr::CaseSearched {
+            when_then,
+            else_expr,
+        } => {
+            when_then.iter().any(|(when_expr, then_expr)| {
+                expr_references_relation(when_expr, relation_name)
+                    || expr_references_relation(then_expr, relation_name)
+            }) || else_expr
+                .as_ref()
+                .is_some_and(|expr| expr_references_relation(expr, relation_name))
         }
         _ => false,
     }
@@ -6919,6 +6962,29 @@ fn contains_aggregate_expr(expr: &Expr) -> bool {
         Expr::IsDistinctFrom { left, right, .. } => {
             contains_aggregate_expr(left) || contains_aggregate_expr(right)
         }
+        Expr::CaseSimple {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            contains_aggregate_expr(operand)
+                || when_then.iter().any(|(when_expr, then_expr)| {
+                    contains_aggregate_expr(when_expr) || contains_aggregate_expr(then_expr)
+                })
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| contains_aggregate_expr(expr))
+        }
+        Expr::CaseSearched {
+            when_then,
+            else_expr,
+        } => {
+            when_then.iter().any(|(when_expr, then_expr)| {
+                contains_aggregate_expr(when_expr) || contains_aggregate_expr(then_expr)
+            }) || else_expr
+                .as_ref()
+                .is_some_and(|expr| contains_aggregate_expr(expr))
+        }
         Expr::Exists(_) | Expr::ScalarSubquery(_) | Expr::InSubquery { .. } => false,
         _ => false,
     }
@@ -7030,6 +7096,45 @@ fn eval_group_expr(
             let left_value = eval_group_expr(left, group_rows, representative, params)?;
             let right_value = eval_group_expr(right, group_rows, representative, params)?;
             eval_is_distinct_from(left_value, right_value, *negated)
+        }
+        Expr::CaseSimple {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            let operand_value = eval_group_expr(operand, group_rows, representative, params)?;
+            for (when_expr, then_expr) in when_then {
+                let when_value = eval_group_expr(when_expr, group_rows, representative, params)?;
+                if matches!(operand_value, ScalarValue::Null)
+                    || matches!(when_value, ScalarValue::Null)
+                {
+                    continue;
+                }
+                if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
+                    return eval_group_expr(then_expr, group_rows, representative, params);
+                }
+            }
+            if let Some(else_expr) = else_expr {
+                eval_group_expr(else_expr, group_rows, representative, params)
+            } else {
+                Ok(ScalarValue::Null)
+            }
+        }
+        Expr::CaseSearched {
+            when_then,
+            else_expr,
+        } => {
+            for (when_expr, then_expr) in when_then {
+                let condition = eval_group_expr(when_expr, group_rows, representative, params)?;
+                if truthy(&condition) {
+                    return eval_group_expr(then_expr, group_rows, representative, params);
+                }
+            }
+            if let Some(else_expr) = else_expr {
+                eval_group_expr(else_expr, group_rows, representative, params)
+            } else {
+                Ok(ScalarValue::Null)
+            }
         }
         _ => {
             if group_rows.is_empty() {
@@ -7940,6 +8045,45 @@ fn eval_expr(
             let left_value = eval_expr(left, scope, params)?;
             let right_value = eval_expr(right, scope, params)?;
             eval_is_distinct_from(left_value, right_value, *negated)
+        }
+        Expr::CaseSimple {
+            operand,
+            when_then,
+            else_expr,
+        } => {
+            let operand_value = eval_expr(operand, scope, params)?;
+            for (when_expr, then_expr) in when_then {
+                let when_value = eval_expr(when_expr, scope, params)?;
+                if matches!(operand_value, ScalarValue::Null)
+                    || matches!(when_value, ScalarValue::Null)
+                {
+                    continue;
+                }
+                if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
+                    return eval_expr(then_expr, scope, params);
+                }
+            }
+            if let Some(else_expr) = else_expr {
+                eval_expr(else_expr, scope, params)
+            } else {
+                Ok(ScalarValue::Null)
+            }
+        }
+        Expr::CaseSearched {
+            when_then,
+            else_expr,
+        } => {
+            for (when_expr, then_expr) in when_then {
+                let condition = eval_expr(when_expr, scope, params)?;
+                if truthy(&condition) {
+                    return eval_expr(then_expr, scope, params);
+                }
+            }
+            if let Some(else_expr) = else_expr {
+                eval_expr(else_expr, scope, params)
+            } else {
+                Ok(ScalarValue::Null)
+            }
         }
         Expr::Cast { expr, type_name } => {
             let value = eval_expr(expr, scope, params)?;
@@ -11564,6 +11708,49 @@ mod tests {
                 ScalarValue::Bool(true),
                 ScalarValue::Bool(true),
             ]]
+        );
+    }
+
+    #[test]
+    fn evaluates_case_expressions() {
+        let result = run("SELECT \
+                CASE 2 WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'other' END, \
+                CASE WHEN 1 = 0 THEN 'no' WHEN 3 > 1 THEN 'yes' END, \
+                CASE NULL WHEN NULL THEN 1 ELSE 2 END, \
+                CASE WHEN NULL THEN 1 ELSE 2 END, \
+                CASE WHEN true THEN CASE 1 WHEN 1 THEN 'nested' ELSE 'x' END ELSE 'y' END");
+        assert_eq!(
+            result.rows,
+            vec![vec![
+                ScalarValue::Text("two".to_string()),
+                ScalarValue::Text("yes".to_string()),
+                ScalarValue::Int(2),
+                ScalarValue::Int(2),
+                ScalarValue::Text("nested".to_string()),
+            ]]
+        );
+    }
+
+    #[test]
+    fn supports_case_in_where_order_by_and_group_by() {
+        let results = run_batch(&[
+            "CREATE TABLE scores (id int8, score int8, active boolean)",
+            "INSERT INTO scores VALUES (1, 95, true), (2, 75, true), (3, NULL, false), (4, 82, true)",
+            "SELECT id FROM scores WHERE CASE WHEN active THEN score >= 80 ELSE false END ORDER BY CASE id WHEN 1 THEN 0 ELSE 1 END, id",
+            "SELECT CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' ELSE 'C' END AS grade, count(*) FROM scores GROUP BY CASE WHEN score >= 90 THEN 'A' WHEN score >= 80 THEN 'B' ELSE 'C' END ORDER BY grade",
+        ]);
+
+        assert_eq!(
+            results[2].rows,
+            vec![vec![ScalarValue::Int(1)], vec![ScalarValue::Int(4)],]
+        );
+        assert_eq!(
+            results[3].rows,
+            vec![
+                vec![ScalarValue::Text("A".to_string()), ScalarValue::Int(1)],
+                vec![ScalarValue::Text("B".to_string()), ScalarValue::Int(1)],
+                vec![ScalarValue::Text("C".to_string()), ScalarValue::Int(2)],
+            ]
         );
     }
 

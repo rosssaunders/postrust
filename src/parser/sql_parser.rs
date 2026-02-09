@@ -1942,6 +1942,9 @@ impl Parser {
             )?;
             return Ok(Expr::Exists(Box::new(subquery)));
         }
+        if self.consume_keyword(Keyword::Case) {
+            return self.parse_case_expr();
+        }
         if self.consume_keyword(Keyword::Not) {
             let expr = self.parse_expr_bp(11)?;
             return Ok(Expr::Unary {
@@ -2079,6 +2082,47 @@ impl Parser {
         }
 
         Ok(Expr::Identifier(name))
+    }
+
+    fn parse_case_expr(&mut self) -> Result<Expr, ParseError> {
+        let searched = self.peek_keyword(Keyword::When);
+        let operand = if searched {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+
+        let mut when_then = Vec::new();
+        loop {
+            self.expect_keyword(Keyword::When, "expected WHEN in CASE expression")?;
+            let when_expr = self.parse_expr()?;
+            self.expect_keyword(Keyword::Then, "expected THEN in CASE expression")?;
+            let then_expr = self.parse_expr()?;
+            when_then.push((when_expr, then_expr));
+            if !self.peek_keyword(Keyword::When) {
+                break;
+            }
+        }
+
+        let else_expr = if self.consume_keyword(Keyword::Else) {
+            Some(Box::new(self.parse_expr()?))
+        } else {
+            None
+        };
+        self.expect_keyword(Keyword::End, "expected END to close CASE expression")?;
+
+        if let Some(operand) = operand {
+            Ok(Expr::CaseSimple {
+                operand: Box::new(operand),
+                when_then,
+                else_expr,
+            })
+        } else {
+            Ok(Expr::CaseSearched {
+                when_then,
+                else_expr,
+            })
+        }
     }
 
     fn parse_expr_type_name(&mut self) -> Result<String, ParseError> {
@@ -2696,6 +2740,64 @@ mod tests {
             right.as_ref(),
             Expr::IsDistinctFrom { negated: true, .. }
         ));
+    }
+
+    #[test]
+    fn parses_simple_case_expression() {
+        let stmt = parse_statement(
+            "SELECT CASE level WHEN 1 THEN 'low' WHEN 2 THEN 'mid' ELSE 'high' END",
+        )
+        .expect("parse ok");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        let Expr::CaseSimple {
+            operand,
+            when_then,
+            else_expr,
+        } = &select.targets[0].expr
+        else {
+            panic!("expected simple CASE expression");
+        };
+        assert!(
+            matches!(operand.as_ref(), Expr::Identifier(parts) if parts == &vec!["level".to_string()])
+        );
+        assert_eq!(when_then.len(), 2);
+        assert!(matches!(when_then[0].0, Expr::Integer(1)));
+        assert!(matches!(when_then[0].1, Expr::String(ref value) if value == "low"));
+        assert!(matches!(
+            else_expr.as_deref(),
+            Some(Expr::String(value)) if value == "high"
+        ));
+    }
+
+    #[test]
+    fn parses_searched_and_nested_case_expression() {
+        let stmt = parse_statement(
+            "SELECT CASE WHEN score >= 90 THEN CASE WHEN bonus THEN 'A+' ELSE 'A' END WHEN score >= 80 THEN 'B' END",
+        )
+        .expect("parse ok");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        let Expr::CaseSearched {
+            when_then,
+            else_expr,
+        } = &select.targets[0].expr
+        else {
+            panic!("expected searched CASE expression");
+        };
+        assert_eq!(when_then.len(), 2);
+        assert!(matches!(
+            when_then[0].1,
+            Expr::CaseSearched {
+                when_then: _,
+                else_expr: _
+            }
+        ));
+        assert!(else_expr.is_none());
     }
 
     #[test]
