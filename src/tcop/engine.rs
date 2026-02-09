@@ -700,6 +700,165 @@ fn drain_native_ws_messages(conn_id: i64) {
     }
 }
 
+/// WebSocket implementation for wasm32 (browser) using web_sys::WebSocket.
+///
+/// # How it works
+/// Browser WebSockets are callback-based (onmessage, onopen, etc.). The SQL engine
+/// is synchronous. We bridge this by using shared buffers (`Rc<RefCell<...>>`) that
+/// callbacks write into, and the engine reads from on the next SQL call.
+///
+/// The JS event loop runs between WASM calls, so callbacks fire between SQL statements.
+/// This means: connect → return to JS → onopen fires → next SQL call sees state="open".
+///
+/// # Limitation
+/// The on_message SQL callback is NOT automatically invoked in WASM. Messages are
+/// buffered and must be polled via ws.recv() or ws.messages(). This is because we
+/// cannot re-enter the SQL engine from a JS closure callback.
+#[cfg(target_arch = "wasm32")]
+mod ws_wasm {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    use std::rc::Rc;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use web_sys::{WebSocket, MessageEvent, CloseEvent, ErrorEvent};
+
+    /// Stored closures must be kept alive for the lifetime of the WebSocket connection.
+    struct WasmWsClosures {
+        _on_open: Closure<dyn FnMut(JsValue)>,
+        _on_message: Closure<dyn FnMut(MessageEvent)>,
+        _on_close: Closure<dyn FnMut(CloseEvent)>,
+        _on_error: Closure<dyn FnMut(ErrorEvent)>,
+    }
+
+    pub struct WasmWsHandle {
+        pub socket: WebSocket,
+        pub messages: Rc<RefCell<Vec<String>>>,
+        pub state: Rc<RefCell<String>>,
+        _closures: WasmWsClosures,
+    }
+
+    pub fn open_connection(url: &str) -> Result<WasmWsHandle, String> {
+        let ws = WebSocket::new(url).map_err(|e| format!("WebSocket creation failed: {:?}", e))?;
+
+        let messages: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+        let state: Rc<RefCell<String>> = Rc::new(RefCell::new("connecting".to_string()));
+
+        // onopen
+        let state_clone = Rc::clone(&state);
+        let on_open = Closure::<dyn FnMut(JsValue)>::wrap(Box::new(move |_| {
+            *state_clone.borrow_mut() = "open".to_string();
+        }));
+        ws.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+
+        // onmessage
+        let msgs_clone = Rc::clone(&messages);
+        let on_message = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(move |e: MessageEvent| {
+            if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
+                msgs_clone.borrow_mut().push(String::from(txt));
+            }
+        }));
+        ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+
+        // onclose
+        let state_clone = Rc::clone(&state);
+        let on_close = Closure::<dyn FnMut(CloseEvent)>::wrap(Box::new(move |_| {
+            *state_clone.borrow_mut() = "closed".to_string();
+        }));
+        ws.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+
+        // onerror
+        let state_clone = Rc::clone(&state);
+        let on_error = Closure::<dyn FnMut(ErrorEvent)>::wrap(Box::new(move |_| {
+            *state_clone.borrow_mut() = "error".to_string();
+        }));
+        ws.set_onerror(Some(on_error.as_ref().unchecked_ref()));
+
+        Ok(WasmWsHandle {
+            socket: ws,
+            messages,
+            state,
+            _closures: WasmWsClosures {
+                _on_open: on_open,
+                _on_message: on_message,
+                _on_close: on_close,
+                _on_error: on_error,
+            },
+        })
+    }
+
+    pub fn send_message(handle: &WasmWsHandle, msg: &str) -> Result<(), String> {
+        handle.socket.send_with_str(msg)
+            .map_err(|e| format!("WebSocket send failed: {:?}", e))
+    }
+
+    pub fn close_connection(handle: &WasmWsHandle) -> Result<(), String> {
+        handle.socket.close()
+            .map_err(|e| format!("WebSocket close failed: {:?}", e))
+    }
+
+    pub fn drain_incoming(handle: &WasmWsHandle) -> Vec<String> {
+        handle.messages.borrow_mut().drain(..).collect()
+    }
+
+    pub fn get_state(handle: &WasmWsHandle) -> String {
+        handle.state.borrow().clone()
+    }
+
+    // Thread-local storage for WASM handles (no Send/Sync needed, single-threaded)
+    thread_local! {
+        static WASM_WS_HANDLES: RefCell<HashMap<i64, WasmWsHandle>> = RefCell::new(HashMap::new());
+    }
+
+    pub fn store_handle(id: i64, handle: WasmWsHandle) {
+        WASM_WS_HANDLES.with(|h| h.borrow_mut().insert(id, handle));
+    }
+
+    pub fn remove_handle(id: i64) {
+        WASM_WS_HANDLES.with(|h| h.borrow_mut().remove(&id));
+    }
+
+    pub fn with_handle<T>(id: i64, f: impl FnOnce(&WasmWsHandle) -> T) -> Option<T> {
+        WASM_WS_HANDLES.with(|h| {
+            let handles = h.borrow();
+            handles.get(&id).map(f)
+        })
+    }
+}
+
+/// Drain incoming messages from WASM WebSocket connections into the inbound_queue
+#[cfg(target_arch = "wasm32")]
+fn drain_wasm_ws_messages(conn_id: i64) {
+    let msgs = ws_wasm::with_handle(conn_id, |handle| {
+        ws_wasm::drain_incoming(handle)
+    });
+    if let Some(msgs) = msgs {
+        if !msgs.is_empty() {
+            with_ext_write(|ext| {
+                if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+                    conn.messages_in += msgs.len() as i64;
+                    conn.inbound_queue.extend(msgs);
+                }
+            });
+        }
+    }
+}
+
+/// Update connection state from WASM WebSocket handle
+#[cfg(target_arch = "wasm32")]
+fn sync_wasm_ws_state(conn_id: i64) {
+    let new_state = ws_wasm::with_handle(conn_id, |handle| {
+        ws_wasm::get_state(handle)
+    });
+    if let Some(state) = new_state {
+        with_ext_write(|ext| {
+            if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+                conn.state = state;
+            }
+        });
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct ExtensionState {
     extensions: Vec<ExtensionRecord>,
@@ -13759,7 +13918,7 @@ fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> 
     #[cfg(not(target_arch = "wasm32"))]
     let real_result = ws_native::open_connection(&url);
     #[cfg(target_arch = "wasm32")]
-    let real_result: Result<(), String> = Err("wasm stub".to_string());
+    let real_result = ws_wasm::open_connection(&url);
 
     #[cfg(not(target_arch = "wasm32"))]
     let (real_io, initial_state) = match &real_result {
@@ -13767,7 +13926,10 @@ fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> 
         Err(_) => (false, "connecting".to_string()),
     };
     #[cfg(target_arch = "wasm32")]
-    let (real_io, initial_state) = (false, "connecting".to_string());
+    let (real_io, initial_state) = match &real_result {
+        Ok(_) => (true, "connecting".to_string()),
+        Err(_) => (false, "connecting".to_string()),
+    };
 
     let id = with_ext_write(|ext| {
         let id = ext.ws_next_id;
@@ -13788,10 +13950,14 @@ fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> 
         id
     });
 
-    // Store the native handle if real connection succeeded
+    // Store the handle if real connection succeeded
     #[cfg(not(target_arch = "wasm32"))]
     if let Ok(handle) = real_result {
         native_ws_handles().lock().unwrap().insert(id, handle);
+    }
+    #[cfg(target_arch = "wasm32")]
+    if let Ok(handle) = real_result {
+        ws_wasm::store_handle(id, handle);
     }
 
     Ok(ScalarValue::Int(id))
@@ -13842,6 +14008,15 @@ fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
             ws_native::send_message(handle, &_message).map_err(|e| EngineError { message: e })?;
         }
     }
+    #[cfg(target_arch = "wasm32")]
+    if is_real {
+        let send_result = ws_wasm::with_handle(conn_id, |handle| {
+            ws_wasm::send_message(handle, &_message)
+        });
+        if let Some(Err(e)) = send_result {
+            return Err(EngineError { message: e });
+        }
+    }
 
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
@@ -13878,6 +14053,13 @@ fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
         }
         handles.remove(&conn_id);
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+        ws_wasm::with_handle(conn_id, |handle| {
+            let _ = ws_wasm::close_connection(handle);
+        });
+        ws_wasm::remove_handle(conn_id);
+    }
 
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
@@ -13909,6 +14091,8 @@ fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     // Drain any real incoming messages first
     #[cfg(not(target_arch = "wasm32"))]
     drain_native_ws_messages(conn_id);
+    #[cfg(target_arch = "wasm32")]
+    { sync_wasm_ws_state(conn_id); drain_wasm_ws_messages(conn_id); }
 
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
@@ -13943,6 +14127,8 @@ fn execute_ws_messages(args: &[ScalarValue]) -> Result<(Vec<String>, Vec<Vec<Sca
     // Drain any real incoming messages first
     #[cfg(not(target_arch = "wasm32"))]
     drain_native_ws_messages(conn_id);
+    #[cfg(target_arch = "wasm32")]
+    { sync_wasm_ws_state(conn_id); drain_wasm_ws_messages(conn_id); }
 
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
