@@ -519,12 +519,12 @@ impl PostgresSession {
         out
     }
 
-    #[cfg(test)]
-    fn run_sync<I>(&mut self, messages: I) -> Vec<BackendMessage>
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn run_sync<I>(&mut self, messages: I) -> Vec<BackendMessage>
     where
         I: IntoIterator<Item = FrontendMessage>,
     {
-        tokio::runtime::Runtime::new()
+        tokio::runtime::Builder::new_current_thread().enable_all().build()
             .expect("tokio runtime should start")
             .block_on(self.run(messages))
     }

@@ -82,7 +82,7 @@ fn handle_connection(stream: TcpStream, tls_config: Arc<ServerConfig>) -> io::Re
             return Ok(());
         }
 
-        let out = session.run([frontend]);
+        let out = session.run_sync([frontend]);
         let out = trim_leading_ready(out);
         send_backend_messages(&mut stream, &out)?;
 
@@ -118,7 +118,7 @@ fn run_startup_handshake(
                     database: startup.database,
                     parameters: startup.parameters,
                 };
-                let out = session.run([startup_msg]);
+                let out = session.run_sync([startup_msg]);
                 send_backend_messages(stream, &out)?;
                 if out
                     .iter()
@@ -141,7 +141,7 @@ fn run_startup_handshake(
                     if matches!(frontend, FrontendMessage::Terminate) {
                         return Ok(false);
                     }
-                    let out = session.run([frontend]);
+                    let out = session.run_sync([frontend]);
                     let out = trim_leading_ready(out);
                     send_backend_messages(stream, &out)?;
                     if out

@@ -267,10 +267,11 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
     })
 }
 
-pub async fn execute_planned_query(
-    plan: &PlannedQuery,
-    params: &[Option<String>],
-).await -> Result<QueryResult, EngineError> {
+pub fn execute_planned_query<'a>(
+    plan: &'a PlannedQuery,
+    params: &'a [Option<String>],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<QueryResult, EngineError>> + 'a>> {
+    Box::pin(async move {
     let result = match &plan.statement {
         Statement::Query(query) => execute_query(query, params).await?,
         Statement::CreateTable(create) => execute_create_table(create).await?,
@@ -322,6 +323,7 @@ pub async fn execute_planned_query(
         Statement::CreateFunction(create) => execute_create_function(create).await?,
     };
     Ok(result)
+    })
 }
 
 #[derive(Debug, Default)]
@@ -384,10 +386,10 @@ async fn execute_explain(
     if explain.analyze {
         // Actually execute and add timing
         let start = std::time::Instant::now();
-        let inner_result = execute_planned_query(
-            &plan_statement((*explain.statement).await.clone())?,
+        let inner_result = Box::pin(execute_planned_query(
+            &plan_statement((*explain.statement).clone())?,
             params,
-        )
+        ))
         .await?;
         let elapsed = start.elapsed();
         plan_lines.push(format!(
@@ -2218,7 +2220,7 @@ async fn execute_update(
 
     validate_table_constraints(&table, &next_rows).await?;
     let staged_updates =
-        apply_on_update_actions(&table, &current_rows, next_rows.clone().await?;
+        apply_on_update_actions(&table, &current_rows, next_rows.clone()).await?;
 
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -2325,7 +2327,7 @@ async fn execute_delete(
     }
 
     let staged_updates =
-        apply_on_delete_actions(&table, retained, removed_rows.clone().await?;
+        apply_on_delete_actions(&table, retained, removed_rows.clone()).await?;
 
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -4540,7 +4542,7 @@ async fn validate_staged_rows(
             continue;
         }
         let rows = staged_rows.get(&table.oid()).cloned().unwrap_or_default();
-        validate_table_constraints_with_overrides(&table, &rows, Some(staged_rows).await?;
+        validate_table_constraints_with_overrides(&table, &rows, Some(staged_rows)).await?;
     }
     Ok(())
 }
@@ -6864,7 +6866,7 @@ async fn evaluate_from_clause(
                         merged_outer.inherit_outer(outer);
                     }
                     let rhs =
-                        evaluate_table_expression(item, params, Some(&merged_outer).await?;
+                        evaluate_table_expression(item, params, Some(&merged_outer)).await?;
                     for rhs_scope in &rhs.rows {
                         next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
                     }
@@ -9272,11 +9274,11 @@ fn eval_expr<'a>(
             eval_binary(op.clone(), lhs, rhs)
         }
         Expr::Exists(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope).await?;
+            let result = execute_query_with_outer(query, params, Some(scope)).await?;
             Ok(ScalarValue::Bool(!result.rows.is_empty()))
         }
         Expr::ScalarSubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope).await?;
+            let result = execute_query_with_outer(query, params, Some(scope)).await?;
             if result.rows.is_empty() {
                 return Ok(ScalarValue::Null);
             }
@@ -9311,7 +9313,7 @@ fn eval_expr<'a>(
             negated,
         } => {
             let lhs = eval_expr(expr, scope, params).await?;
-            let result = execute_query_with_outer(subquery, params, Some(scope).await?;
+            let result = execute_query_with_outer(subquery, params, Some(scope)).await?;
             if !result.columns.is_empty() && result.columns.len() != 1 {
                 return Err(EngineError {
                     message: "subquery must return only one column".to_string(),
@@ -9458,11 +9460,11 @@ fn eval_expr_with_window<'a>(
             eval_binary(op.clone(), lhs, rhs)
         }
         Expr::Exists(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope).await?;
+            let result = execute_query_with_outer(query, params, Some(scope)).await?;
             Ok(ScalarValue::Bool(!result.rows.is_empty()))
         }
         Expr::ScalarSubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope).await?;
+            let result = execute_query_with_outer(query, params, Some(scope)).await?;
             if result.rows.is_empty() {
                 return Ok(ScalarValue::Null);
             }
@@ -9497,7 +9499,7 @@ fn eval_expr_with_window<'a>(
             negated,
         } => {
             let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            let result = execute_query_with_outer(subquery, params, Some(scope).await?;
+            let result = execute_query_with_outer(subquery, params, Some(scope)).await?;
             if !result.columns.is_empty() && result.columns.len() != 1 {
                 return Err(EngineError {
                     message: "subquery must return only one column".to_string(),
@@ -14366,7 +14368,7 @@ async fn execute_ws_messages(
 
 /// Simulate receiving a message on a WebSocket connection (for testing).
 /// Dispatches the on_message callback if set.
-pub fn ws_simulate_message(conn_id: i64, message: &str) -> Result<Vec<QueryResult>, EngineError> {
+pub async fn ws_simulate_message(conn_id: i64, message: &str) -> Result<Vec<QueryResult>, EngineError> {
     let callback = with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
             conn.messages_in += 1;
@@ -14419,7 +14421,7 @@ mod tests {
     use std::future::Future;
 
     fn block_on<T>(future: impl Future<Output = T>) -> T {
-        tokio::runtime::Runtime::new()
+        tokio::runtime::Builder::new_current_thread().enable_all().build()
             .expect("tokio runtime should start")
             .block_on(future)
     }
@@ -18150,7 +18152,7 @@ mod tests {
                 &[],
             );
             // Simulate a message arriving
-            let results = ws_simulate_message(1, r#"{"p":"100.5","q":"2.0"}"#).unwrap();
+            let results = block_on(ws_simulate_message(1, r#"{"p":"100.5","q":"2.0"}"#)).unwrap();
             assert_eq!(results.len(), 1);
             assert_eq!(results[0].rows[0][0], ScalarValue::Text("100.5".to_string()));
         });

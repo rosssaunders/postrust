@@ -8,7 +8,7 @@ struct Fixture {
 
 fn run_fixture(sql: &str) -> Vec<Vec<String>> {
     let mut session = PostgresSession::new();
-    let out = session.run([FrontendMessage::Query {
+    let out = session.run_sync([FrontendMessage::Query {
         sql: sql.to_string(),
     }]);
     assert!(

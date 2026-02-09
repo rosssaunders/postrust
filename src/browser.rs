@@ -87,17 +87,17 @@ pub fn export_state() -> String {
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = import_state_snapshot))]
-pub fn import_state_snapshot(snapshot: &str) -> String {
+pub async fn import_state_snapshot(snapshot: &str) -> String {
     ensure_baseline_snapshot();
-    match import_state_snapshot_impl(snapshot) {
+    match import_state_snapshot_impl(snapshot).await {
         Ok(message) => message,
         Err(message) => format!("Execution error: {message}"),
     }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = import_state))]
-pub fn import_state(snapshot: &str) -> String {
-    import_state_snapshot(snapshot)
+pub async fn import_state(snapshot: &str) -> String {
+    import_state_snapshot(snapshot).await
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen(js_name = reset_state_snapshot))]
@@ -213,7 +213,7 @@ async fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, Stri
     Ok(results)
 }
 
-fn import_state_snapshot_impl(snapshot: &str) -> Result<String, String> {
+async fn import_state_snapshot_impl(snapshot: &str) -> Result<String, String> {
     let trimmed = snapshot.trim();
     if trimmed.is_empty() {
         restore_state(baseline_snapshot_clone());
@@ -247,7 +247,7 @@ fn import_state_snapshot_impl(snapshot: &str) -> Result<String, String> {
 
     let mut replayed = Vec::with_capacity(replay_entries.len());
     for (line_no, statement) in replay_entries {
-        let out = execute_sql_internal(&statement, false);
+        let out = execute_sql_internal(&statement, false).await;
         if let Some(error) = out.strip_prefix("Execution error:") {
             restore_state(baseline_snapshot_clone());
             clear_snapshot_log();
@@ -265,7 +265,7 @@ fn import_state_snapshot_impl(snapshot: &str) -> Result<String, String> {
 }
 
 fn ensure_baseline_snapshot() {
-    BASELINE_SNAPSHOT.with(|slot| {
+    BASELINE_SNAPSHOT.with(|slot: &RefCell<Option<EngineStateSnapshot>>| {
         if slot.borrow().is_none() {
             slot.replace(Some(snapshot_state()));
         }
@@ -274,7 +274,7 @@ fn ensure_baseline_snapshot() {
 
 fn baseline_snapshot_clone() -> EngineStateSnapshot {
     ensure_baseline_snapshot();
-    BASELINE_SNAPSHOT.with(|slot| {
+    BASELINE_SNAPSHOT.with(|slot: &RefCell<Option<EngineStateSnapshot>>| {
         slot.borrow()
             .as_ref()
             .expect("baseline snapshot should be initialized")
@@ -362,7 +362,7 @@ fn render_results_json_payload(results: &[BrowserQueryResult]) -> String {
 fn reset_browser_snapshot_state_for_tests() {
     crate::catalog::reset_global_catalog_for_tests();
     crate::tcop::engine::reset_global_storage_for_tests();
-    BASELINE_SNAPSHOT.with(|slot| {
+    BASELINE_SNAPSHOT.with(|slot: &RefCell<Option<EngineStateSnapshot>>| {
         slot.replace(Some(snapshot_state()));
     });
     clear_snapshot_log();
@@ -377,7 +377,7 @@ mod tests {
     use std::future::Future;
 
     fn block_on<T>(future: impl Future<Output = T>) -> T {
-        tokio::runtime::Runtime::new()
+        tokio::runtime::Builder::new_current_thread().enable_all().build()
             .expect("tokio runtime should start")
             .block_on(future)
     }
@@ -415,7 +415,7 @@ mod tests {
             let reset_out = reset_state_snapshot();
             assert_eq!(reset_out, "OK");
 
-            let import_out = import_state_snapshot(&snapshot);
+            let import_out = block_on(import_state_snapshot(&snapshot));
             assert!(!import_out.starts_with("Execution error:"));
 
             let select_out =

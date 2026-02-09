@@ -3,7 +3,7 @@ use postgrust::parser::sql_parser::parse_statement;
 use postgrust::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
 use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {

@@ -4,7 +4,7 @@ use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession
 fn regression_corpus_smoke() {
     let sql = include_str!("corpus/basic.sql").replace("accounts", "accounts_regression");
     let mut session = PostgresSession::new();
-    let out = session.run([FrontendMessage::Query { sql }]);
+    let out = session.run_sync([FrontendMessage::Query { sql }]);
 
     assert!(
         !out.iter()
