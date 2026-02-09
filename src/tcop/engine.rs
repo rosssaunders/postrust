@@ -5438,11 +5438,14 @@ fn is_pg_catalog_virtual_relation(relation: &str) -> bool {
     matches!(
         relation,
         "pg_namespace" | "pg_class" | "pg_attribute" | "pg_type"
+            | "pg_database" | "pg_roles" | "pg_settings"
+            | "pg_tables" | "pg_views" | "pg_indexes"
+            | "pg_proc" | "pg_constraint"
     )
 }
 
 fn is_information_schema_virtual_relation(relation: &str) -> bool {
-    matches!(relation, "tables" | "columns")
+    matches!(relation, "tables" | "columns" | "schemata" | "key_column_usage" | "table_constraints")
 }
 
 fn virtual_relation_column_defs(
@@ -5549,6 +5552,70 @@ fn virtual_relation_column_defs(
                 name: "is_nullable".to_string(),
                 type_oid: PG_TEXT_OID,
             },
+        ],
+        ("information_schema", "schemata") => vec![
+            VirtualRelationColumnDef { name: "catalog_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "schema_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "schema_owner".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("information_schema", "key_column_usage") => vec![
+            VirtualRelationColumnDef { name: "constraint_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "table_schema".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "table_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "column_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "ordinal_position".to_string(), type_oid: PG_INT8_OID },
+        ],
+        ("information_schema", "table_constraints") => vec![
+            VirtualRelationColumnDef { name: "constraint_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "table_schema".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "table_name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "constraint_type".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("pg_catalog", "pg_database") => vec![
+            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "datname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "datdba".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "encoding".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "datcollate".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("pg_catalog", "pg_roles") => vec![
+            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "rolname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "rolsuper".to_string(), type_oid: PG_BOOL_OID },
+            VirtualRelationColumnDef { name: "rolcanlogin".to_string(), type_oid: PG_BOOL_OID },
+        ],
+        ("pg_catalog", "pg_settings") => vec![
+            VirtualRelationColumnDef { name: "name".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "setting".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "category".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "short_desc".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("pg_catalog", "pg_tables") => vec![
+            VirtualRelationColumnDef { name: "schemaname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "tablename".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "tableowner".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("pg_catalog", "pg_views") => vec![
+            VirtualRelationColumnDef { name: "schemaname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "viewname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "viewowner".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("pg_catalog", "pg_indexes") => vec![
+            VirtualRelationColumnDef { name: "schemaname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "tablename".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "indexname".to_string(), type_oid: PG_TEXT_OID },
+        ],
+        ("pg_catalog", "pg_proc") => vec![
+            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "proname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "pronamespace".to_string(), type_oid: PG_INT8_OID },
+        ],
+        ("pg_catalog", "pg_constraint") => vec![
+            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "conname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "connamespace".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef { name: "contype".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef { name: "conrelid".to_string(), type_oid: PG_INT8_OID },
         ],
         _ => return None,
     };
@@ -7090,6 +7157,114 @@ fn virtual_relation_rows(
                     },
                 )
                 .collect())
+        }
+        ("information_schema", "schemata") => {
+            let schemas = with_catalog_read(|catalog| {
+                catalog.schemas().map(|s| s.name().to_string()).collect::<Vec<_>>()
+            });
+            Ok(schemas.into_iter().map(|name| {
+                vec![
+                    ScalarValue::Text("postrust".to_string()),
+                    ScalarValue::Text(name),
+                    ScalarValue::Text("postrust".to_string()),
+                ]
+            }).collect())
+        }
+        ("information_schema", "key_column_usage") => {
+            // Return empty for now - would need constraint introspection
+            Ok(Vec::new())
+        }
+        ("information_schema", "table_constraints") => {
+            // Return empty for now
+            Ok(Vec::new())
+        }
+        ("pg_catalog", "pg_database") => {
+            Ok(vec![vec![
+                ScalarValue::Int(1),
+                ScalarValue::Text("postrust".to_string()),
+                ScalarValue::Int(10),
+                ScalarValue::Int(6), // UTF8
+                ScalarValue::Text("en_US.UTF-8".to_string()),
+            ]])
+        }
+        ("pg_catalog", "pg_roles") => {
+            let role = security::current_role();
+            Ok(vec![vec![
+                ScalarValue::Int(10),
+                ScalarValue::Text(role),
+                ScalarValue::Bool(true),
+                ScalarValue::Bool(true),
+            ]])
+        }
+        ("pg_catalog", "pg_settings") => {
+            let guc = global_guc().read().expect("guc lock");
+            Ok(guc.iter().map(|(name, value)| {
+                vec![
+                    ScalarValue::Text(name.clone()),
+                    ScalarValue::Text(value.clone()),
+                    ScalarValue::Text("Ungrouped".to_string()),
+                    ScalarValue::Text(String::new()),
+                ]
+            }).collect())
+        }
+        ("pg_catalog", "pg_tables") => {
+            with_catalog_read(|catalog| {
+                let mut rows = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        if matches!(table.kind(), TableKind::Heap | TableKind::VirtualDual) {
+                            rows.push(vec![
+                                ScalarValue::Text(schema.name().to_string()),
+                                ScalarValue::Text(table.name().to_string()),
+                                ScalarValue::Text("postrust".to_string()),
+                            ]);
+                        }
+                    }
+                }
+                Ok(rows)
+            })
+        }
+        ("pg_catalog", "pg_views") => {
+            with_catalog_read(|catalog| {
+                let mut rows = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        if matches!(table.kind(), TableKind::View | TableKind::MaterializedView) {
+                            rows.push(vec![
+                                ScalarValue::Text(schema.name().to_string()),
+                                ScalarValue::Text(table.name().to_string()),
+                                ScalarValue::Text("postrust".to_string()),
+                            ]);
+                        }
+                    }
+                }
+                Ok(rows)
+            })
+        }
+        ("pg_catalog", "pg_indexes") => {
+            with_catalog_read(|catalog| {
+                let mut rows = Vec::new();
+                for schema in catalog.schemas() {
+                    for table in schema.tables() {
+                        for index in table.indexes() {
+                            rows.push(vec![
+                                ScalarValue::Text(schema.name().to_string()),
+                                ScalarValue::Text(table.name().to_string()),
+                                ScalarValue::Text(index.name.as_str().to_string()),
+                            ]);
+                        }
+                    }
+                }
+                Ok(rows)
+            })
+        }
+        ("pg_catalog", "pg_proc") => {
+            // Return empty - built-in functions don't have pg_proc entries yet
+            Ok(Vec::new())
+        }
+        ("pg_catalog", "pg_constraint") => {
+            // Return empty for now
+            Ok(Vec::new())
         }
         _ => Err(EngineError {
             message: format!("relation \"{}.{}\" does not exist", schema, relation),
@@ -16615,5 +16790,44 @@ mod tests {
     fn do_block_parses_and_executes() {
         let r = run("DO 'BEGIN NULL; END'");
         assert_eq!(r.command_tag, "DO");
+    }
+
+    // 1.11 System catalogs
+    #[test]
+    fn pg_settings_returns_guc_variables() {
+        let r = run("SELECT name, setting FROM pg_catalog.pg_settings WHERE name = 'server_version'");
+        assert!(!r.rows.is_empty());
+        assert_eq!(r.rows[0][0], ScalarValue::Text("server_version".to_string()));
+    }
+
+    #[test]
+    fn pg_database_returns_current_database() {
+        let r = run("SELECT datname FROM pg_catalog.pg_database");
+        assert_eq!(r.rows[0][0], ScalarValue::Text("postrust".to_string()));
+    }
+
+    #[test]
+    fn pg_tables_lists_user_tables() {
+        let results = run_batch(&[
+            "CREATE TABLE catalog_test (id int8)",
+            "SELECT tablename FROM pg_catalog.pg_tables WHERE tablename = 'catalog_test'",
+        ]);
+        assert_eq!(results[1].rows.len(), 1);
+        assert_eq!(results[1].rows[0][0], ScalarValue::Text("catalog_test".to_string()));
+    }
+
+    #[test]
+    fn information_schema_schemata_lists_schemas() {
+        let r = run("SELECT schema_name FROM information_schema.schemata WHERE schema_name = 'public'");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], ScalarValue::Text("public".to_string()));
+    }
+
+    // 1.1 Additional type system: VARCHAR/CHAR parsing
+    #[test]
+    fn cast_to_integer_and_varchar() {
+        let r = run("SELECT CAST(42 AS text), CAST('123' AS int8)");
+        assert_eq!(r.rows[0][0], ScalarValue::Text("42".to_string()));
+        assert_eq!(r.rows[0][1], ScalarValue::Int(123));
     }
 }
