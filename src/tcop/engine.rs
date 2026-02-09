@@ -571,6 +571,133 @@ pub struct WsConnection {
     pub on_message: Option<String>,
     pub on_close: Option<String>,
     pub inbound_queue: Vec<String>,
+    /// Whether this connection uses real I/O (false in tests / simulate mode)
+    pub real_io: bool,
+}
+
+/// Handle for a real native WebSocket connection (non-wasm32, non-test).
+#[cfg(not(target_arch = "wasm32"))]
+mod ws_native {
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread;
+
+    /// A native WebSocket handle using tungstenite with a background reader thread.
+    pub struct NativeWsHandle {
+        pub writer: Arc<Mutex<Option<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>>>>,
+        pub incoming: mpsc::Receiver<String>,
+        pub _reader_thread: thread::JoinHandle<()>,
+    }
+
+    /// Open a real WebSocket connection. Returns a handle for sending/receiving.
+    pub fn open_connection(url: &str) -> Result<NativeWsHandle, String> {
+        let (socket, _response) = tungstenite::connect(url)
+            .map_err(|e| format!("WebSocket connect failed: {}", e))?;
+
+        let writer = Arc::new(Mutex::new(Some(socket)));
+        let reader_writer = Arc::clone(&writer);
+        let (tx, rx) = mpsc::channel();
+
+        let reader_thread = thread::spawn(move || {
+            loop {
+                // We need to read from the socket, but the writer lock holds it.
+                // We'll use a pattern where the reader briefly locks to read one message.
+                let msg = {
+                    let mut guard = reader_writer.lock().unwrap();
+                    if let Some(ref mut ws) = *guard {
+                        match ws.read() {
+                            Ok(tungstenite::Message::Text(t)) => Some(t.to_string()),
+                            Ok(tungstenite::Message::Binary(b)) => {
+                                Some(String::from_utf8_lossy(&b).to_string())
+                            }
+                            Ok(tungstenite::Message::Close(_)) => None,
+                            Ok(_) => Some(String::new()), // ping/pong/frame - skip
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    }
+                };
+                match msg {
+                    Some(s) if !s.is_empty() => {
+                        if tx.send(s).is_err() {
+                            break;
+                        }
+                    }
+                    Some(_) => continue, // empty = ping/pong
+                    None => break,       // closed or error
+                }
+            }
+        });
+
+        Ok(NativeWsHandle {
+            writer,
+            incoming: rx,
+            _reader_thread: reader_thread,
+        })
+    }
+
+    pub fn send_message(handle: &NativeWsHandle, msg: &str) -> Result<(), String> {
+        let mut guard = handle.writer.lock().unwrap();
+        if let Some(ref mut ws) = *guard {
+            ws.write(tungstenite::Message::Text(msg.to_string()))
+                .map_err(|e| format!("WebSocket send failed: {}", e))?;
+            ws.flush().map_err(|e| format!("WebSocket flush failed: {}", e))?;
+            Ok(())
+        } else {
+            Err("connection already closed".to_string())
+        }
+    }
+
+    pub fn close_connection(handle: &NativeWsHandle) -> Result<(), String> {
+        let mut guard = handle.writer.lock().unwrap();
+        if let Some(ref mut ws) = *guard {
+            let _ = ws.close(None);
+            let _ = ws.flush();
+        }
+        *guard = None;
+        Ok(())
+    }
+
+    pub fn drain_incoming(handle: &NativeWsHandle) -> Vec<String> {
+        let mut msgs = Vec::new();
+        while let Ok(m) = handle.incoming.try_recv() {
+            msgs.push(m);
+        }
+        msgs
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::HashMap as WsHandleMap;
+
+/// Global map of connection id -> native WS handle (non-wasm only)
+#[cfg(not(target_arch = "wasm32"))]
+static NATIVE_WS_HANDLES: std::sync::OnceLock<std::sync::Mutex<HashMap<i64, ws_native::NativeWsHandle>>> = std::sync::OnceLock::new();
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_ws_handles() -> &'static std::sync::Mutex<HashMap<i64, ws_native::NativeWsHandle>> {
+    NATIVE_WS_HANDLES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Drain incoming messages from real connections into the inbound_queue
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_native_ws_messages(conn_id: i64) {
+    let msgs = {
+        let handles = native_ws_handles().lock().unwrap();
+        if let Some(handle) = handles.get(&conn_id) {
+            ws_native::drain_incoming(handle)
+        } else {
+            return;
+        }
+    };
+    if !msgs.is_empty() {
+        with_ext_write(|ext| {
+            if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+                conn.messages_in += msgs.len() as i64;
+                conn.inbound_queue.extend(msgs);
+            }
+        });
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -6627,6 +6754,9 @@ fn evaluate_set_returning_function(
         "generate_series" => eval_generate_series(args, &fn_name),
         "unnest" => eval_unnest_set_function(args, &fn_name),
         "pg_get_keywords" => eval_pg_get_keywords(),
+        "messages" if function.name.len() == 2 && function.name[0].to_ascii_lowercase() == "ws" => {
+            execute_ws_messages(args)
+        }
         _ => Err(EngineError {
             message: format!(
                 "unsupported set-returning table function {}",
@@ -10119,6 +10249,7 @@ fn eval_function(
                 "connect" => return execute_ws_connect(&values),
                 "send" => return execute_ws_send(&values),
                 "close" => return execute_ws_close(&values),
+                "recv" => return execute_ws_recv(&values),
                 _ => {
                     return Err(EngineError {
                         message: format!("function ws.{}() does not exist", fn_name),
@@ -13624,13 +13755,27 @@ fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> 
         Some(ScalarValue::Text(s)) if !s.is_empty() => Some(s.clone()),
         _ => None,
     };
+    // Try real connection on native (non-wasm, non-test)
+    #[cfg(not(target_arch = "wasm32"))]
+    let real_result = ws_native::open_connection(&url);
+    #[cfg(target_arch = "wasm32")]
+    let real_result: Result<(), String> = Err("wasm stub".to_string());
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let (real_io, initial_state) = match &real_result {
+        Ok(_) => (true, "open".to_string()),
+        Err(_) => (false, "connecting".to_string()),
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (real_io, initial_state) = (false, "connecting".to_string());
+
     let id = with_ext_write(|ext| {
         let id = ext.ws_next_id;
         ext.ws_next_id += 1;
         ext.ws_connections.insert(id, WsConnection {
             id,
             url,
-            state: "connecting".to_string(),
+            state: initial_state,
             opened_at: "2024-01-01 00:00:00".to_string(),
             messages_in: 0,
             messages_out: 0,
@@ -13638,9 +13783,17 @@ fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> 
             on_message,
             on_close,
             inbound_queue: Vec::new(),
+            real_io,
         });
         id
     });
+
+    // Store the native handle if real connection succeeded
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(handle) = real_result {
+        native_ws_handles().lock().unwrap().insert(id, handle);
+    }
+
     Ok(ScalarValue::Int(id))
 }
 
@@ -13666,13 +13819,32 @@ fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
             });
         }
     };
+    let (is_real, is_closed) = with_ext_read(|ext| {
+        if let Some(conn) = ext.ws_connections.get(&conn_id) {
+            Ok((conn.real_io, conn.state == "closed"))
+        } else {
+            Err(EngineError {
+                message: format!("connection {} does not exist", conn_id),
+            })
+        }
+    })?;
+    if is_closed {
+        return Err(EngineError {
+            message: format!("connection {} is closed", conn_id),
+        });
+    }
+
+    // Send over real connection if available
+    #[cfg(not(target_arch = "wasm32"))]
+    if is_real {
+        let handles = native_ws_handles().lock().unwrap();
+        if let Some(handle) = handles.get(&conn_id) {
+            ws_native::send_message(handle, &_message).map_err(|e| EngineError { message: e })?;
+        }
+    }
+
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
-            if conn.state == "closed" {
-                return Err(EngineError {
-                    message: format!("connection {} is closed", conn_id),
-                });
-            }
             conn.messages_out += 1;
             Ok(ScalarValue::Bool(true))
         } else {
@@ -13697,10 +13869,88 @@ fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
             });
         }
     };
+    // Close real connection if present
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut handles = native_ws_handles().lock().unwrap();
+        if let Some(handle) = handles.get(&conn_id) {
+            let _ = ws_native::close_connection(handle);
+        }
+        handles.remove(&conn_id);
+    }
+
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
             conn.state = "closed".to_string();
             Ok(ScalarValue::Bool(true))
+        } else {
+            Err(EngineError {
+                message: format!("connection {} does not exist", conn_id),
+            })
+        }
+    })
+}
+
+fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+    if !is_ws_extension_loaded() {
+        return Err(EngineError {
+            message: "extension \"ws\" is not loaded".to_string(),
+        });
+    }
+    let conn_id = match args.first() {
+        Some(ScalarValue::Int(id)) => *id,
+        _ => {
+            return Err(EngineError {
+                message: "ws.recv requires a connection id".to_string(),
+            });
+        }
+    };
+
+    // Drain any real incoming messages first
+    #[cfg(not(target_arch = "wasm32"))]
+    drain_native_ws_messages(conn_id);
+
+    with_ext_write(|ext| {
+        if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+            if conn.inbound_queue.is_empty() {
+                Ok(ScalarValue::Null)
+            } else {
+                Ok(ScalarValue::Text(conn.inbound_queue.remove(0)))
+            }
+        } else {
+            Err(EngineError {
+                message: format!("connection {} does not exist", conn_id),
+            })
+        }
+    })
+}
+
+fn execute_ws_messages(args: &[ScalarValue]) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
+    if !is_ws_extension_loaded() {
+        return Err(EngineError {
+            message: "extension \"ws\" is not loaded".to_string(),
+        });
+    }
+    let conn_id = match args.first() {
+        Some(ScalarValue::Int(id)) => *id,
+        _ => {
+            return Err(EngineError {
+                message: "ws.messages requires a connection id".to_string(),
+            });
+        }
+    };
+
+    // Drain any real incoming messages first
+    #[cfg(not(target_arch = "wasm32"))]
+    drain_native_ws_messages(conn_id);
+
+    with_ext_write(|ext| {
+        if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
+            let rows: Vec<Vec<ScalarValue>> = conn.inbound_queue
+                .drain(..)
+                .map(|m| vec![ScalarValue::Text(m)])
+                .collect();
+            Ok((vec!["message".to_string()], rows))
         } else {
             Err(EngineError {
                 message: format!("connection {} does not exist", conn_id),
