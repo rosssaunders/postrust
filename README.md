@@ -6,11 +6,17 @@ Postrust treats HTTP APIs, WebSockets, and remote data feeds as things you query
 
 ```sql
 -- Fetch live BTC derivatives data from Deribit and query it with SQL
+CREATE EXTENSION http;
 SELECT result->>'last_price' AS last_price,
        result->'stats'->>'volume' AS volume_24h,
        result->'stats'->>'high' AS high_24h,
        result->'stats'->>'low' AS low_24h
-FROM (SELECT http_json('https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL')) t(response),
+FROM (
+  SELECT json_extract_path_text(
+           http_get('https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL'),
+           'content'
+         ) AS response
+) t,
      jsonb_each(response) AS kv(key, result)
 WHERE key = 'result';
 ```
@@ -23,7 +29,7 @@ Most embeddable SQL engines block on I/O. That's fine for local files, but usele
 
 Postrust is **async all the way through** — from expression evaluation to query execution. This means:
 
-- **`http_get()` and `http_json()`** are regular SQL functions that fetch data without blocking the engine
+- **`http_get()`/`http_post()`/`http_head()` (via `CREATE EXTENSION http`)** fetch data without blocking the engine
 - **WebSocket streams** can be queried as virtual tables (`SELECT * FROM ws.messages`)
 - **WASM builds** use native browser `fetch()` and `WebSocket` — no sync XHR hacks, no thread emulation
 - **Multiple concurrent data sources** can be queried in the same statement without serialising requests
@@ -88,7 +94,9 @@ Planner coverage includes CTEs, set operations, window functions, aggregates, DI
 
 **Window:** `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value`, `nth_value`
 
-**Other:** `generate_series`, `unnest`, `coalesce`, `nullif`, `greatest`, `least`, `version`, `pg_backend_pid`, `current_database`, `current_schema`, sequences (`nextval`, `currval`, `setval`), `http_get`
+**Other:** `generate_series`, `unnest`, `coalesce`, `nullif`, `greatest`, `least`, `version`, `pg_backend_pid`, `current_database`, `current_schema`, sequences (`nextval`, `currval`, `setval`)
+
+**HTTP extension:** `http_get`, `http_post`, `http_put`, `http_patch`, `http_delete`, `http_head`, `urlencode` (requires `CREATE EXTENSION http`)
 
 ### 🔜 Functions roadmap
 
@@ -104,8 +112,10 @@ Planner coverage includes CTEs, set operations, window functions, aggregates, DI
 
 ### Async data sources
 
-- `http_get(url)` — fetch any URL as text from within a SQL expression
-- `http_json(url)` — fetch and parse JSON
+- `http_get(url)` — fetch any URL (returns JSON response with status, content_type, headers, content)
+- `http_post/http_put/http_patch/http_delete/http_head` — pgsql-http-compatible helpers
+- `urlencode(text)` — URL encode a string
+- `CREATE EXTENSION http` is required before calling HTTP functions
 - WebSocket extension: `ws.connect()`, `ws.send()`, `ws.recv()`, `ws.messages` virtual table
 - CREATE FUNCTION with SQL bodies for custom logic
 

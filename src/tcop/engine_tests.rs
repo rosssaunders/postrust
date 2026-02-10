@@ -3,6 +3,7 @@ use crate::catalog::{reset_global_catalog_for_tests, with_global_state_lock};
 use crate::executor::exec_expr::ws_simulate_message;
 use crate::parser::sql_parser::parse_statement;
 use serde_json::{Number as JsonNumber, Value as JsonValue};
+use std::collections::HashMap;
 use std::future::Future;
 
 fn block_on<T>(future: impl Future<Output = T>) -> T {
@@ -38,6 +39,82 @@ fn run_batch(statements: &[&str]) -> Vec<QueryResult> {
             .map(|statement| run_statement(statement, &[]))
             .collect()
     })
+}
+
+fn parse_http_response(value: &ScalarValue) -> JsonValue {
+    let ScalarValue::Text(text) = value else {
+        panic!("http response should be text");
+    };
+    serde_json::from_str::<JsonValue>(text).expect("http response should be JSON")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct HttpRequest {
+    method: String,
+    path: String,
+    headers: HashMap<String, String>,
+    body: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_http_request(stream: &mut std::net::TcpStream) -> HttpRequest {
+    use std::io::Read;
+
+    let mut buffer = Vec::new();
+    let mut tmp = [0u8; 1024];
+    let mut header_end = None;
+    loop {
+        let n = stream.read(&mut tmp).expect("request read should succeed");
+        if n == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&tmp[..n]);
+        if header_end.is_none() {
+            header_end = buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n");
+        }
+        if header_end.is_some() {
+            break;
+        }
+    }
+    let header_end = header_end.unwrap_or(buffer.len());
+    let header_bytes = &buffer[..header_end];
+    let body_start = header_end.saturating_add(4);
+    let mut body_bytes = buffer[body_start..].to_vec();
+    let header_text = String::from_utf8_lossy(header_bytes);
+    let mut lines = header_text.lines();
+    let request_line = lines.next().unwrap_or_default();
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let path = parts.next().unwrap_or_default().to_string();
+    let mut headers = HashMap::new();
+    for line in lines {
+        if let Some((key, value)) = line.split_once(':') {
+            headers.insert(
+                key.trim().to_ascii_lowercase(),
+                value.trim().to_string(),
+            );
+        }
+    }
+    let content_length = headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    while body_bytes.len() < content_length {
+        let n = stream.read(&mut tmp).expect("body read should succeed");
+        if n == 0 {
+            break;
+        }
+        body_bytes.extend_from_slice(&tmp[..n]);
+    }
+    let body = String::from_utf8_lossy(&body_bytes[..content_length]).to_string();
+    HttpRequest {
+        method,
+        path,
+        headers,
+        body,
+    }
 }
 
 #[test]
@@ -1139,14 +1216,203 @@ fn evaluates_http_get_builtin_function() {
                 .expect("response write should succeed");
         });
 
+        run_statement("CREATE EXTENSION http", &[]);
         let sql = format!("SELECT http_get('http://{}/data')", addr);
         let result = run_statement(&sql, &[]);
-        assert_eq!(
-            result.rows,
-            vec![vec![ScalarValue::Text("hello-from-http-get".to_string())]]
-        );
+        let response = parse_http_response(&result.rows[0][0]);
+        assert_eq!(response["status"], JsonValue::Number(JsonNumber::from(200)));
+        assert_eq!(response["content"], JsonValue::String("hello-from-http-get".to_string()));
+        assert_eq!(response["content_type"], JsonValue::String("text/plain".to_string()));
+        let headers = response["headers"]
+            .as_array()
+            .expect("headers should be array");
+        assert!(headers.iter().any(|header| {
+            header
+                .get("field")
+                .and_then(|field| field.as_str())
+                .is_some_and(|field| field.eq_ignore_ascii_case("content-type"))
+        }));
 
         handle.join().expect("http server thread should finish");
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn http_extension_required() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT http_get('http://example.com')").expect("parses");
+        let planned = plan_statement(statement).expect("plans");
+        let err = block_on(execute_planned_query(&planned, &[]))
+            .expect_err("http_get should require extension");
+        assert!(err.message.contains("extension \"http\" is not loaded"));
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn executes_http_extension_functions() {
+    use std::io::Write;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+
+    with_isolated_state(|| {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("listener should bind: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener local addr");
+        let (tx, rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            for _ in 0..8 {
+                let (mut stream, _) = listener.accept().expect("should accept connection");
+                let request = read_http_request(&mut stream);
+                let method = request.method.clone();
+                tx.send(request).expect("request should send");
+                let body = if method == "HEAD" {
+                    String::new()
+                } else {
+                    format!("response-{method}")
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test: true\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("response write should succeed");
+            }
+        });
+
+        run_statement("CREATE EXTENSION http", &[]);
+        let base_url = format!("http://{}", addr);
+        let responses = vec![
+            run_statement(&format!("SELECT http_get('{}/get')", base_url), &[]),
+            run_statement(
+                &format!(
+                    "SELECT http_get('{}/search', jsonb_build_object('search','two words','page',1))",
+                    base_url
+                ),
+                &[],
+            ),
+            run_statement(
+                &format!(
+                    "SELECT http_post('{}/post', 'payload', 'text/plain')",
+                    base_url
+                ),
+                &[],
+            ),
+            run_statement(
+                &format!(
+                    "SELECT http_post('{}/form', jsonb_build_object('name','Colin & James','rate','50%'))",
+                    base_url
+                ),
+                &[],
+            ),
+            run_statement(
+                &format!(
+                    "SELECT http_put('{}/put', '{{\"ok\":true}}', 'application/json')",
+                    base_url
+                ),
+                &[],
+            ),
+            run_statement(
+                &format!("SELECT http_patch('{}/patch', 'patch-body', 'text/plain')", base_url),
+                &[],
+            ),
+            run_statement(&format!("SELECT http_delete('{}/delete')", base_url), &[]),
+            run_statement(&format!("SELECT http_head('{}/head')", base_url), &[]),
+        ];
+
+        let expected_contents = [
+            "response-GET",
+            "response-GET",
+            "response-POST",
+            "response-POST",
+            "response-PUT",
+            "response-PATCH",
+            "response-DELETE",
+            "",
+        ];
+        for (response, expected_content) in responses.iter().zip(expected_contents) {
+            let body = parse_http_response(&response.rows[0][0]);
+            assert_eq!(body["status"], JsonValue::Number(JsonNumber::from(200)));
+            assert_eq!(body["content_type"], JsonValue::String("text/plain".to_string()));
+            assert_eq!(body["content"], JsonValue::String(expected_content.to_string()));
+            let headers = body["headers"]
+                .as_array()
+                .expect("headers should be array");
+            assert!(headers.iter().any(|header| {
+                header
+                    .get("field")
+                    .and_then(|field| field.as_str())
+                    .is_some_and(|field| field.eq_ignore_ascii_case("x-test"))
+            }));
+        }
+
+        let requests: Vec<_> = rx.iter().take(8).collect();
+        handle.join().expect("http server thread should finish");
+
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/get");
+
+        assert_eq!(requests[1].method, "GET");
+        assert!(requests[1].path.starts_with("/search?"));
+        assert!(requests[1].path.contains("search=two+words"));
+        assert!(requests[1].path.contains("page=1"));
+
+        assert_eq!(requests[2].method, "POST");
+        assert_eq!(requests[2].path, "/post");
+        assert_eq!(requests[2].body, "payload");
+        assert_eq!(
+            requests[2].headers.get("content-type"),
+            Some(&"text/plain".to_string())
+        );
+
+        assert_eq!(requests[3].method, "POST");
+        assert_eq!(requests[3].path, "/form");
+        assert!(requests[3].body.contains("name=Colin+%26+James"));
+        assert!(requests[3].body.contains("rate=50%25"));
+        assert_eq!(
+            requests[3].headers.get("content-type"),
+            Some(&"application/x-www-form-urlencoded".to_string())
+        );
+
+        assert_eq!(requests[4].method, "PUT");
+        assert_eq!(requests[4].path, "/put");
+        assert_eq!(requests[4].body, "{\"ok\":true}");
+        assert_eq!(
+            requests[4].headers.get("content-type"),
+            Some(&"application/json".to_string())
+        );
+
+        assert_eq!(requests[5].method, "PATCH");
+        assert_eq!(requests[5].path, "/patch");
+        assert_eq!(requests[5].body, "patch-body");
+
+        assert_eq!(requests[6].method, "DELETE");
+        assert_eq!(requests[6].path, "/delete");
+
+        assert_eq!(requests[7].method, "HEAD");
+        assert_eq!(requests[7].path, "/head");
+    });
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn urlencode_encodes_text() {
+    with_isolated_state(|| {
+        run_statement("CREATE EXTENSION http", &[]);
+        let result = run_statement("SELECT urlencode('my special string''s & things?')", &[]);
+        assert_eq!(
+            result.rows,
+            vec![vec![ScalarValue::Text(
+                "my+special+string%27s+%26+things%3F".to_string()
+            )]]
+        );
     });
 }
 
@@ -1235,12 +1501,13 @@ fn executes_lateral_http_get() {
 
         let url1 = format!("http://{}/one", addr);
         let url2 = format!("http://{}/two", addr);
+        run_statement("CREATE EXTENSION http", &[]);
         run_statement("CREATE TABLE urls (url text)", &[]);
         let insert_sql = format!("INSERT INTO urls VALUES ('{}'), ('{}')", url1, url2);
         run_statement(&insert_sql, &[]);
         let result = run_statement(
-            "SELECT u.url, length(body) \
-                 FROM urls u, LATERAL (SELECT http_get(u.url) AS body) l \
+            "SELECT u.url, length(json_extract_path_text(l.response, 'content')) \
+                 FROM urls u, LATERAL (SELECT http_get(u.url) AS response) l \
                  ORDER BY 1",
             &[],
         );

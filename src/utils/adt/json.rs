@@ -1993,33 +1993,146 @@ pub(crate) fn eval_json_has_any_all_operator(
     Ok(ScalarValue::Bool(matched))
 }
 
-pub(crate) async fn eval_http_get_builtin(
-    url_value: &ScalarValue,
-) -> Result<ScalarValue, EngineError> {
-    if matches!(url_value, ScalarValue::Null) {
-        return Ok(ScalarValue::Null);
+fn url_encode_component(input: &str) -> String {
+    let mut out = String::new();
+    for byte in input.as_bytes() {
+        match byte {
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'~' => out.push(*byte as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", *byte)),
+        }
     }
-    let ScalarValue::Text(url) = url_value else {
+    out
+}
+
+fn url_encode_pairs(pairs: &[(String, String)]) -> String {
+    let mut encoded = Vec::with_capacity(pairs.len());
+    for (key, value) in pairs {
+        encoded.push(format!(
+            "{}={}",
+            url_encode_component(key),
+            url_encode_component(value)
+        ));
+    }
+    encoded.join("&")
+}
+
+fn parse_json_object_pairs(
+    value: &ScalarValue,
+    fn_name: &str,
+    arg_index: usize,
+) -> Result<Vec<(String, String)>, EngineError> {
+    let parsed = parse_json_document_arg(value, fn_name, arg_index)?;
+    let JsonValue::Object(map) = parsed else {
         return Err(EngineError {
-            message: "http_get() expects a text URL argument".to_string(),
+            message: format!("{fn_name}() argument {arg_index} must be a JSON object"),
         });
     };
+    let mut pairs = Vec::with_capacity(map.len());
+    for (key, value) in map {
+        let value_text = json_value_text_token(&value, fn_name, false)?;
+        pairs.push((key, value_text));
+    }
+    Ok(pairs)
+}
 
+fn append_query_params(url: &str, query: &str) -> String {
+    if query.is_empty() {
+        url.to_string()
+    } else if url.contains('?') {
+        format!("{url}&{query}")
+    } else {
+        format!("{url}?{query}")
+    }
+}
+
+fn build_http_response(
+    status: u16,
+    content_type: Option<String>,
+    headers: Vec<(String, String)>,
+    content: String,
+) -> ScalarValue {
+    let headers = JsonValue::Array(
+        headers
+            .into_iter()
+            .map(|(field, value)| {
+                let mut header = JsonMap::new();
+                header.insert("field".to_string(), JsonValue::String(field));
+                header.insert("value".to_string(), JsonValue::String(value));
+                JsonValue::Object(header)
+            })
+            .collect(),
+    );
+    let mut response = JsonMap::new();
+    response.insert(
+        "status".to_string(),
+        JsonValue::Number(JsonNumber::from(status as i64)),
+    );
+    response.insert(
+        "content_type".to_string(),
+        content_type.map(JsonValue::String).unwrap_or(JsonValue::Null),
+    );
+    response.insert("headers".to_string(), headers);
+    response.insert("content".to_string(), JsonValue::String(content));
+    ScalarValue::Text(JsonValue::Object(response).to_string())
+}
+
+async fn execute_http_request(
+    method: &str,
+    url: &str,
+    content: Option<String>,
+    content_type: Option<String>,
+    read_body: bool,
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let response = reqwest::get(url).await.map_err(|err| EngineError {
-            message: format!("http_get request failed: {err}"),
+        use reqwest::header::CONTENT_TYPE;
+
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|err| EngineError {
+            message: format!("{fn_name}() invalid HTTP method: {err}"),
         })?;
-        let status = response.status();
-        if !status.is_success() {
-            return Err(EngineError {
-                message: format!("http_get() request failed with status {status}"),
-            });
+        let client = reqwest::Client::new();
+        let mut request = client.request(method, url);
+        if let Some(body) = content {
+            request = request.body(body);
         }
-        let body = response.text().await.map_err(|err| EngineError {
-            message: format!("http_get body read failed: {err}"),
+        if let Some(header) = content_type {
+            request = request.header(CONTENT_TYPE, header);
+        }
+        let response = request.send().await.map_err(|err| EngineError {
+            message: format!("{fn_name}() request failed: {err}"),
         })?;
-        Ok(ScalarValue::Text(body))
+        let status = response.status().as_u16();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string());
+        let headers = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                let value = value.to_str().map_err(|err| EngineError {
+                    message: format!("{fn_name}() response header invalid: {err}"),
+                })?;
+                Ok((name.to_string(), value.to_string()))
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        let content = if read_body {
+            response.text().await.map_err(|err| EngineError {
+                message: format!("{fn_name}() body read failed: {err}"),
+            })?
+        } else {
+            String::new()
+        };
+        Ok(build_http_response(status, content_type, headers, content))
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -2028,38 +2141,274 @@ pub(crate) async fn eval_http_get_builtin(
         use wasm_bindgen_futures::JsFuture;
 
         let window = web_sys::window().ok_or_else(|| EngineError {
-            message: "http_get(): window is not available".to_string(),
+            message: format!("{fn_name}(): window is not available"),
         })?;
-        let resp_value = JsFuture::from(window.fetch_with_str(url))
+        let mut opts = web_sys::RequestInit::new();
+        opts.method(method);
+        if let Some(body) = content.as_ref() {
+            opts.body(Some(&wasm_bindgen::JsValue::from_str(body)));
+        }
+        if let Some(header) = content_type.as_ref() {
+            let headers = web_sys::Headers::new().map_err(|_| EngineError {
+                message: format!("{fn_name}(): failed to create headers"),
+            })?;
+            headers.append("Content-Type", header).map_err(|_| EngineError {
+                message: format!("{fn_name}(): failed to set content type"),
+            })?;
+            opts.headers(headers.as_ref());
+        }
+        let resp_value = JsFuture::from(window.fetch_with_str_and_init(url, &opts))
             .await
             .map_err(|e| EngineError {
                 message: format!(
-                    "http_get() request failed: {}",
+                    "{fn_name}() request failed: {}",
                     e.as_string().unwrap_or_else(|| "unknown error".to_string())
                 ),
             })?;
         let resp: web_sys::Response = resp_value.dyn_into().map_err(|_| EngineError {
-            message: "http_get(): response was not a Response".to_string(),
+            message: format!("{fn_name}(): response was not a Response"),
         })?;
-        if !resp.ok() {
-            return Err(EngineError {
-                message: format!(
-                    "http_get() request failed with status {} {}",
-                    resp.status(),
-                    resp.status_text()
-                ),
-            });
+        let status = resp.status();
+        let headers = resp.headers();
+        let content_type = headers.get("content-type").map_err(|_| EngineError {
+            message: format!("{fn_name}(): failed to read response headers"),
+        })?;
+        let mut header_pairs = Vec::new();
+        let entries = js_sys::try_iter(&headers.entries()).map_err(|_| EngineError {
+            message: format!("{fn_name}(): failed to read response headers"),
+        })?;
+        if let Some(entries) = entries {
+            for entry in entries {
+                let entry = entry.map_err(|_| EngineError {
+                    message: format!("{fn_name}(): failed to read response headers"),
+                })?;
+                let pair = js_sys::Array::from(&entry);
+                let field = pair.get(0).as_string().unwrap_or_default();
+                let value = pair.get(1).as_string().unwrap_or_default();
+                header_pairs.push((field, value));
+            }
         }
-        let text_promise = resp.text().map_err(|_| EngineError {
-            message: "http_get(): failed to read response body".to_string(),
-        })?;
-        let body = JsFuture::from(text_promise)
-            .await
-            .map_err(|_| EngineError {
-                message: "http_get(): failed to read response body".to_string(),
-            })?
-            .as_string()
-            .unwrap_or_default();
-        Ok(ScalarValue::Text(body))
+        let content = if read_body {
+            let text_promise = resp.text().map_err(|_| EngineError {
+                message: format!("{fn_name}(): failed to read response body"),
+            })?;
+            JsFuture::from(text_promise)
+                .await
+                .map_err(|_| EngineError {
+                    message: format!("{fn_name}(): failed to read response body"),
+                })?
+                .as_string()
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        Ok(build_http_response(
+            status,
+            content_type,
+            header_pairs,
+            content,
+        ))
     }
+}
+
+pub(crate) fn eval_urlencode(value: &ScalarValue) -> Result<ScalarValue, EngineError> {
+    if matches!(value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(text) = value else {
+        return Err(EngineError {
+            message: "urlencode() expects a text argument".to_string(),
+        });
+    };
+    Ok(ScalarValue::Text(url_encode_component(text)))
+}
+
+pub(crate) async fn eval_http_get(url_value: &ScalarValue) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_get() expects a text URL argument".to_string(),
+        });
+    };
+    execute_http_request("GET", url, None, None, true, "http_get").await
+}
+
+pub(crate) async fn eval_http_get_with_params(
+    url_value: &ScalarValue,
+    params_value: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null) || matches!(params_value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_get() expects a text URL argument".to_string(),
+        });
+    };
+    let pairs = parse_json_object_pairs(params_value, "http_get", 2)?;
+    let query = url_encode_pairs(&pairs);
+    let target = append_query_params(url, &query);
+    execute_http_request("GET", &target, None, None, true, "http_get").await
+}
+
+pub(crate) async fn eval_http_post_content(
+    url_value: &ScalarValue,
+    content_value: &ScalarValue,
+    content_type_value: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null)
+        || matches!(content_value, ScalarValue::Null)
+        || matches!(content_type_value, ScalarValue::Null)
+    {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_post() expects a text URL argument".to_string(),
+        });
+    };
+    let ScalarValue::Text(content) = content_value else {
+        return Err(EngineError {
+            message: "http_post() expects a text content argument".to_string(),
+        });
+    };
+    let ScalarValue::Text(content_type) = content_type_value else {
+        return Err(EngineError {
+            message: "http_post() expects a text content_type argument".to_string(),
+        });
+    };
+    execute_http_request(
+        "POST",
+        url,
+        Some(content.clone()),
+        Some(content_type.clone()),
+        true,
+        "http_post",
+    )
+    .await
+}
+
+pub(crate) async fn eval_http_post_form(
+    url_value: &ScalarValue,
+    params_value: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null) || matches!(params_value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_post() expects a text URL argument".to_string(),
+        });
+    };
+    let pairs = parse_json_object_pairs(params_value, "http_post", 2)?;
+    let body = url_encode_pairs(&pairs);
+    execute_http_request(
+        "POST",
+        url,
+        Some(body),
+        Some("application/x-www-form-urlencoded".to_string()),
+        true,
+        "http_post",
+    )
+    .await
+}
+
+pub(crate) async fn eval_http_put(
+    url_value: &ScalarValue,
+    content_value: &ScalarValue,
+    content_type_value: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null)
+        || matches!(content_value, ScalarValue::Null)
+        || matches!(content_type_value, ScalarValue::Null)
+    {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_put() expects a text URL argument".to_string(),
+        });
+    };
+    let ScalarValue::Text(content) = content_value else {
+        return Err(EngineError {
+            message: "http_put() expects a text content argument".to_string(),
+        });
+    };
+    let ScalarValue::Text(content_type) = content_type_value else {
+        return Err(EngineError {
+            message: "http_put() expects a text content_type argument".to_string(),
+        });
+    };
+    execute_http_request(
+        "PUT",
+        url,
+        Some(content.clone()),
+        Some(content_type.clone()),
+        true,
+        "http_put",
+    )
+    .await
+}
+
+pub(crate) async fn eval_http_patch(
+    url_value: &ScalarValue,
+    content_value: &ScalarValue,
+    content_type_value: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null)
+        || matches!(content_value, ScalarValue::Null)
+        || matches!(content_type_value, ScalarValue::Null)
+    {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_patch() expects a text URL argument".to_string(),
+        });
+    };
+    let ScalarValue::Text(content) = content_value else {
+        return Err(EngineError {
+            message: "http_patch() expects a text content argument".to_string(),
+        });
+    };
+    let ScalarValue::Text(content_type) = content_type_value else {
+        return Err(EngineError {
+            message: "http_patch() expects a text content_type argument".to_string(),
+        });
+    };
+    execute_http_request(
+        "PATCH",
+        url,
+        Some(content.clone()),
+        Some(content_type.clone()),
+        true,
+        "http_patch",
+    )
+    .await
+}
+
+pub(crate) async fn eval_http_delete(url_value: &ScalarValue) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_delete() expects a text URL argument".to_string(),
+        });
+    };
+    execute_http_request("DELETE", url, None, None, true, "http_delete").await
+}
+
+pub(crate) async fn eval_http_head(url_value: &ScalarValue) -> Result<ScalarValue, EngineError> {
+    if matches!(url_value, ScalarValue::Null) {
+        return Ok(ScalarValue::Null);
+    }
+    let ScalarValue::Text(url) = url_value else {
+        return Err(EngineError {
+            message: "http_head() expects a text URL argument".to_string(),
+        });
+    };
+    execute_http_request("HEAD", url, None, None, false, "http_head").await
 }

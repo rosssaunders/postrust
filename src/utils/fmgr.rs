@@ -8,7 +8,7 @@ use crate::commands::sequence::{
 };
 use crate::security;
 use crate::storage::tuple::ScalarValue;
-use crate::tcop::engine::EngineError;
+use crate::tcop::engine::{EngineError, with_ext_read};
 use crate::utils::adt::datetime::{
     JustifyMode, current_date_string, current_timestamp_string, eval_age, eval_date_add_sub,
     eval_date_function, eval_date_trunc, eval_extract_or_date_part, eval_isfinite,
@@ -16,11 +16,13 @@ use crate::utils::adt::datetime::{
     eval_to_timestamp, eval_to_timestamp_with_format,
 };
 use crate::utils::adt::json::{
-    eval_array_to_json, eval_http_get_builtin, eval_json_array_length, eval_json_extract_path,
-    eval_json_object, eval_json_pretty, eval_json_strip_nulls, eval_json_typeof, eval_jsonb_exists,
-    eval_jsonb_exists_any_all, eval_jsonb_insert, eval_jsonb_path_exists, eval_jsonb_path_match,
-    eval_jsonb_path_query_array, eval_jsonb_path_query_first, eval_jsonb_set, eval_jsonb_set_lax,
-    eval_row_to_json, json_build_array_value, json_build_object_value, scalar_to_json_value,
+    eval_array_to_json, eval_http_delete, eval_http_get, eval_http_get_with_params, eval_http_head,
+    eval_http_patch, eval_http_post_content, eval_http_post_form, eval_http_put, eval_json_array_length,
+    eval_json_extract_path, eval_json_object, eval_json_pretty, eval_json_strip_nulls,
+    eval_json_typeof, eval_jsonb_exists, eval_jsonb_exists_any_all, eval_jsonb_insert,
+    eval_jsonb_path_exists, eval_jsonb_path_match, eval_jsonb_path_query_array,
+    eval_jsonb_path_query_first, eval_jsonb_set, eval_jsonb_set_lax, eval_row_to_json,
+    eval_urlencode, json_build_array_value, json_build_object_value, scalar_to_json_value,
 };
 use crate::utils::adt::math_functions::{
     coerce_to_f64, eval_factorial, eval_scale, eval_width_bucket, gcd_i64, numeric_mod,
@@ -36,12 +38,57 @@ use crate::utils::adt::string_functions::{
     substring_chars, trim_text,
 };
 
+fn require_http_extension() -> Result<(), EngineError> {
+    if with_ext_read(|ext| ext.extensions.iter().any(|ext| ext.name == "http")) {
+        Ok(())
+    } else {
+        Err(EngineError {
+            message: "extension \"http\" is not loaded".to_string(),
+        })
+    }
+}
+
 pub(crate) async fn eval_scalar_function(
     fn_name: &str,
     args: &[ScalarValue],
 ) -> Result<ScalarValue, EngineError> {
     match fn_name {
-        "http_get" if args.len() == 1 => eval_http_get_builtin(&args[0]).await,
+        "http_get" if args.len() == 1 => {
+            require_http_extension()?;
+            eval_http_get(&args[0]).await
+        }
+        "http_get" if args.len() == 2 => {
+            require_http_extension()?;
+            eval_http_get_with_params(&args[0], &args[1]).await
+        }
+        "http_post" if args.len() == 3 => {
+            require_http_extension()?;
+            eval_http_post_content(&args[0], &args[1], &args[2]).await
+        }
+        "http_post" if args.len() == 2 => {
+            require_http_extension()?;
+            eval_http_post_form(&args[0], &args[1]).await
+        }
+        "http_put" if args.len() == 3 => {
+            require_http_extension()?;
+            eval_http_put(&args[0], &args[1], &args[2]).await
+        }
+        "http_patch" if args.len() == 3 => {
+            require_http_extension()?;
+            eval_http_patch(&args[0], &args[1], &args[2]).await
+        }
+        "http_delete" if args.len() == 1 => {
+            require_http_extension()?;
+            eval_http_delete(&args[0]).await
+        }
+        "http_head" if args.len() == 1 => {
+            require_http_extension()?;
+            eval_http_head(&args[0]).await
+        }
+        "urlencode" if args.len() == 1 => {
+            require_http_extension()?;
+            eval_urlencode(&args[0])
+        }
         "row" => Ok(ScalarValue::Text(
             JsonValue::Array(
                 args.iter()

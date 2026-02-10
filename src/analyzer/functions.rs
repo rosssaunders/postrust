@@ -138,6 +138,14 @@ const KNOWN_FUNCTIONS: &[(&str, usize, usize)] = &[
     ("jsonb_pretty", 1, 1),
     ("jsonb_set", 3, 4),
     ("jsonb_strip_nulls", 1, 1),
+    // HTTP extension functions
+    ("http_get", 1, 2),
+    ("http_post", 2, 3),
+    ("http_put", 3, 3),
+    ("http_patch", 3, 3),
+    ("http_delete", 1, 1),
+    ("http_head", 1, 1),
+    ("urlencode", 1, 1),
     // Misc
     ("pg_typeof", 1, 1),
     ("generate_series", 2, 3),

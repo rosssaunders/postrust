@@ -16,7 +16,8 @@ Execution model:
 
 ## Status (audited 2026-02-10)
 
-All 405 unit tests pass, with a replication integration test under `tests/integration/`.
+All 426 unit tests pass, with a replication integration test under `tests/integration/`.
+HTTP client functions are exposed via `CREATE EXTENSION http` with pgsql-http-style helpers.
 The codebase is ~41k lines of Rust across a PostgreSQL-style module layout.
 
 ### Step 00 — Refactor to PG Layout: ✅ Done
