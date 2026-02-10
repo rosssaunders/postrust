@@ -1,4 +1,5 @@
 pub mod browser;
+pub mod commands;
 pub mod catalog;
 pub mod parser;
 pub mod protocol;

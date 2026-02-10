@@ -8,32 +8,22 @@ use std::sync::{OnceLock, RwLock};
 
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
-use crate::catalog::dependency::{
-    describe_table as describe_table_from_catalog,
-    expand_and_order_relation_drop as expand_and_order_relation_drop_in_catalog,
-    expand_table_dependency_set as expand_table_dependencies_in_catalog,
-    index_backing_constraint_name as index_backing_constraint_name_in_catalog,
-    plan_sequence_drop as plan_sequence_drop_in_catalog,
+use crate::commands::sequence::{
+    normalize_sequence_name_from_text, sequence_next_value, set_sequence_value,
+    with_sequences_read, with_sequences_write, SequenceState,
 };
 use crate::catalog::oid::Oid;
 use crate::catalog::with_catalog_write;
 use crate::catalog::{
-    Column, ColumnSpec, IndexSpec, SearchPath, TableKind, TypeSignature, with_catalog_read,
+    Column, ColumnSpec, SearchPath, TableKind, TypeSignature, with_catalog_read,
 };
 use crate::parser::ast::{
-    AlterSequenceAction, AlterSequenceStatement, AlterTableAction, AlterTableStatement,
-    AlterViewAction, AlterViewStatement, BinaryOp, ComparisonQuantifier, ConflictTarget,
-    CreateIndexStatement,
-    CreateSchemaStatement, CreateSequenceStatement, CreateTableStatement, CreateViewStatement,
-    DeleteStatement, DropBehavior, DropIndexStatement, DropSchemaStatement, DropSequenceStatement,
-    DropTableStatement, DropViewStatement, Expr, ForeignKeyAction, InsertSource, InsertStatement,
-    JoinCondition, JoinExpr, JoinType, MergeStatement, MergeWhenClause, OnConflictClause, OrderByExpr, Query,
-    QueryExpr, RefreshMaterializedViewStatement, SelectItem, SelectQuantifier, SelectStatement,
-    SetOperator, SetQuantifier, Statement, TableConstraint, TableExpression, TableFunctionRef,
-    TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WindowFrameBound,
-    WindowFrameUnits, WindowSpec, ExplainStatement, SetStatement, ShowStatement,
-    CreateExtensionStatement, DropExtensionStatement, CreateFunctionStatement,
-    FunctionParam, FunctionReturnType, SubqueryRef, GroupByExpr,
+    BinaryOp, ComparisonQuantifier, ConflictTarget, DeleteStatement, Expr, ForeignKeyAction,
+    FunctionParam, FunctionReturnType, GroupByExpr, InsertSource, InsertStatement, JoinCondition,
+    JoinExpr, JoinType, MergeStatement, MergeWhenClause, OnConflictClause, OrderByExpr, Query,
+    QueryExpr, SelectItem, SelectQuantifier, SelectStatement, SetOperator, SetQuantifier,
+    Statement, SubqueryRef, TableConstraint, TableExpression, TableFunctionRef, TableRef, UnaryOp,
+    UpdateStatement, WindowFrameBound, WindowFrameUnits, WindowSpec,
     // DiscardStatement, DoStatement, ListenStatement, NotifyStatement, UnlistenStatement used in pattern matching
 };
 use crate::security::{self, RlsCommand, TablePrivilege};
@@ -294,183 +284,25 @@ pub fn execute_planned_query<'a>(
     Box::pin(async move {
     let result = match &plan.statement {
         Statement::Query(query) => execute_query(query, params).await?,
-        Statement::CreateTable(create) => execute_create_table(create).await?,
-        Statement::CreateSchema(create) => execute_create_schema(create).await?,
-        Statement::CreateIndex(create) => execute_create_index(create).await?,
-        Statement::CreateSequence(create) => execute_create_sequence(create).await?,
-        Statement::CreateView(create) => execute_create_view(create, params).await?,
-        Statement::RefreshMaterializedView(refresh) => {
-            execute_refresh_materialized_view(refresh, params).await?
-        }
-        Statement::AlterSequence(alter) => execute_alter_sequence(alter).await?,
-        Statement::AlterView(alter) => execute_alter_view(alter).await?,
         Statement::Insert(insert) => execute_insert(insert, params).await?,
         Statement::Update(update) => execute_update(update, params).await?,
         Statement::Delete(delete) => execute_delete(delete, params).await?,
         Statement::Merge(merge) => execute_merge(merge, params).await?,
-        Statement::DropTable(drop_table) => execute_drop_table(drop_table).await?,
-        Statement::DropSchema(drop_schema) => execute_drop_schema(drop_schema).await?,
-        Statement::DropIndex(drop_index) => execute_drop_index(drop_index).await?,
-        Statement::DropSequence(drop_sequence) => execute_drop_sequence(drop_sequence).await?,
-        Statement::DropView(drop_view) => execute_drop_view(drop_view).await?,
-        Statement::Truncate(truncate) => execute_truncate(truncate).await?,
-        Statement::AlterTable(alter_table) => execute_alter_table(alter_table).await?,
-        Statement::Explain(explain) => execute_explain(explain, params).await?,
-        Statement::Set(set_stmt) => execute_set(set_stmt).await?,
-        Statement::Show(show_stmt) => execute_show(show_stmt).await?,
-        Statement::Discard(_) => QueryResult {
-            columns: Vec::new(), rows: Vec::new(),
-            command_tag: "DISCARD".to_string(), rows_affected: 0,
-        },
-        Statement::Do(_) => QueryResult {
-            columns: Vec::new(), rows: Vec::new(),
-            command_tag: "DO".to_string(), rows_affected: 0,
-        },
-        Statement::Listen(_) => QueryResult {
-            columns: Vec::new(), rows: Vec::new(),
-            command_tag: "LISTEN".to_string(), rows_affected: 0,
-        },
-        Statement::Notify(_) => QueryResult {
-            columns: Vec::new(), rows: Vec::new(),
-            command_tag: "NOTIFY".to_string(), rows_affected: 0,
-        },
-        Statement::Unlisten(_) => QueryResult {
-            columns: Vec::new(), rows: Vec::new(),
-            command_tag: "UNLISTEN".to_string(), rows_affected: 0,
-        },
-        Statement::CreateExtension(create) => execute_create_extension(create).await?,
-        Statement::DropExtension(drop_ext) => execute_drop_extension(drop_ext).await?,
-        Statement::CreateFunction(create) => execute_create_function(create).await?,
         Statement::Transaction(_) => {
             return Err(EngineError {
                 message: "transaction statements must be executed via the session protocol"
                     .to_string(),
             });
         }
+        _ => crate::tcop::utility::execute_utility_statement(&plan.statement, params).await?,
     };
     Ok(result)
     })
 }
 
 #[derive(Debug, Default)]
-struct InMemoryStorage {
-    rows_by_table: HashMap<Oid, Vec<Vec<ScalarValue>>>,
-}
-
-static GLOBAL_GUC: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
-
-fn global_guc() -> &'static RwLock<HashMap<String, String>> {
-    GLOBAL_GUC.get_or_init(|| {
-        let mut m = HashMap::new();
-        m.insert("server_version".to_string(), "16.0".to_string());
-        m.insert("server_encoding".to_string(), "UTF8".to_string());
-        m.insert("client_encoding".to_string(), "UTF8".to_string());
-        m.insert("is_superuser".to_string(), "on".to_string());
-        m.insert("DateStyle".to_string(), "ISO, MDY".to_string());
-        m.insert("IntervalStyle".to_string(), "postgres".to_string());
-        m.insert("TimeZone".to_string(), "UTC".to_string());
-        m.insert("integer_datetimes".to_string(), "on".to_string());
-        m.insert("standard_conforming_strings".to_string(), "on".to_string());
-        m.insert("search_path".to_string(), "\"$user\", public".to_string());
-        m.insert("application_name".to_string(), "".to_string());
-        RwLock::new(m)
-    })
-}
-
-async fn execute_set(set_stmt: &SetStatement) -> Result<QueryResult, EngineError> {
-    let mut guc = global_guc().write().expect("guc lock poisoned");
-    guc.insert(set_stmt.name.clone(), set_stmt.value.clone());
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "SET".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_show(show_stmt: &ShowStatement) -> Result<QueryResult, EngineError> {
-    let guc = global_guc().read().expect("guc lock poisoned");
-    let value = guc.get(&show_stmt.name)
-        .or_else(|| guc.iter().find(|(k, _)| k.eq_ignore_ascii_case(&show_stmt.name)).map(|(_, v)| v))
-        .cloned()
-        .unwrap_or_default();
-    Ok(QueryResult {
-        columns: vec![show_stmt.name.clone()],
-        rows: vec![vec![ScalarValue::Text(value)]],
-        command_tag: "SHOW".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_explain(
-    explain: &ExplainStatement,
-    params: &[Option<String>],
-) -> Result<QueryResult, EngineError> {
-    let mut plan_lines = Vec::new();
-    describe_statement_plan(&explain.statement, &mut plan_lines, 0);
-
-    if explain.analyze {
-        // Actually execute and add timing
-        let start = std::time::Instant::now();
-        let inner_result = Box::pin(execute_planned_query(
-            &plan_statement((*explain.statement).clone())?,
-            params,
-        ))
-        .await?;
-        let elapsed = start.elapsed();
-        plan_lines.push("Planning Time: 0.001 ms".to_string());
-        plan_lines.push(format!(
-            "Execution Time: {:.3} ms",
-            elapsed.as_secs_f64() * 1000.0
-        ));
-        plan_lines.push(format!(
-            "  (actual rows={})",
-            inner_result.rows.len()
-        ));
-    }
-
-    let rows = plan_lines.into_iter().map(|line| vec![ScalarValue::Text(line)]).collect();
-    Ok(QueryResult {
-        columns: vec!["QUERY PLAN".to_string()],
-        rows,
-        command_tag: "EXPLAIN".to_string(),
-        rows_affected: 0,
-    })
-}
-
-fn describe_statement_plan(stmt: &Statement, lines: &mut Vec<String>, indent: usize) {
-    let prefix = " ".repeat(indent);
-    match stmt {
-        Statement::Query(query) => {
-            match &query.body {
-                QueryExpr::Select(select) => {
-                    if select.from.is_empty() {
-                        lines.push(format!("{}Result  (cost=0.00..0.01 rows=1 width=0)", prefix));
-                    } else {
-                        lines.push(format!("{}Seq Scan  (cost=0.00..1.00 rows=1 width=0)", prefix));
-                        for table_expr in &select.from {
-                            if let TableExpression::Relation(rel) = table_expr {
-                                lines.push(format!("{}  on {}", prefix, rel.name.join(".")));
-                            }
-                        }
-                    }
-                    if select.where_clause.is_some() {
-                        lines.push(format!("{}  Filter: <condition>", prefix));
-                    }
-                }
-                QueryExpr::SetOperation { op, .. } => {
-                    lines.push(format!("{}{:?}  (cost=0.00..1.00 rows=1 width=0)", prefix, op));
-                }
-                QueryExpr::Nested(inner) => {
-                    describe_statement_plan(&Statement::Query((**inner).clone()), lines, indent);
-                }
-            }
-        }
-        Statement::Insert(_) => lines.push(format!("{}Insert  (cost=0.00..1.00 rows=0 width=0)", prefix)),
-        Statement::Update(_) => lines.push(format!("{}Update  (cost=0.00..1.00 rows=0 width=0)", prefix)),
-        Statement::Delete(_) => lines.push(format!("{}Delete  (cost=0.00..1.00 rows=0 width=0)", prefix)),
-        _ => lines.push(format!("{}Utility Statement", prefix)),
-    }
+pub(crate) struct InMemoryStorage {
+    pub(crate) rows_by_table: HashMap<Oid, Vec<Vec<ScalarValue>>>,
 }
 
 static GLOBAL_STORAGE: OnceLock<RwLock<InMemoryStorage>> = OnceLock::new();
@@ -479,99 +311,18 @@ fn global_storage() -> &'static RwLock<InMemoryStorage> {
     GLOBAL_STORAGE.get_or_init(|| RwLock::new(InMemoryStorage::default()))
 }
 
-fn with_storage_read<T>(f: impl FnOnce(&InMemoryStorage) -> T) -> T {
+pub(crate) fn with_storage_read<T>(f: impl FnOnce(&InMemoryStorage) -> T) -> T {
     let storage = global_storage()
         .read()
         .expect("global storage lock poisoned for read");
     f(&storage)
 }
 
-fn with_storage_write<T>(f: impl FnOnce(&mut InMemoryStorage) -> T) -> T {
+pub(crate) fn with_storage_write<T>(f: impl FnOnce(&mut InMemoryStorage) -> T) -> T {
     let mut storage = global_storage()
         .write()
         .expect("global storage lock poisoned for write");
     f(&mut storage)
-}
-
-#[derive(Debug, Clone)]
-struct SequenceState {
-    start: i64,
-    current: i64,
-    increment: i64,
-    min_value: i64,
-    max_value: i64,
-    cycle: bool,
-    cache: i64,
-    called: bool,
-}
-
-static GLOBAL_SEQUENCES: OnceLock<RwLock<HashMap<String, SequenceState>>> = OnceLock::new();
-
-fn global_sequences() -> &'static RwLock<HashMap<String, SequenceState>> {
-    GLOBAL_SEQUENCES.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn with_sequences_read<T>(f: impl FnOnce(&HashMap<String, SequenceState>) -> T) -> T {
-    let sequences = global_sequences()
-        .read()
-        .expect("global sequences lock poisoned for read");
-    f(&sequences)
-}
-
-fn with_sequences_write<T>(f: impl FnOnce(&mut HashMap<String, SequenceState>) -> T) -> T {
-    let mut sequences = global_sequences()
-        .write()
-        .expect("global sequences lock poisoned for write");
-    f(&mut sequences)
-}
-
-#[derive(Debug, Default)]
-struct RefreshScheduler {
-    active_relation_oids: HashSet<Oid>,
-}
-
-static GLOBAL_REFRESH_SCHEDULER: OnceLock<RwLock<RefreshScheduler>> = OnceLock::new();
-
-fn global_refresh_scheduler() -> &'static RwLock<RefreshScheduler> {
-    GLOBAL_REFRESH_SCHEDULER.get_or_init(|| RwLock::new(RefreshScheduler::default()))
-}
-
-fn with_refresh_scheduler_write<T>(f: impl FnOnce(&mut RefreshScheduler) -> T) -> T {
-    let mut scheduler = global_refresh_scheduler()
-        .write()
-        .expect("global refresh scheduler lock poisoned for write");
-    f(&mut scheduler)
-}
-
-#[derive(Debug)]
-struct RefreshExecutionGuard {
-    relation_oid: Oid,
-}
-
-impl Drop for RefreshExecutionGuard {
-    fn drop(&mut self) {
-        with_refresh_scheduler_write(|scheduler| {
-            scheduler.active_relation_oids.remove(&self.relation_oid);
-        });
-    }
-}
-
-fn acquire_refresh_execution_guard(
-    relation_oid: Oid,
-    qualified_name: &str,
-) -> Result<RefreshExecutionGuard, EngineError> {
-    let inserted = with_refresh_scheduler_write(|scheduler| {
-        scheduler.active_relation_oids.insert(relation_oid)
-    });
-    if !inserted {
-        return Err(EngineError {
-            message: format!(
-                "cannot refresh materialized view \"{}\" because it is already being refreshed",
-                qualified_name
-            ),
-        });
-    }
-    Ok(RefreshExecutionGuard { relation_oid })
 }
 
 // ── Extension & User Function Registry ──────────────────────────────────────
@@ -586,10 +337,10 @@ pub struct UserFunction {
 }
 
 #[derive(Debug, Clone)]
-struct ExtensionRecord {
-    name: String,
-    version: String,
-    description: String,
+pub(crate) struct ExtensionRecord {
+    pub(crate) name: String,
+    pub(crate) version: String,
+    pub(crate) description: String,
 }
 
 /// WebSocket connection state for the ws extension
@@ -892,11 +643,11 @@ fn sync_wasm_ws_state(conn_id: i64) {
 }
 
 #[derive(Debug, Clone, Default)]
-struct ExtensionState {
-    extensions: Vec<ExtensionRecord>,
-    user_functions: Vec<UserFunction>,
-    ws_connections: HashMap<i64, WsConnection>,
-    ws_next_id: i64,
+pub(crate) struct ExtensionState {
+    pub(crate) extensions: Vec<ExtensionRecord>,
+    pub(crate) user_functions: Vec<UserFunction>,
+    pub(crate) ws_connections: HashMap<i64, WsConnection>,
+    pub(crate) ws_next_id: i64,
 }
 
 static GLOBAL_EXTENSION_STATE: OnceLock<RwLock<ExtensionState>> = OnceLock::new();
@@ -905,12 +656,12 @@ fn global_extension_state() -> &'static RwLock<ExtensionState> {
     GLOBAL_EXTENSION_STATE.get_or_init(|| RwLock::new(ExtensionState::default()))
 }
 
-fn with_ext_read<T>(f: impl FnOnce(&ExtensionState) -> T) -> T {
+pub(crate) fn with_ext_read<T>(f: impl FnOnce(&ExtensionState) -> T) -> T {
     let state = global_extension_state().read().expect("ext state lock poisoned");
     f(&state)
 }
 
-fn with_ext_write<T>(f: impl FnOnce(&mut ExtensionState) -> T) -> T {
+pub(crate) fn with_ext_write<T>(f: impl FnOnce(&mut ExtensionState) -> T) -> T {
     let mut state = global_extension_state().write().expect("ext state lock poisoned");
     f(&mut state)
 }
@@ -921,7 +672,7 @@ fn with_ext_write<T>(f: impl FnOnce(&mut ExtensionState) -> T) -> T {
 pub struct EngineStateSnapshot {
     catalog: crate::catalog::Catalog,
     rows_by_table: HashMap<Oid, Vec<Vec<ScalarValue>>>,
-    sequences: HashMap<String, SequenceState>,
+    pub(crate) sequences: HashMap<String, SequenceState>,
     security: crate::security::SecurityState,
 }
 
@@ -961,9 +712,7 @@ pub fn reset_global_storage_for_tests() {
     with_sequences_write(|sequences| {
         sequences.clear();
     });
-    with_refresh_scheduler_write(|scheduler| {
-        scheduler.active_relation_oids.clear();
-    });
+    crate::commands::matview::reset_refresh_scheduler_for_tests();
     with_ext_write(|ext| {
         *ext = ExtensionState::default();
     });
@@ -1135,13 +884,13 @@ pub async fn copy_insert_rows(
     Ok(accepted_rows.len() as u64)
 }
 
-fn require_relation_owner(table: &crate::catalog::Table) -> Result<(), EngineError> {
+pub(crate) fn require_relation_owner(table: &crate::catalog::Table) -> Result<(), EngineError> {
     let role = security::current_role();
     security::require_manage_relation(&role, table.oid(), &table.qualified_name())
         .map_err(|message| EngineError { message })
 }
 
-fn require_relation_privilege(
+pub(crate) fn require_relation_privilege(
     table: &crate::catalog::Table,
     privilege: TablePrivilege,
 ) -> Result<(), EngineError> {
@@ -1203,644 +952,6 @@ async fn relation_row_passes_check_for_command(
         }
     }
     Ok(false)
-}
-
-async fn execute_create_table(
-    create: &CreateTableStatement,
-) -> Result<QueryResult, EngineError> {
-    if create.columns.is_empty() {
-        return Err(EngineError {
-            message: "CREATE TABLE requires at least one column".to_string(),
-        });
-    }
-
-    let (schema_name, table_name) = relation_name_for_create(&create.name)?;
-    let mut transformed_columns = create.columns.clone();
-    let mut identity_sequence_names = Vec::new();
-    for column in &mut transformed_columns {
-        if !column.identity {
-            continue;
-        }
-        if column.default.is_some() {
-            return Err(EngineError {
-                message: format!(
-                    "column \"{}\" cannot specify both IDENTITY and DEFAULT",
-                    column.name
-                ),
-            });
-        }
-        let sequence_name = format!(
-            "{}.{}_{}_seq",
-            schema_name,
-            table_name,
-            column.name.to_ascii_lowercase()
-        );
-        column.default = Some(Expr::FunctionCall {
-            name: vec!["nextval".to_string()],
-            args: vec![Expr::String(sequence_name.clone())],
-            distinct: false,
-            order_by: Vec::new(),
-            within_group: Vec::new(),
-            filter: None,
-            over: None,
-        });
-        column.nullable = false;
-        identity_sequence_names.push(sequence_name);
-    }
-    if !identity_sequence_names.is_empty() {
-        let existing = with_sequences_read(|sequences| {
-            identity_sequence_names
-                .iter()
-                .find(|name| sequences.contains_key(*name))
-                .cloned()
-        });
-        if let Some(name) = existing {
-            return Err(EngineError {
-                message: format!("sequence \"{}\" already exists", name),
-            });
-        }
-    }
-
-    let column_specs = transformed_columns
-        .iter()
-        .map(column_spec_from_ast)
-        .collect::<Result<Vec<_>, _>>()?;
-    let key_specs = key_constraint_specs_from_ast(&create.constraints)?;
-    let foreign_key_specs = foreign_key_constraint_specs_from_ast(&create.constraints)?;
-
-    let table_oid = with_catalog_write(|catalog| {
-        catalog.create_table(
-            &schema_name,
-            &table_name,
-            TableKind::Heap,
-            column_specs,
-            key_specs,
-            foreign_key_specs,
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    with_storage_write(|storage| {
-        storage.rows_by_table.entry(table_oid).or_default();
-    });
-    security::set_relation_owner(table_oid, &security::current_role());
-    if !identity_sequence_names.is_empty() {
-        with_sequences_write(|sequences| {
-            for name in identity_sequence_names {
-                sequences.insert(
-                    name,
-                    SequenceState {
-                        start: 1,
-                        current: 1,
-                        increment: 1,
-                        min_value: 1,
-                        max_value: i64::MAX,
-                        cycle: false,
-                        cache: 1,
-                        called: false,
-                    },
-                );
-            }
-        });
-    }
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "CREATE TABLE".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_create_schema(
-    create: &CreateSchemaStatement,
-) -> Result<QueryResult, EngineError> {
-    let created = with_catalog_write(|catalog| catalog.create_schema(&create.name));
-    match created {
-        Ok(_) => Ok(QueryResult {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            command_tag: "CREATE SCHEMA".to_string(),
-            rows_affected: 0,
-        }),
-        Err(err) if create.if_not_exists && err.message.contains("already exists") => {
-            Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                command_tag: "CREATE SCHEMA".to_string(),
-                rows_affected: 0,
-            })
-        }
-        Err(err) => Err(EngineError {
-            message: err.message,
-        }),
-    }
-}
-
-async fn execute_create_index(
-    create: &CreateIndexStatement,
-) -> Result<QueryResult, EngineError> {
-    let table = with_catalog_read(|catalog| {
-        catalog
-            .resolve_table(&create.table_name, &SearchPath::default())
-            .cloned()
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    if !matches!(table.kind(), TableKind::Heap | TableKind::MaterializedView) {
-        return Err(EngineError {
-            message: format!(
-                "cannot CREATE INDEX on non-heap relation \"{}\"",
-                table.qualified_name()
-            ),
-        });
-    }
-    require_relation_owner(&table)?;
-
-    let index_name = create.name.to_ascii_lowercase();
-    let index_columns = create
-        .columns
-        .iter()
-        .map(|column| column.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-
-    if create.unique {
-        let key_spec = crate::catalog::KeyConstraintSpec {
-            name: Some(index_name.clone()),
-            columns: index_columns.clone(),
-            primary: false,
-        };
-        let preview = {
-            let mut preview = table.clone();
-            preview
-                .key_constraints_mut()
-                .push(crate::catalog::KeyConstraint {
-                    name: key_spec.name.clone(),
-                    columns: key_spec.columns.clone(),
-                    primary: false,
-                });
-            preview
-        };
-        let rows = with_storage_read(|storage| {
-            storage
-                .rows_by_table
-                .get(&table.oid())
-                .cloned()
-                .unwrap_or_default()
-        });
-        validate_table_constraints(&preview, &rows).await?;
-
-        with_catalog_write(|catalog| {
-            catalog.add_key_constraint(table.schema_name(), table.name(), key_spec)?;
-            let index = IndexSpec {
-                name: index_name.clone(),
-                columns: index_columns.clone(),
-                unique: true,
-            };
-            if let Err(err) = catalog.add_index(table.schema_name(), table.name(), index) {
-                let _ = catalog.drop_constraint(table.schema_name(), table.name(), &index_name);
-                return Err(err);
-            }
-            Ok(())
-        })
-        .map_err(|err| EngineError {
-            message: err.message,
-        })?;
-    } else {
-        let index = IndexSpec {
-            name: index_name,
-            columns: index_columns,
-            unique: false,
-        };
-        with_catalog_write(|catalog| catalog.add_index(table.schema_name(), table.name(), index))
-            .map_err(|err| EngineError {
-            message: err.message,
-        })?;
-    }
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "CREATE INDEX".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_create_sequence(
-    create: &CreateSequenceStatement,
-) -> Result<QueryResult, EngineError> {
-    let key = normalize_sequence_name(&create.name)?;
-    let increment = create.increment.unwrap_or(1);
-    if increment == 0 {
-        return Err(EngineError {
-            message: "INCREMENT must not be zero".to_string(),
-        });
-    }
-    let mut min_value = create
-        .min_value
-        .unwrap_or(Some(default_sequence_min_value(increment)))
-        .unwrap_or_else(|| default_sequence_min_value(increment));
-    let mut max_value = create
-        .max_value
-        .unwrap_or(Some(default_sequence_max_value(increment)))
-        .unwrap_or_else(|| default_sequence_max_value(increment));
-    if min_value > max_value {
-        return Err(EngineError {
-            message: "MINVALUE must be less than or equal to MAXVALUE".to_string(),
-        });
-    }
-    let start = create
-        .start
-        .unwrap_or_else(|| default_sequence_start(increment, min_value, max_value));
-    if start < min_value || start > max_value {
-        return Err(EngineError {
-            message: "START value is out of sequence bounds".to_string(),
-        });
-    }
-    let cycle = create.cycle.unwrap_or(false);
-    let cache = create.cache.unwrap_or(1);
-    if cache <= 0 {
-        return Err(EngineError {
-            message: "CACHE must be greater than zero".to_string(),
-        });
-    }
-    // Preserve explicit defaults after bounds checks in case caller provided NO MIN/MAX.
-    if create.min_value == Some(None) {
-        min_value = default_sequence_min_value(increment);
-    }
-    if create.max_value == Some(None) {
-        max_value = default_sequence_max_value(increment);
-    }
-
-    let inserted = with_sequences_write(|sequences| {
-        if sequences.contains_key(&key) {
-            return false;
-        }
-        sequences.insert(
-            key,
-            SequenceState {
-                start,
-                current: start,
-                increment,
-                min_value,
-                max_value,
-                cycle,
-                cache,
-                called: false,
-            },
-        );
-        true
-    });
-    if !inserted {
-        return Err(EngineError {
-            message: format!("sequence \"{}\" already exists", create.name.join(".")),
-        });
-    }
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "CREATE SEQUENCE".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_create_view(
-    create: &CreateViewStatement,
-    params: &[Option<String>],
-) -> Result<QueryResult, EngineError> {
-    let (schema_name, view_name) = relation_name_for_create(&create.name)?;
-    if create.or_replace {
-        let existing =
-            with_catalog_read(|catalog| catalog.table(&schema_name, &view_name).cloned());
-        if let Some(existing) = existing {
-            require_relation_owner(&existing)?;
-        }
-    }
-    let columns = derive_query_columns(&create.query)?;
-    let rows = if create.materialized && create.with_data {
-        execute_query(&create.query, params).await?.rows
-    } else {
-        Vec::new()
-    };
-    let oid = with_catalog_write(|catalog| {
-        if create.or_replace {
-            if catalog.table(&schema_name, &view_name).is_some() {
-                catalog.replace_view(
-                    &schema_name,
-                    &view_name,
-                    create.materialized,
-                    columns,
-                    create.query.clone(),
-                )
-            } else {
-                catalog.create_view(
-                    &schema_name,
-                    &view_name,
-                    create.materialized,
-                    columns,
-                    create.query.clone(),
-                )
-            }
-        } else {
-            catalog.create_view(
-                &schema_name,
-                &view_name,
-                create.materialized,
-                columns,
-                create.query.clone(),
-            )
-        }
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    if create.or_replace {
-        with_storage_write(|storage| {
-            storage.rows_by_table.remove(&oid);
-        });
-    }
-    if create.materialized {
-        with_storage_write(|storage| {
-            storage.rows_by_table.insert(oid, rows);
-        });
-    }
-    security::set_relation_owner(oid, &security::current_role());
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: if create.materialized {
-            "CREATE MATERIALIZED VIEW".to_string()
-        } else {
-            "CREATE VIEW".to_string()
-        },
-        rows_affected: 0,
-    })
-}
-
-async fn execute_refresh_materialized_view(
-    refresh: &RefreshMaterializedViewStatement,
-    params: &[Option<String>],
-) -> Result<QueryResult, EngineError> {
-    let relation = with_catalog_read(|catalog| {
-        catalog
-            .resolve_table(&refresh.name, &SearchPath::default())
-            .cloned()
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-    if relation.kind() != TableKind::MaterializedView {
-        return Err(EngineError {
-            message: format!(
-                "\"{}\" is not a materialized view",
-                relation.qualified_name()
-            ),
-        });
-    }
-    require_relation_owner(&relation)?;
-    if refresh.concurrently && !refresh.with_data {
-        return Err(EngineError {
-            message: "REFRESH MATERIALIZED VIEW CONCURRENTLY does not support WITH NO DATA"
-                .to_string(),
-        });
-    }
-    if refresh.concurrently && !relation.indexes().iter().any(|index| index.unique) {
-        return Err(EngineError {
-            message: format!(
-                "cannot refresh materialized view \"{}\" concurrently because it does not have a unique index",
-                relation.qualified_name()
-            ),
-        });
-    }
-    let _refresh_guard =
-        acquire_refresh_execution_guard(relation.oid(), &relation.qualified_name())?;
-    let rows = if refresh.concurrently {
-        evaluate_materialized_view_rows_concurrently(&relation, refresh.with_data, params).await?
-    } else {
-        evaluate_materialized_view_rows_live(&relation, refresh.with_data, params).await?
-    };
-    if refresh.concurrently {
-        let still_valid = with_catalog_read(|catalog| {
-            catalog
-                .table(relation.schema_name(), relation.name())
-                .is_some_and(|current| {
-                    current.oid() == relation.oid()
-                        && current.kind() == TableKind::MaterializedView
-                        && current.indexes().iter().any(|index| index.unique)
-                })
-        });
-        if !still_valid {
-            return Err(EngineError {
-                message: format!(
-                    "cannot refresh materialized view \"{}\" concurrently because it changed during refresh",
-                    relation.qualified_name()
-                ),
-            });
-        }
-    };
-    with_storage_write(|storage| {
-        storage.rows_by_table.insert(relation.oid(), rows);
-    });
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "REFRESH MATERIALIZED VIEW".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn evaluate_materialized_view_rows_live(
-    relation: &crate::catalog::Table,
-    with_data: bool,
-    params: &[Option<String>],
-) -> Result<Vec<Vec<ScalarValue>>, EngineError> {
-    if !with_data {
-        return Ok(Vec::new());
-    }
-    let definition = relation.view_definition().ok_or_else(|| EngineError {
-        message: format!(
-            "view definition for relation \"{}\" is missing",
-            relation.qualified_name()
-        ),
-    })?;
-    Ok(execute_query(definition, params).await?.rows)
-}
-
-async fn evaluate_materialized_view_rows_concurrently(
-    relation: &crate::catalog::Table,
-    with_data: bool,
-    params: &[Option<String>],
-) -> Result<Vec<Vec<ScalarValue>>, EngineError> {
-    let baseline = snapshot_state();
-    let evaluated = evaluate_materialized_view_rows_live(relation, with_data, params).await;
-    let post_eval = snapshot_state();
-    restore_state(baseline);
-    with_sequences_write(|sequences| {
-        *sequences = post_eval.sequences;
-    });
-    evaluated
-}
-
-async fn execute_alter_view(alter: &AlterViewStatement) -> Result<QueryResult, EngineError> {
-    let relation = with_catalog_read(|catalog| {
-        catalog
-            .resolve_table(&alter.name, &SearchPath::default())
-            .cloned()
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-    let expected_kind = if alter.materialized {
-        TableKind::MaterializedView
-    } else {
-        TableKind::View
-    };
-    if relation.kind() != expected_kind {
-        return Err(EngineError {
-            message: if alter.materialized {
-                format!(
-                    "\"{}\" is not a materialized view",
-                    relation.qualified_name()
-                )
-            } else {
-                format!("\"{}\" is not a view", relation.qualified_name())
-            },
-        });
-    }
-    require_relation_owner(&relation)?;
-
-    match &alter.action {
-        AlterViewAction::RenameTo { new_name } => {
-            with_catalog_write(|catalog| {
-                catalog.rename_relation(relation.schema_name(), relation.name(), new_name)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-        AlterViewAction::RenameColumn { old_name, new_name } => {
-            with_catalog_write(|catalog| {
-                catalog.rename_column(relation.schema_name(), relation.name(), old_name, new_name)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-        AlterViewAction::SetSchema { schema_name } => {
-            with_catalog_write(|catalog| {
-                catalog.move_relation_to_schema(
-                    relation.schema_name(),
-                    relation.name(),
-                    schema_name,
-                )
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-    }
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: if alter.materialized {
-            "ALTER MATERIALIZED VIEW".to_string()
-        } else {
-            "ALTER VIEW".to_string()
-        },
-        rows_affected: 0,
-    })
-}
-
-async fn execute_alter_sequence(
-    alter: &AlterSequenceStatement,
-) -> Result<QueryResult, EngineError> {
-    let key = normalize_sequence_name(&alter.name)?;
-    with_sequences_write(|sequences| {
-        let Some(state) = sequences.get_mut(&key) else {
-            return Err(EngineError {
-                message: format!("sequence \"{}\" does not exist", key),
-            });
-        };
-        for action in &alter.actions {
-            match action {
-                AlterSequenceAction::Restart { with } => {
-                    state.current = with.unwrap_or(state.start);
-                    state.called = false;
-                }
-                AlterSequenceAction::SetStart { start } => {
-                    state.start = *start;
-                    if !state.called {
-                        state.current = *start;
-                    }
-                }
-                AlterSequenceAction::SetIncrement { increment } => {
-                    if *increment == 0 {
-                        return Err(EngineError {
-                            message: "INCREMENT must not be zero".to_string(),
-                        });
-                    }
-                    state.increment = *increment;
-                }
-                AlterSequenceAction::SetMinValue { min } => {
-                    state.min_value =
-                        min.unwrap_or_else(|| default_sequence_min_value(state.increment));
-                }
-                AlterSequenceAction::SetMaxValue { max } => {
-                    state.max_value =
-                        max.unwrap_or_else(|| default_sequence_max_value(state.increment));
-                }
-                AlterSequenceAction::SetCycle { cycle } => {
-                    state.cycle = *cycle;
-                }
-                AlterSequenceAction::SetCache { cache } => {
-                    if *cache <= 0 {
-                        return Err(EngineError {
-                            message: "CACHE must be greater than zero".to_string(),
-                        });
-                    }
-                    state.cache = *cache;
-                }
-            }
-        }
-
-        if state.min_value > state.max_value {
-            return Err(EngineError {
-                message: "MINVALUE must be less than or equal to MAXVALUE".to_string(),
-            });
-        }
-        if state.start < state.min_value || state.start > state.max_value {
-            return Err(EngineError {
-                message: "START value is out of sequence bounds".to_string(),
-            });
-        }
-        if !state.called {
-            if state.current < state.min_value || state.current > state.max_value {
-                return Err(EngineError {
-                    message: "RESTART value is out of sequence bounds".to_string(),
-                });
-            }
-        } else if state.current < state.min_value || state.current > state.max_value {
-            return Err(EngineError {
-                message: "sequence current value is out of bounds after ALTER SEQUENCE".to_string(),
-            });
-        }
-        Ok(())
-    })?;
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "ALTER SEQUENCE".to_string(),
-        rows_affected: 0,
-    })
 }
 
 async fn execute_insert(
@@ -2379,421 +1490,6 @@ async fn execute_delete(
         rows: returning_rows,
         command_tag: "DELETE".to_string(),
         rows_affected: deleted,
-    })
-}
-
-fn drop_relations_by_oid_order(drop_order: &[Oid]) -> Result<(), EngineError> {
-    for table_oid in drop_order {
-        let ident = with_catalog_read(|catalog| describe_table_from_catalog(catalog, *table_oid))
-            .map_err(|err| EngineError {
-            message: err.message,
-        })?;
-        with_catalog_write(|catalog| catalog.drop_table(&ident.schema_name, &ident.table_name))
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        with_storage_write(|storage| {
-            storage.rows_by_table.remove(table_oid);
-        });
-        security::clear_relation_security(*table_oid);
-    }
-    Ok(())
-}
-
-async fn execute_drop_table(
-    drop_table: &DropTableStatement,
-) -> Result<QueryResult, EngineError> {
-    let resolved = with_catalog_read(|catalog| {
-        catalog
-            .resolve_table(&drop_table.name, &SearchPath::default())
-            .cloned()
-    });
-
-    let table = match resolved {
-        Ok(table) => table,
-        Err(_err) if drop_table.if_exists => {
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                command_tag: "DROP TABLE".to_string(),
-                rows_affected: 0,
-            });
-        }
-        Err(err) => {
-            return Err(EngineError {
-                message: err.message,
-            });
-        }
-    };
-
-    let drop_order = with_catalog_read(|catalog| {
-        expand_and_order_relation_drop_in_catalog(
-            catalog,
-            &[table.oid()],
-            matches!(drop_table.behavior, DropBehavior::Cascade),
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-    for relation_oid in &drop_order {
-        let relation =
-            with_catalog_read(|catalog| describe_table_from_catalog(catalog, *relation_oid))
-                .map_err(|err| EngineError {
-                    message: err.message,
-                })?;
-        let relation_table = with_catalog_read(|catalog| {
-            catalog
-                .table(&relation.schema_name, &relation.table_name)
-                .cloned()
-        })
-        .ok_or_else(|| EngineError {
-            message: format!(
-                "relation \"{}.{}\" does not exist",
-                relation.schema_name, relation.table_name
-            ),
-        })?;
-        require_relation_owner(&relation_table)?;
-    }
-    drop_relations_by_oid_order(&drop_order)?;
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "DROP TABLE".to_string(),
-        rows_affected: drop_order.len() as u64,
-    })
-}
-
-async fn execute_drop_schema(
-    drop_schema: &DropSchemaStatement,
-) -> Result<QueryResult, EngineError> {
-    let schema_name = drop_schema.name.to_ascii_lowercase();
-    let schema_tables = with_catalog_read(|catalog| {
-        catalog
-            .schema(&schema_name)
-            .map(|schema| schema.tables().map(|table| table.oid()).collect::<Vec<_>>())
-    });
-    let Some(initial_tables) = schema_tables else {
-        if drop_schema.if_exists {
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                command_tag: "DROP SCHEMA".to_string(),
-                rows_affected: 0,
-            });
-        }
-        return Err(EngineError {
-            message: format!("schema \"{}\" does not exist", drop_schema.name),
-        });
-    };
-
-    let schema_sequences = with_sequences_read(|sequences| {
-        let prefix = format!("{schema_name}.");
-        sequences
-            .keys()
-            .filter(|name| name.starts_with(&prefix))
-            .cloned()
-            .collect::<Vec<_>>()
-    });
-
-    if matches!(drop_schema.behavior, DropBehavior::Restrict)
-        && (!initial_tables.is_empty() || !schema_sequences.is_empty())
-    {
-        return Err(EngineError {
-            message: format!("schema \"{}\" is not empty", drop_schema.name),
-        });
-    }
-
-    let mut relation_oids = initial_tables;
-    if matches!(drop_schema.behavior, DropBehavior::Cascade) && !schema_sequences.is_empty() {
-        let sequence_plans = with_catalog_read(|catalog| {
-            schema_sequences
-                .iter()
-                .map(|sequence| plan_sequence_drop_in_catalog(catalog, sequence, true))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .map_err(|err| EngineError {
-            message: err.message,
-        })?;
-        for plan in sequence_plans {
-            for oid in plan.relation_drop_order {
-                if !relation_oids.contains(&oid) {
-                    relation_oids.push(oid);
-                }
-            }
-        }
-    }
-
-    let drop_order = with_catalog_read(|catalog| {
-        expand_and_order_relation_drop_in_catalog(
-            catalog,
-            &relation_oids,
-            matches!(drop_schema.behavior, DropBehavior::Cascade),
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-    for relation_oid in &drop_order {
-        let relation =
-            with_catalog_read(|catalog| describe_table_from_catalog(catalog, *relation_oid))
-                .map_err(|err| EngineError {
-                    message: err.message,
-                })?;
-        let relation_table = with_catalog_read(|catalog| {
-            catalog
-                .table(&relation.schema_name, &relation.table_name)
-                .cloned()
-        })
-        .ok_or_else(|| EngineError {
-            message: format!(
-                "relation \"{}.{}\" does not exist",
-                relation.schema_name, relation.table_name
-            ),
-        })?;
-        require_relation_owner(&relation_table)?;
-    }
-    drop_relations_by_oid_order(&drop_order)?;
-
-    if !schema_sequences.is_empty() {
-        for sequence_name in &schema_sequences {
-            with_catalog_write(|catalog| {
-                catalog.clear_sequence_defaults(sequence_name);
-            });
-        }
-        with_sequences_write(|sequences| {
-            for sequence_name in &schema_sequences {
-                sequences.remove(sequence_name);
-            }
-        });
-    }
-
-    with_catalog_write(|catalog| catalog.drop_schema(&schema_name)).map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "DROP SCHEMA".to_string(),
-        rows_affected: (drop_order.len() + schema_sequences.len()) as u64,
-    })
-}
-
-async fn execute_drop_index(
-    drop_index: &DropIndexStatement,
-) -> Result<QueryResult, EngineError> {
-    let resolved = resolve_index_target(&drop_index.name)?;
-    let Some(target) = resolved else {
-        if drop_index.if_exists {
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                command_tag: "DROP INDEX".to_string(),
-                rows_affected: 0,
-            });
-        }
-        return Err(EngineError {
-            message: format!("index \"{}\" does not exist", drop_index.name.join(".")),
-        });
-    };
-    let relation = with_catalog_read(|catalog| {
-        catalog
-            .table(&target.schema_name, &target.table_name)
-            .cloned()
-    })
-    .ok_or_else(|| EngineError {
-        message: format!(
-            "relation \"{}.{}\" does not exist",
-            target.schema_name, target.table_name
-        ),
-    })?;
-    require_relation_owner(&relation)?;
-
-    let backing_constraint = with_catalog_read(|catalog| {
-        index_backing_constraint_name_in_catalog(
-            catalog,
-            &target.schema_name,
-            &target.table_name,
-            &target.index_name,
-        )
-    });
-    if let Some(constraint_name) = backing_constraint
-        && matches!(drop_index.behavior, DropBehavior::Restrict)
-    {
-        return Err(EngineError {
-            message: format!(
-                "cannot drop index \"{}\" because constraint \"{}\" on relation \"{}.{}\" depends on it",
-                target.index_name, constraint_name, target.schema_name, target.table_name
-            ),
-        });
-    }
-
-    with_catalog_write(|catalog| {
-        catalog.drop_index(
-            &target.schema_name,
-            &target.table_name,
-            &target.index_name,
-            matches!(drop_index.behavior, DropBehavior::Cascade),
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "DROP INDEX".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_drop_sequence(
-    drop_sequence: &DropSequenceStatement,
-) -> Result<QueryResult, EngineError> {
-    let key = normalize_sequence_name(&drop_sequence.name)?;
-    let exists = with_sequences_read(|sequences| sequences.contains_key(&key));
-    if !exists {
-        if drop_sequence.if_exists {
-            return Ok(QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                command_tag: "DROP SEQUENCE".to_string(),
-                rows_affected: 0,
-            });
-        }
-        return Err(EngineError {
-            message: format!("sequence \"{}\" does not exist", key),
-        });
-    }
-
-    let dependency_plan = with_catalog_read(|catalog| {
-        plan_sequence_drop_in_catalog(
-            catalog,
-            &key,
-            matches!(drop_sequence.behavior, DropBehavior::Cascade),
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    if !dependency_plan.default_dependents.is_empty() {
-        with_catalog_write(|catalog| {
-            catalog.clear_sequence_defaults(&key);
-        });
-    }
-    if !dependency_plan.relation_drop_order.is_empty() {
-        drop_relations_by_oid_order(&dependency_plan.relation_drop_order)?;
-    }
-
-    with_sequences_write(|sequences| {
-        sequences.remove(&key);
-    });
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "DROP SEQUENCE".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_drop_view(
-    drop_view: &DropViewStatement,
-) -> Result<QueryResult, EngineError> {
-    let expected_kind = if drop_view.materialized {
-        TableKind::MaterializedView
-    } else {
-        TableKind::View
-    };
-
-    let mut base_oids = Vec::new();
-    for name in &drop_view.names {
-        let resolved = with_catalog_read(|catalog| {
-            catalog.resolve_table(name, &SearchPath::default()).cloned()
-        });
-        let relation = match resolved {
-            Ok(table) => table,
-            Err(_err) if drop_view.if_exists => continue,
-            Err(err) => {
-                return Err(EngineError {
-                    message: err.message,
-                });
-            }
-        };
-        if relation.kind() != expected_kind {
-            return Err(EngineError {
-                message: if drop_view.materialized {
-                    format!(
-                        "\"{}\" is not a materialized view",
-                        relation.qualified_name()
-                    )
-                } else {
-                    format!("\"{}\" is not a view", relation.qualified_name())
-                },
-            });
-        }
-        require_relation_owner(&relation)?;
-        if !base_oids.iter().any(|oid| oid == &relation.oid()) {
-            base_oids.push(relation.oid());
-        }
-    }
-    if base_oids.is_empty() {
-        return Ok(QueryResult {
-            columns: Vec::new(),
-            rows: Vec::new(),
-            command_tag: if drop_view.materialized {
-                "DROP MATERIALIZED VIEW".to_string()
-            } else {
-                "DROP VIEW".to_string()
-            },
-            rows_affected: 0,
-        });
-    }
-
-    let drop_order = with_catalog_read(|catalog| {
-        expand_and_order_relation_drop_in_catalog(
-            catalog,
-            &base_oids,
-            matches!(drop_view.behavior, DropBehavior::Cascade),
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-    for relation_oid in &drop_order {
-        let relation =
-            with_catalog_read(|catalog| describe_table_from_catalog(catalog, *relation_oid))
-                .map_err(|err| EngineError {
-                    message: err.message,
-                })?;
-        let relation_table = with_catalog_read(|catalog| {
-            catalog
-                .table(&relation.schema_name, &relation.table_name)
-                .cloned()
-        })
-        .ok_or_else(|| EngineError {
-            message: format!(
-                "relation \"{}.{}\" does not exist",
-                relation.schema_name, relation.table_name
-            ),
-        })?;
-        require_relation_owner(&relation_table)?;
-    }
-    drop_relations_by_oid_order(&drop_order)?;
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: if drop_view.materialized {
-            "DROP MATERIALIZED VIEW".to_string()
-        } else {
-            "DROP VIEW".to_string()
-        },
-        rows_affected: drop_order.len() as u64,
     })
 }
 
@@ -3368,530 +2064,6 @@ async fn execute_merge(
     })
 }
 
-async fn execute_truncate(
-    truncate: &TruncateStatement,
-) -> Result<QueryResult, EngineError> {
-    let mut base_table_oids = Vec::with_capacity(truncate.table_names.len());
-    for table_name in &truncate.table_names {
-        let table = with_catalog_read(|catalog| {
-            catalog
-                .resolve_table(table_name, &SearchPath::default())
-                .cloned()
-        })
-        .map_err(|err| EngineError {
-            message: err.message,
-        })?;
-        if table.kind() != TableKind::Heap {
-            return Err(EngineError {
-                message: format!(
-                    "cannot truncate system relation \"{}\"",
-                    table.qualified_name()
-                ),
-            });
-        }
-        require_relation_privilege(&table, TablePrivilege::Truncate)?;
-        if !base_table_oids.iter().any(|oid| oid == &table.oid()) {
-            base_table_oids.push(table.oid());
-        }
-    }
-
-    let targets = with_catalog_read(|catalog| {
-        expand_table_dependencies_in_catalog(
-            catalog,
-            &base_table_oids,
-            matches!(truncate.behavior, DropBehavior::Cascade),
-        )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-    for relation_oid in &targets {
-        let relation =
-            with_catalog_read(|catalog| describe_table_from_catalog(catalog, *relation_oid))
-                .map_err(|err| EngineError {
-                    message: err.message,
-                })?;
-        let relation_table = with_catalog_read(|catalog| {
-            catalog
-                .table(&relation.schema_name, &relation.table_name)
-                .cloned()
-        })
-        .ok_or_else(|| EngineError {
-            message: format!(
-                "relation \"{}.{}\" does not exist",
-                relation.schema_name, relation.table_name
-            ),
-        })?;
-        require_relation_privilege(&relation_table, TablePrivilege::Truncate)?;
-    }
-    with_storage_write(|storage| {
-        for table_oid in &targets {
-            storage.rows_by_table.insert(*table_oid, Vec::new());
-        }
-    });
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "TRUNCATE".to_string(),
-        rows_affected: targets.len() as u64,
-    })
-}
-
-async fn execute_alter_table(
-    alter_table: &AlterTableStatement,
-) -> Result<QueryResult, EngineError> {
-    let table = with_catalog_read(|catalog| {
-        catalog
-            .resolve_table(&alter_table.table_name, &SearchPath::default())
-            .cloned()
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
-
-    if table.kind() != TableKind::Heap {
-        return Err(EngineError {
-            message: format!(
-                "cannot ALTER non-heap relation \"{}\"",
-                table.qualified_name()
-            ),
-        });
-    }
-    require_relation_owner(&table)?;
-
-    match &alter_table.action {
-        AlterTableAction::AddColumn(column_def) => {
-            let column_spec = column_spec_from_ast(column_def)?;
-            let default_value = if let Some(default_expr) = &column_spec.default {
-                let raw = eval_expr(default_expr, &EvalScope::default(), &[]).await?;
-                Some(coerce_value_for_column_spec(raw, &column_spec)?)
-            } else {
-                None
-            };
-            if !column_spec.nullable && default_value.is_none() {
-                let has_rows = with_storage_read(|storage| {
-                    storage
-                        .rows_by_table
-                        .get(&table.oid())
-                        .is_some_and(|rows| !rows.is_empty())
-                });
-                if has_rows {
-                    return Err(EngineError {
-                        message:
-                            "ALTER TABLE ADD COLUMN with NOT NULL requires empty table or DEFAULT"
-                                .to_string(),
-                    });
-                }
-            }
-
-            with_catalog_write(|catalog| {
-                catalog.add_column(table.schema_name(), table.name(), column_spec)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-
-            with_storage_write(|storage| {
-                let rows = storage.rows_by_table.entry(table.oid()).or_default();
-                for row in rows.iter_mut() {
-                    row.push(default_value.clone().unwrap_or(ScalarValue::Null));
-                }
-            });
-        }
-        AlterTableAction::AddConstraint(constraint) => {
-            let current_rows = with_storage_read(|storage| {
-                storage
-                    .rows_by_table
-                    .get(&table.oid())
-                    .cloned()
-                    .unwrap_or_default()
-            });
-            let preview = preview_table_with_added_constraint(&table, constraint)?;
-            validate_table_constraints(&preview, &current_rows).await?;
-
-            match constraint {
-                TableConstraint::PrimaryKey { .. } | TableConstraint::Unique { .. } => {
-                    let mut specs =
-                        key_constraint_specs_from_ast(std::slice::from_ref(constraint))?;
-                    let spec = specs.pop().expect("one key spec for add constraint");
-                    with_catalog_write(|catalog| {
-                        catalog.add_key_constraint(table.schema_name(), table.name(), spec)
-                    })
-                    .map_err(|err| EngineError {
-                        message: err.message,
-                    })?;
-                }
-                TableConstraint::ForeignKey { .. } => {
-                    let mut specs =
-                        foreign_key_constraint_specs_from_ast(std::slice::from_ref(constraint))?;
-                    let spec = specs.pop().expect("one fk spec for add constraint");
-                    with_catalog_write(|catalog| {
-                        catalog.add_foreign_key_constraint(table.schema_name(), table.name(), spec)
-                    })
-                    .map_err(|err| EngineError {
-                        message: err.message,
-                    })?;
-                }
-            }
-        }
-        AlterTableAction::DropColumn { name } => {
-            let dropped_index = with_catalog_write(|catalog| {
-                catalog.drop_column(table.schema_name(), table.name(), name)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-
-            with_storage_write(|storage| {
-                let rows = storage.rows_by_table.entry(table.oid()).or_default();
-                for row in rows.iter_mut() {
-                    if dropped_index < row.len() {
-                        row.remove(dropped_index);
-                    }
-                }
-            });
-        }
-        AlterTableAction::DropConstraint { name } => {
-            with_catalog_write(|catalog| {
-                catalog.drop_constraint(table.schema_name(), table.name(), name)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-        AlterTableAction::RenameColumn { old_name, new_name } => {
-            with_catalog_write(|catalog| {
-                catalog.rename_column(table.schema_name(), table.name(), old_name, new_name)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-        AlterTableAction::SetColumnNullable { name, nullable } => {
-            if !*nullable {
-                let index = find_column_index(&table, name)?;
-                let has_nulls = with_storage_read(|storage| {
-                    storage.rows_by_table.get(&table.oid()).is_some_and(|rows| {
-                        rows.iter()
-                            .any(|row| matches!(row.get(index), Some(ScalarValue::Null)))
-                    })
-                });
-                if has_nulls {
-                    return Err(EngineError {
-                        message: format!(
-                            "column \"{}\" of relation \"{}\" contains null values",
-                            name,
-                            table.qualified_name()
-                        ),
-                    });
-                }
-            }
-
-            with_catalog_write(|catalog| {
-                catalog.set_column_nullable(table.schema_name(), table.name(), name, *nullable)
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-        AlterTableAction::SetColumnDefault { name, default } => {
-            with_catalog_write(|catalog| {
-                catalog.set_column_default(table.schema_name(), table.name(), name, default.clone())
-            })
-            .map_err(|err| EngineError {
-                message: err.message,
-            })?;
-        }
-    }
-
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "ALTER TABLE".to_string(),
-        rows_affected: 0,
-    })
-}
-
-fn relation_name_for_create(name: &[String]) -> Result<(String, String), EngineError> {
-    match name {
-        [table_name] => Ok(("public".to_string(), table_name.to_ascii_lowercase())),
-        [schema_name, table_name] => Ok((
-            schema_name.to_ascii_lowercase(),
-            table_name.to_ascii_lowercase(),
-        )),
-        _ => Err(EngineError {
-            message: format!("invalid relation name \"{}\"", name.join(".")),
-        }),
-    }
-}
-
-fn normalize_sequence_name(name: &[String]) -> Result<String, EngineError> {
-    match name {
-        [seq_name] => Ok(format!("public.{}", seq_name.to_ascii_lowercase())),
-        [schema_name, seq_name] => Ok(format!(
-            "{}.{}",
-            schema_name.to_ascii_lowercase(),
-            seq_name.to_ascii_lowercase()
-        )),
-        _ => Err(EngineError {
-            message: format!("invalid sequence name \"{}\"", name.join(".")),
-        }),
-    }
-}
-
-fn normalize_sequence_name_from_text(raw: &str) -> Result<String, EngineError> {
-    let parts = raw
-        .split('.')
-        .map(|part| part.trim())
-        .filter(|part| !part.is_empty())
-        .map(|part| part.to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    match parts.as_slice() {
-        [seq_name] => Ok(format!("public.{seq_name}")),
-        [schema_name, seq_name] => Ok(format!("{schema_name}.{seq_name}")),
-        _ => Err(EngineError {
-            message: format!("invalid sequence name \"{}\"", raw),
-        }),
-    }
-}
-
-#[derive(Debug, Clone)]
-struct IndexTarget {
-    schema_name: String,
-    table_name: String,
-    index_name: String,
-}
-
-fn resolve_index_target(index_name: &[String]) -> Result<Option<IndexTarget>, EngineError> {
-    match index_name {
-        [name] => {
-            let normalized_name = name.to_ascii_lowercase();
-            let mut matches = Vec::new();
-            with_catalog_read(|catalog| {
-                for schema_name in SearchPath::default().schemas() {
-                    let Some(schema) = catalog.schema(schema_name) else {
-                        continue;
-                    };
-                    for table in schema.tables() {
-                        if table
-                            .indexes()
-                            .iter()
-                            .any(|index| index.name == normalized_name)
-                        {
-                            matches.push(IndexTarget {
-                                schema_name: schema.name().to_string(),
-                                table_name: table.name().to_string(),
-                                index_name: normalized_name.clone(),
-                            });
-                        }
-                    }
-                }
-            });
-            if matches.len() > 1 {
-                return Err(EngineError {
-                    message: format!("index reference \"{}\" is ambiguous", name),
-                });
-            }
-            Ok(matches.pop())
-        }
-        [schema_name, name] => {
-            let normalized_schema = schema_name.to_ascii_lowercase();
-            let normalized_name = name.to_ascii_lowercase();
-            let mut found = None;
-            with_catalog_read(|catalog| {
-                if let Some(schema) = catalog.schema(&normalized_schema) {
-                    for table in schema.tables() {
-                        if table
-                            .indexes()
-                            .iter()
-                            .any(|index| index.name == normalized_name)
-                        {
-                            found = Some(IndexTarget {
-                                schema_name: normalized_schema.clone(),
-                                table_name: table.name().to_string(),
-                                index_name: normalized_name.clone(),
-                            });
-                            break;
-                        }
-                    }
-                }
-            });
-            Ok(found)
-        }
-        _ => Err(EngineError {
-            message: format!("invalid index name \"{}\"", index_name.join(".")),
-        }),
-    }
-}
-
-fn default_sequence_min_value(increment: i64) -> i64 {
-    if increment > 0 { 1 } else { i64::MIN }
-}
-
-fn default_sequence_max_value(increment: i64) -> i64 {
-    if increment > 0 { i64::MAX } else { -1 }
-}
-
-fn default_sequence_start(increment: i64, min_value: i64, max_value: i64) -> i64 {
-    if increment > 0 { min_value } else { max_value }
-}
-
-fn column_spec_from_ast(
-    column: &crate::parser::ast::ColumnDefinition,
-) -> Result<ColumnSpec, EngineError> {
-    if column.name.trim().is_empty() {
-        return Err(EngineError {
-            message: "column name cannot be empty".to_string(),
-        });
-    }
-
-    let references = if let Some(reference) = &column.references {
-        if reference.table_name.is_empty() {
-            return Err(EngineError {
-                message: format!("column \"{}\" has invalid REFERENCES target", column.name),
-            });
-        }
-        Some(crate::catalog::ForeignKeySpec {
-            table_name: reference
-                .table_name
-                .iter()
-                .map(|part| part.to_ascii_lowercase())
-                .collect(),
-            column_name: reference
-                .column_name
-                .as_ref()
-                .map(|name| name.to_ascii_lowercase()),
-            on_delete: reference.on_delete,
-            on_update: reference.on_update,
-        })
-    } else {
-        None
-    };
-
-    Ok(ColumnSpec {
-        name: column.name.to_ascii_lowercase(),
-        type_signature: type_signature_from_ast(column.data_type.clone()),
-        nullable: column.nullable && !column.primary_key,
-        unique: column.unique || column.primary_key,
-        primary_key: column.primary_key,
-        references,
-        check: column.check.clone(),
-        default: column.default.clone(),
-    })
-}
-
-fn key_constraint_specs_from_ast(
-    constraints: &[TableConstraint],
-) -> Result<Vec<crate::catalog::KeyConstraintSpec>, EngineError> {
-    let mut out = Vec::new();
-    for constraint in constraints {
-        match constraint {
-            TableConstraint::PrimaryKey { name, columns } => {
-                if columns.is_empty() {
-                    return Err(EngineError {
-                        message: "PRIMARY KEY requires at least one column".to_string(),
-                    });
-                }
-                out.push(crate::catalog::KeyConstraintSpec {
-                    name: name.as_ref().map(|name| name.to_ascii_lowercase()),
-                    columns: columns
-                        .iter()
-                        .map(|column| column.to_ascii_lowercase())
-                        .collect(),
-                    primary: true,
-                });
-            }
-            TableConstraint::Unique { name, columns } => {
-                if columns.is_empty() {
-                    return Err(EngineError {
-                        message: "UNIQUE requires at least one column".to_string(),
-                    });
-                }
-                out.push(crate::catalog::KeyConstraintSpec {
-                    name: name.as_ref().map(|name| name.to_ascii_lowercase()),
-                    columns: columns
-                        .iter()
-                        .map(|column| column.to_ascii_lowercase())
-                        .collect(),
-                    primary: false,
-                });
-            }
-            TableConstraint::ForeignKey { .. } => {}
-        }
-    }
-    Ok(out)
-}
-
-fn foreign_key_constraint_specs_from_ast(
-    constraints: &[TableConstraint],
-) -> Result<Vec<crate::catalog::ForeignKeyConstraintSpec>, EngineError> {
-    let mut out = Vec::new();
-    for constraint in constraints {
-        let TableConstraint::ForeignKey {
-            name,
-            columns,
-            referenced_table,
-            referenced_columns,
-            on_delete,
-            on_update,
-        } = constraint
-        else {
-            continue;
-        };
-        if columns.is_empty() {
-            return Err(EngineError {
-                message: "FOREIGN KEY requires at least one referencing column".to_string(),
-            });
-        }
-        if referenced_table.is_empty() {
-            return Err(EngineError {
-                message: "FOREIGN KEY REFERENCES target cannot be empty".to_string(),
-            });
-        }
-        if !referenced_columns.is_empty() && columns.len() != referenced_columns.len() {
-            return Err(EngineError {
-                message: format!(
-                    "FOREIGN KEY has {} referencing columns but {} referenced columns",
-                    columns.len(),
-                    referenced_columns.len()
-                ),
-            });
-        }
-
-        out.push(crate::catalog::ForeignKeyConstraintSpec {
-            name: name.as_ref().map(|name| name.to_ascii_lowercase()),
-            columns: columns
-                .iter()
-                .map(|column| column.to_ascii_lowercase())
-                .collect(),
-            referenced_table: referenced_table
-                .iter()
-                .map(|part| part.to_ascii_lowercase())
-                .collect(),
-            referenced_columns: referenced_columns
-                .iter()
-                .map(|column| column.to_ascii_lowercase())
-                .collect(),
-            on_delete: *on_delete,
-            on_update: *on_update,
-        });
-    }
-    Ok(out)
-}
-
-fn type_signature_from_ast(ty: TypeName) -> TypeSignature {
-    match ty {
-        TypeName::Bool => TypeSignature::Bool,
-        TypeName::Int2 | TypeName::Int4 | TypeName::Int8 | TypeName::Serial | TypeName::BigSerial => TypeSignature::Int8,
-        TypeName::Float4 | TypeName::Float8 | TypeName::Numeric => TypeSignature::Float8,
-        TypeName::Text | TypeName::Varchar | TypeName::Char | TypeName::Bytea | TypeName::Uuid
-        | TypeName::Json | TypeName::Jsonb | TypeName::Interval => TypeSignature::Text,
-        TypeName::Date => TypeSignature::Date,
-        TypeName::Timestamp | TypeName::TimestampTz => TypeSignature::Timestamp,
-    }
-}
-
 fn type_signature_to_oid(ty: TypeSignature) -> u32 {
     match ty {
         TypeSignature::Bool => PG_BOOL_OID,
@@ -3987,7 +2159,7 @@ fn resolve_update_assignment_targets<'a>(
     Ok(out)
 }
 
-fn find_column_index(
+pub(crate) fn find_column_index(
     table: &crate::catalog::Table,
     column_name: &str,
 ) -> Result<usize, EngineError> {
@@ -4066,7 +2238,7 @@ fn resolve_on_conflict_target_indexes(
         .collect::<Result<Vec<_>, _>>()
 }
 
-async fn validate_table_constraints(
+pub(crate) async fn validate_table_constraints(
     table: &crate::catalog::Table,
     candidate_rows: &[Vec<ScalarValue>],
 ) -> Result<(), EngineError> {
@@ -4692,14 +2864,16 @@ fn primary_key_columns(table: &crate::catalog::Table) -> Result<Vec<String>, Eng
         })
 }
 
-fn preview_table_with_added_constraint(
+pub(crate) fn preview_table_with_added_constraint(
     table: &crate::catalog::Table,
     constraint: &TableConstraint,
 ) -> Result<crate::catalog::Table, EngineError> {
     let mut preview = table.clone();
     match constraint {
         TableConstraint::PrimaryKey { .. } | TableConstraint::Unique { .. } => {
-            let mut specs = key_constraint_specs_from_ast(std::slice::from_ref(constraint))?;
+            let mut specs = crate::commands::create_table::key_constraint_specs_from_ast(
+                std::slice::from_ref(constraint),
+            )?;
             let spec = specs.pop().expect("one key constraint spec");
             if let Some(name) = &spec.name
                 && table_constraint_name_exists(&preview, name)
@@ -4748,8 +2922,9 @@ fn preview_table_with_added_constraint(
             }
         }
         TableConstraint::ForeignKey { .. } => {
-            let mut specs =
-                foreign_key_constraint_specs_from_ast(std::slice::from_ref(constraint))?;
+            let mut specs = crate::commands::create_table::foreign_key_constraint_specs_from_ast(
+                std::slice::from_ref(constraint),
+            )?;
             let spec = specs.pop().expect("one foreign key constraint spec");
             if let Some(name) = &spec.name
                 && table_constraint_name_exists(&preview, name)
@@ -4822,7 +2997,7 @@ fn scalar_key(value: &ScalarValue) -> String {
     }
 }
 
-fn coerce_value_for_column_spec(
+pub(crate) fn coerce_value_for_column_spec(
     value: ScalarValue,
     spec: &ColumnSpec,
 ) -> Result<ScalarValue, EngineError> {
@@ -5369,7 +3544,7 @@ fn derive_select_output_columns(
     Ok(columns)
 }
 
-fn derive_query_columns(query: &Query) -> Result<Vec<String>, EngineError> {
+pub(crate) fn derive_query_columns(query: &Query) -> Result<Vec<String>, EngineError> {
     let mut ctes = HashMap::new();
     derive_query_columns_with_ctes(query, &mut ctes)
 }
@@ -6536,7 +4711,7 @@ fn table_function_output_type_oids(function: &TableFunctionRef, count: usize) ->
     oids
 }
 
-async fn execute_query(
+pub(crate) async fn execute_query(
     query: &Query,
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
@@ -7932,15 +6107,18 @@ fn virtual_relation_rows(
             ]])
         }
         ("pg_catalog", "pg_settings") => {
-            let guc = global_guc().read().expect("guc lock");
-            Ok(guc.iter().map(|(name, value)| {
+            Ok(crate::commands::variable::with_guc_read(|guc| {
+                guc.iter()
+                    .map(|(name, value)| {
                 vec![
                     ScalarValue::Text(name.clone()),
                     ScalarValue::Text(value.clone()),
                     ScalarValue::Text("Ungrouped".to_string()),
                     ScalarValue::Text(String::new()),
                 ]
-            }).collect())
+            })
+                    .collect()
+            }))
         }
         ("pg_catalog", "pg_tables") => {
             with_catalog_read(|catalog| {
@@ -9869,7 +8047,7 @@ fn parse_non_negative_int(value: &ScalarValue, what: &str) -> Result<usize, Engi
 }
 
 #[derive(Debug, Clone, Default)]
-struct EvalScope {
+pub(crate) struct EvalScope {
     unqualified: HashMap<String, ScalarValue>,
     qualified: HashMap<String, ScalarValue>,
     ambiguous: HashSet<String>,
@@ -9992,7 +8170,7 @@ impl EvalScope {
     }
 }
 
-fn eval_expr<'a>(
+pub(crate) fn eval_expr<'a>(
     expr: &'a Expr,
     scope: &'a EvalScope,
     params: &'a [Option<String>],
@@ -15958,62 +14136,6 @@ fn civil_from_days(days: i64) -> DateValue {
     }
 }
 
-fn sequence_next_value(state: &mut SequenceState, sequence_name: &str) -> Result<i64, EngineError> {
-    if !state.called {
-        state.called = true;
-        if state.current < state.min_value || state.current > state.max_value {
-            return Err(EngineError {
-                message: format!("sequence \"{}\" is out of bounds", sequence_name),
-            });
-        }
-        return Ok(state.current);
-    }
-
-    let next = state
-        .current
-        .checked_add(state.increment)
-        .ok_or_else(|| EngineError {
-            message: format!("sequence \"{}\" overflowed", sequence_name),
-        })?;
-    if next >= state.min_value && next <= state.max_value {
-        state.current = next;
-        return Ok(next);
-    }
-    if !state.cycle {
-        return Err(EngineError {
-            message: format!(
-                "nextval: sequence \"{}\" has reached its limit",
-                sequence_name
-            ),
-        });
-    }
-    state.current = if state.increment > 0 {
-        state.min_value
-    } else {
-        state.max_value
-    };
-    Ok(state.current)
-}
-
-fn set_sequence_value(
-    state: &mut SequenceState,
-    sequence_name: &str,
-    value: i64,
-    is_called: bool,
-) -> Result<(), EngineError> {
-    if value < state.min_value || value > state.max_value {
-        return Err(EngineError {
-            message: format!(
-                "setval: value {} is out of bounds for sequence \"{}\"",
-                value, sequence_name
-            ),
-        });
-    }
-    state.current = value;
-    state.called = is_called;
-    Ok(())
-}
-
 fn parse_i64_scalar(value: &ScalarValue, message: &str) -> Result<i64, EngineError> {
     match value {
         ScalarValue::Int(v) => Ok(*v),
@@ -16078,105 +14200,6 @@ fn truthy(value: &ScalarValue) -> bool {
 }
 
 // ── Extension & Function execution ──────────────────────────────────────────
-
-async fn execute_create_extension(
-    create: &CreateExtensionStatement,
-) -> Result<QueryResult, EngineError> {
-    let name = create.name.to_ascii_lowercase();
-    with_ext_write(|ext| {
-        if ext.extensions.iter().any(|e| e.name == name) {
-            if create.if_not_exists {
-                return Ok(());
-            }
-            return Err(EngineError {
-                message: format!("extension \"{}\" already exists", name),
-            });
-        }
-        let (version, description) = match name.as_str() {
-            "ws" => ("1.0".to_string(), "WebSocket client extension".to_string()),
-            _ => {
-                return Err(EngineError {
-                    message: format!("extension \"{}\" is not available", name),
-                });
-            }
-        };
-        ext.extensions.push(ExtensionRecord {
-            name: name.clone(),
-            version,
-            description,
-        });
-        // Register ws extension functions as built-in markers
-        if name == "ws" {
-            ext.ws_next_id = 1;
-            ext.ws_connections.clear();
-        }
-        Ok(())
-    })?;
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "CREATE EXTENSION".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_drop_extension(
-    drop_ext: &DropExtensionStatement,
-) -> Result<QueryResult, EngineError> {
-    let name = drop_ext.name.to_ascii_lowercase();
-    with_ext_write(|ext| {
-        let before = ext.extensions.len();
-        ext.extensions.retain(|e| e.name != name);
-        if ext.extensions.len() == before && !drop_ext.if_exists {
-            return Err(EngineError {
-                message: format!("extension \"{}\" does not exist", name),
-            });
-        }
-        if name == "ws" {
-            ext.ws_connections.clear();
-            // Remove ws extension functions
-            ext.user_functions.retain(|f| {
-                f.name.first().map(|s| s.as_str()) != Some("ws")
-            });
-        }
-        Ok(())
-    })?;
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "DROP EXTENSION".to_string(),
-        rows_affected: 0,
-    })
-}
-
-async fn execute_create_function(
-    create: &CreateFunctionStatement,
-) -> Result<QueryResult, EngineError> {
-    let uf = UserFunction {
-        name: create.name.iter().map(|s| s.to_ascii_lowercase()).collect(),
-        params: create.params.clone(),
-        return_type: create.return_type.clone(),
-        body: create.body.trim().to_string(),
-        language: create.language.clone(),
-    };
-    with_ext_write(|ext| {
-        if create.or_replace {
-            ext.user_functions.retain(|f| f.name != uf.name);
-        } else if ext.user_functions.iter().any(|f| f.name == uf.name) {
-            return Err(EngineError {
-                message: format!("function \"{}\" already exists", uf.name.join(".")),
-            });
-        }
-        ext.user_functions.push(uf);
-        Ok(())
-    })?;
-    Ok(QueryResult {
-        columns: Vec::new(),
-        rows: Vec::new(),
-        command_tag: "CREATE FUNCTION".to_string(),
-        rows_affected: 0,
-    })
-}
 
 fn is_ws_extension_loaded() -> bool {
     with_ext_read(|ext| ext.extensions.iter().any(|e| e.name == "ws"))
