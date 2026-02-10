@@ -1,4 +1,5 @@
 use crate::parser::ast::{ExplainStatement, QueryExpr, Statement, TableExpression};
+use crate::planner::{self, PlanNode};
 use crate::tcop::engine::{execute_planned_query, plan_statement, EngineError, QueryResult, ScalarValue};
 
 pub async fn execute_explain(
@@ -6,7 +7,11 @@ pub async fn execute_explain(
     params: &[Option<String>],
 ) -> Result<QueryResult, EngineError> {
     let mut plan_lines = Vec::new();
-    describe_statement_plan(&explain.statement, &mut plan_lines, 0);
+    let planned = planner::plan(&explain.statement);
+    match planned {
+        PlanNode::PassThrough(statement) => describe_statement_plan(&statement, &mut plan_lines, 0),
+        other => other.explain(&mut plan_lines, 0),
+    }
 
     if explain.analyze {
         let start = std::time::Instant::now();

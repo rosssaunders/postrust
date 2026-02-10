@@ -38,6 +38,7 @@ use crate::parser::ast::{
     MergeStatement, MergeWhenClause, OnConflictClause, Statement, TableConstraint,
     UpdateStatement,
 };
+use crate::planner::{self, PlanNode};
 use crate::security::{self, RlsCommand, TablePrivilege};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +69,7 @@ pub struct QueryResult {
 
 #[derive(Debug, Clone)]
 pub struct PlannedQuery {
-    statement: Statement,
+    plan: PlanNode,
     columns: Vec<String>,
     column_type_oids: Vec<u32>,
     returns_data: bool,
@@ -97,6 +98,7 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
     // Run semantic analysis before planning
     let search_path = crate::catalog::SearchPath::default();
     crate::analyzer::analyze(&statement, &search_path)?;
+    let plan = planner::plan(&statement);
 
     let (columns, column_type_oids, returns_data, command_tag) = match &statement {
         Statement::Query(query) => {
@@ -143,16 +145,12 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
                 "ALTER VIEW".to_string()
             },
         ),
-        Statement::CreateRole(_)
-        | Statement::AlterRole(_)
-        | Statement::DropRole(_)
-        | Statement::Grant(_)
-        | Statement::Revoke(_)
-        | Statement::Copy(_) => {
-            return Err(EngineError {
-                message: "utility statement is not supported by planner".to_string(),
-            });
-        }
+        Statement::CreateRole(_) => (Vec::new(), Vec::new(), false, "CREATE ROLE".to_string()),
+        Statement::AlterRole(_) => (Vec::new(), Vec::new(), false, "ALTER ROLE".to_string()),
+        Statement::DropRole(_) => (Vec::new(), Vec::new(), false, "DROP ROLE".to_string()),
+        Statement::Grant(_) => (Vec::new(), Vec::new(), false, "GRANT".to_string()),
+        Statement::Revoke(_) => (Vec::new(), Vec::new(), false, "REVOKE".to_string()),
+        Statement::Copy(_) => (Vec::new(), Vec::new(), false, "COPY".to_string()),
         Statement::Insert(insert) => {
             let columns = derive_dml_returning_columns(&insert.table_name, &insert.returning)?;
             let oids =
@@ -230,15 +228,20 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
         Statement::CreateExtension(_) => (Vec::new(), Vec::new(), false, "CREATE EXTENSION".to_string()),
         Statement::DropExtension(_) => (Vec::new(), Vec::new(), false, "DROP EXTENSION".to_string()),
         Statement::CreateFunction(_) => (Vec::new(), Vec::new(), false, "CREATE FUNCTION".to_string()),
-        Statement::Transaction(_) => {
-            return Err(EngineError {
-                message: "transaction statements must be executed via the session protocol"
-                    .to_string(),
-            });
+        Statement::Transaction(statement) => {
+            let tag = match statement {
+                crate::parser::ast::TransactionStatement::Begin => "BEGIN",
+                crate::parser::ast::TransactionStatement::Commit => "COMMIT",
+                crate::parser::ast::TransactionStatement::Rollback => "ROLLBACK",
+                crate::parser::ast::TransactionStatement::Savepoint(_) => "SAVEPOINT",
+                crate::parser::ast::TransactionStatement::ReleaseSavepoint(_) => "RELEASE",
+                crate::parser::ast::TransactionStatement::RollbackToSavepoint(_) => "ROLLBACK",
+            };
+            (Vec::new(), Vec::new(), false, tag.to_string())
         }
     };
     Ok(PlannedQuery {
-        statement,
+        plan,
         columns,
         column_type_oids,
         returns_data,
@@ -251,21 +254,28 @@ pub fn execute_planned_query<'a>(
     params: &'a [Option<String>],
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<QueryResult, EngineError>> + 'a>> {
     Box::pin(async move {
-    let result = match &plan.statement {
-        Statement::Query(query) => execute_query(query, params).await?,
-        Statement::Insert(insert) => execute_insert(insert, params).await?,
-        Statement::Update(update) => execute_update(update, params).await?,
-        Statement::Delete(delete) => execute_delete(delete, params).await?,
-        Statement::Merge(merge) => execute_merge(merge, params).await?,
-        Statement::Transaction(_) => {
-            return Err(EngineError {
-                message: "transaction statements must be executed via the session protocol"
-                    .to_string(),
-            });
-        }
-        _ => crate::tcop::utility::execute_utility_statement(&plan.statement, params).await?,
-    };
-    Ok(result)
+        let result = match &plan.plan {
+            PlanNode::Query(query_plan) => execute_query(&query_plan.query, params).await?,
+            PlanNode::Insert(insert_plan) => execute_insert(&insert_plan.statement, params).await?,
+            PlanNode::Update(update_plan) => execute_update(&update_plan.statement, params).await?,
+            PlanNode::Delete(delete_plan) => execute_delete(&delete_plan.statement, params).await?,
+            PlanNode::Merge(merge_plan) => execute_merge(&merge_plan.statement, params).await?,
+            PlanNode::PassThrough(statement) => match statement {
+                Statement::Query(query) => execute_query(query, params).await?,
+                Statement::Insert(insert) => execute_insert(insert, params).await?,
+                Statement::Update(update) => execute_update(update, params).await?,
+                Statement::Delete(delete) => execute_delete(delete, params).await?,
+                Statement::Merge(merge) => execute_merge(merge, params).await?,
+                Statement::Transaction(_) => {
+                    return Err(EngineError {
+                        message: "transaction statements must be executed via the session protocol"
+                            .to_string(),
+                    });
+                }
+                _ => crate::tcop::utility::execute_utility_statement(statement, params).await?,
+            },
+        };
+        Ok(result)
     })
 }
 

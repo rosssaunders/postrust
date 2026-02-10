@@ -121,7 +121,7 @@ TEXT, INTEGER, BIGINT, FLOAT, DOUBLE PRECISION, BOOLEAN, NUMERIC, DATE, TIMESTAM
 ## Quick Start
 
 ```bash
-# Build and test (365 tests)
+# Build and test (402 tests)
 cargo test
 
 # PostgreSQL-compatible server
@@ -138,7 +138,7 @@ cargo run --bin web_server -- 8080
 
 - **Native** (Linux, macOS) — Tokio + reqwest for async I/O
 - **Browser/WASM** — wasm-bindgen + web-sys fetch/WebSocket
-- 365 tests passing on both targets
+- 402 tests passing on both targets
 
 ## Project Layout
 
@@ -154,6 +154,7 @@ src/
 │   ├── binding.rs       # Name binding and scope resolution
 │   ├── types.rs         # Type inference and coercion rules
 │   └── functions.rs     # Function/operator resolution and arg validation
+├── planner/             # Query planner/optimizer (logical/physical plans, cost, stats)
 ├── catalog/             # In-memory catalog (schemas, tables, OIDs)
 │   ├── mod.rs           # Core catalog API
 │   ├── schema.rs        # Schema management

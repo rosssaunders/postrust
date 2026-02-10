@@ -5,6 +5,7 @@ pub mod commands;
 pub mod catalog;
 pub mod executor;
 pub mod parser;
+pub mod planner;
 pub mod protocol;
 pub mod security;
 pub mod storage;
