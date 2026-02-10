@@ -1,28 +1,24 @@
 use std::fmt;
 
 use crate::parser::ast::{
-    AlterSequenceAction, AlterSequenceStatement, AlterTableAction, AlterTableStatement,
-    AlterViewAction, AlterViewStatement, Assignment, BinaryOp, ComparisonQuantifier,
-    ColumnDefinition, CommonTableExpr,
-    ConflictTarget, CreateIndexStatement, CreateSchemaStatement, CreateSequenceStatement,
-    CreateTableStatement, CreateViewStatement, DeleteStatement, DropBehavior, DropIndexStatement,
-    DropSchemaStatement, DropSequenceStatement, DropTableStatement, DropViewStatement, Expr,
-    ForeignKeyAction, ForeignKeyReference, InsertSource, InsertStatement, JoinCondition, JoinExpr,
-    JoinType, MergeStatement, MergeWhenClause, OnConflictClause, OrderByExpr, Query, QueryExpr,
-    RefreshMaterializedViewStatement, SelectItem, SelectQuantifier, SelectStatement, SetOperator,
-    SetQuantifier, Statement, SubqueryRef, TableConstraint, TableExpression, TableFunctionRef,
-    TableRef, TruncateStatement, TypeName, UnaryOp, UpdateStatement, WindowFrame,
-    WindowFrameBound, WindowFrameUnits, WindowSpec, WithClause,
-    ExplainStatement, SetStatement, ShowStatement, DiscardStatement, DoStatement,
-    ListenStatement, NotifyStatement, UnlistenStatement,
-    CreateExtensionStatement, DropExtensionStatement,
-    CreateFunctionStatement, FunctionParam, FunctionReturnType, GroupByExpr,
-    TransactionStatement,
-    CopyDirection, CopyFormat, CopyOptions, CopyStatement,
-    CreateRoleStatement, AlterRoleStatement, DropRoleStatement, RoleOption,
-    GrantRoleStatement, GrantStatement, GrantTablePrivilegesStatement,
-    RevokeRoleStatement, RevokeStatement, RevokeTablePrivilegesStatement,
-    TablePrivilegeKind,
+    AlterRoleStatement, AlterSequenceAction, AlterSequenceStatement, AlterTableAction,
+    AlterTableStatement, AlterViewAction, AlterViewStatement, Assignment, BinaryOp,
+    ColumnDefinition, CommonTableExpr, ComparisonQuantifier, ConflictTarget, CopyDirection,
+    CopyFormat, CopyOptions, CopyStatement, CreateExtensionStatement, CreateFunctionStatement,
+    CreateIndexStatement, CreateRoleStatement, CreateSchemaStatement, CreateSequenceStatement,
+    CreateTableStatement, CreateViewStatement, DeleteStatement, DiscardStatement, DoStatement,
+    DropBehavior, DropExtensionStatement, DropIndexStatement, DropRoleStatement,
+    DropSchemaStatement, DropSequenceStatement, DropTableStatement, DropViewStatement,
+    ExplainStatement, Expr, ForeignKeyAction, ForeignKeyReference, FunctionParam,
+    FunctionReturnType, GrantRoleStatement, GrantStatement, GrantTablePrivilegesStatement,
+    GroupByExpr, InsertSource, InsertStatement, JoinCondition, JoinExpr, JoinType, ListenStatement,
+    MergeStatement, MergeWhenClause, NotifyStatement, OnConflictClause, OrderByExpr, Query,
+    QueryExpr, RefreshMaterializedViewStatement, RevokeRoleStatement, RevokeStatement,
+    RevokeTablePrivilegesStatement, RoleOption, SelectItem, SelectQuantifier, SelectStatement,
+    SetOperator, SetQuantifier, SetStatement, ShowStatement, Statement, SubqueryRef,
+    TableConstraint, TableExpression, TableFunctionRef, TablePrivilegeKind, TableRef,
+    TransactionStatement, TruncateStatement, TypeName, UnaryOp, UnlistenStatement, UpdateStatement,
+    WindowFrame, WindowFrameBound, WindowFrameUnits, WindowSpec, WithClause,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -217,7 +213,10 @@ impl Parser {
                 false
             };
             let name = self.parse_identifier()?;
-            return Ok(Statement::CreateExtension(CreateExtensionStatement { name, if_not_exists }));
+            return Ok(Statement::CreateExtension(CreateExtensionStatement {
+                name,
+                if_not_exists,
+            }));
         }
         if self.consume_keyword(Keyword::Function) {
             if unique || materialized {
@@ -291,7 +290,8 @@ impl Parser {
             return Err(self.error_at_current("expected VIEW after CREATE MATERIALIZED"));
         }
         if self.consume_ident("role") {
-            let name = self.parse_role_identifier_with_message("CREATE ROLE requires a role name")?;
+            let name =
+                self.parse_role_identifier_with_message("CREATE ROLE requires a role name")?;
             let options = self.parse_role_options("CREATE ROLE")?;
             return Ok(Statement::CreateRole(CreateRoleStatement { name, options }));
         }
@@ -826,13 +826,19 @@ impl Parser {
         }
         if self.consume_keyword(Keyword::Extension) {
             let if_exists = if self.consume_keyword(Keyword::If) {
-                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF in DROP EXTENSION")?;
+                self.expect_keyword(
+                    Keyword::Exists,
+                    "expected EXISTS after IF in DROP EXTENSION",
+                )?;
                 true
             } else {
                 false
             };
             let name = self.parse_identifier()?;
-            return Ok(Statement::DropExtension(DropExtensionStatement { name, if_exists }));
+            return Ok(Statement::DropExtension(DropExtensionStatement {
+                name,
+                if_exists,
+            }));
         }
         if self.consume_keyword(Keyword::Function) {
             // DROP FUNCTION name - simple form only
@@ -846,7 +852,9 @@ impl Parser {
             // We don't actually implement DROP FUNCTION yet, just parse it
             return Err(self.error_at_current("DROP FUNCTION is not yet supported"));
         }
-        Err(self.error_at_current("expected TABLE, SCHEMA, INDEX, SEQUENCE, VIEW, or EXTENSION after DROP"))
+        Err(self.error_at_current(
+            "expected TABLE, SCHEMA, INDEX, SEQUENCE, VIEW, or EXTENSION after DROP",
+        ))
     }
 
     fn parse_copy_statement(&mut self) -> Result<Statement, ParseError> {
@@ -865,15 +873,13 @@ impl Parser {
                 "unsupported COPY command (expected COPY <table> TO/FROM STDOUT/STDIN ...)",
             ));
         };
-        let target = self
-            .take_keyword_or_identifier()
-            .ok_or_else(|| {
-                let message = match direction {
-                    CopyDirection::To => "COPY TO requires STDOUT",
-                    CopyDirection::From => "COPY FROM requires STDIN",
-                };
-                self.error_at_current(message)
-            })?;
+        let target = self.take_keyword_or_identifier().ok_or_else(|| {
+            let message = match direction {
+                CopyDirection::To => "COPY TO requires STDOUT",
+                CopyDirection::From => "COPY FROM requires STDIN",
+            };
+            self.error_at_current(message)
+        })?;
         let target_lower = target.to_ascii_lowercase();
         match direction {
             CopyDirection::To if target_lower != "stdout" => {
@@ -896,7 +902,10 @@ impl Parser {
                     if self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                         continue;
                     }
-                    self.expect_token(|k| matches!(k, TokenKind::RParen), "expected ')' after COPY options")?;
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after COPY options",
+                    )?;
                     break;
                 }
             }
@@ -982,7 +991,10 @@ impl Parser {
         }
         let member =
             self.parse_role_identifier_with_message("GRANT role requires role and member names")?;
-        Ok(GrantStatement::Role(GrantRoleStatement { role_name, member }))
+        Ok(GrantStatement::Role(GrantRoleStatement {
+            role_name,
+            member,
+        }))
     }
 
     fn parse_grant_table_privileges_statement(&mut self) -> Result<GrantStatement, ParseError> {
@@ -996,11 +1008,13 @@ impl Parser {
             return Err(self.error_at_current("GRANT requires TO clause"));
         }
         let roles = self.parse_role_list("GRANT requires at least one target role")?;
-        Ok(GrantStatement::TablePrivileges(GrantTablePrivilegesStatement {
-            privileges,
-            table_name,
-            roles,
-        }))
+        Ok(GrantStatement::TablePrivileges(
+            GrantTablePrivilegesStatement {
+                privileges,
+                table_name,
+                roles,
+            },
+        ))
     }
 
     fn parse_revoke_role_statement(&mut self) -> Result<RevokeStatement, ParseError> {
@@ -1011,7 +1025,10 @@ impl Parser {
         }
         let member =
             self.parse_role_identifier_with_message("REVOKE role requires role and member names")?;
-        Ok(RevokeStatement::Role(RevokeRoleStatement { role_name, member }))
+        Ok(RevokeStatement::Role(RevokeRoleStatement {
+            role_name,
+            member,
+        }))
     }
 
     fn parse_revoke_table_privileges_statement(&mut self) -> Result<RevokeStatement, ParseError> {
@@ -1025,11 +1042,13 @@ impl Parser {
             return Err(self.error_at_current("REVOKE requires FROM clause"));
         }
         let roles = self.parse_role_list("REVOKE requires at least one target role")?;
-        Ok(RevokeStatement::TablePrivileges(RevokeTablePrivilegesStatement {
-            privileges,
-            table_name,
-            roles,
-        }))
+        Ok(RevokeStatement::TablePrivileges(
+            RevokeTablePrivilegesStatement {
+                privileges,
+                table_name,
+                roles,
+            },
+        ))
     }
 
     fn parse_alter_role_statement(&mut self) -> Result<Statement, ParseError> {
@@ -1700,7 +1719,7 @@ impl Parser {
             "serial" => TypeName::Serial,
             "bigserial" | "serial8" => TypeName::BigSerial,
             "numeric" | "decimal" => TypeName::Numeric,
-            "money" => TypeName::Numeric,  // treat money as numeric for now
+            "money" => TypeName::Numeric, // treat money as numeric for now
             other => {
                 return Err(self.error_at_current(&format!("unsupported type name \"{other}\"")));
             }
@@ -1833,17 +1852,23 @@ impl Parser {
             }
             // Generate column names: column1, column2, ...
             let ncols = all_rows.first().map(|r| r.len()).unwrap_or(0);
-            let _targets: Vec<SelectItem> = (0..ncols).map(|i| SelectItem {
-                expr: Expr::Identifier(vec![format!("column{}", i + 1)]),
-                alias: Some(format!("column{}", i + 1)),
-            }).collect();
+            let _targets: Vec<SelectItem> = (0..ncols)
+                .map(|i| SelectItem {
+                    expr: Expr::Identifier(vec![format!("column{}", i + 1)]),
+                    alias: Some(format!("column{}", i + 1)),
+                })
+                .collect();
             // For first row, create a SELECT with literal values
             let mut result: Option<QueryExpr> = None;
             for row_values in all_rows {
-                let row_targets: Vec<SelectItem> = row_values.into_iter().enumerate().map(|(i, expr)| SelectItem {
-                    expr,
-                    alias: Some(format!("column{}", i + 1)),
-                }).collect();
+                let row_targets: Vec<SelectItem> = row_values
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, expr)| SelectItem {
+                        expr,
+                        alias: Some(format!("column{}", i + 1)),
+                    })
+                    .collect();
                 let select = QueryExpr::Select(SelectStatement {
                     quantifier: None,
                     distinct_on: Vec::new(),
@@ -1891,9 +1916,15 @@ impl Parser {
         let quantifier = if self.consume_keyword(Keyword::Distinct) {
             // Check for DISTINCT ON (expr, ...)
             if self.consume_keyword(Keyword::On) {
-                self.expect_token(|k| matches!(k, TokenKind::LParen), "expected '(' after DISTINCT ON")?;
+                self.expect_token(
+                    |k| matches!(k, TokenKind::LParen),
+                    "expected '(' after DISTINCT ON",
+                )?;
                 distinct_on = self.parse_expr_list()?;
-                self.expect_token(|k| matches!(k, TokenKind::RParen), "expected ')' after DISTINCT ON expressions")?;
+                self.expect_token(
+                    |k| matches!(k, TokenKind::RParen),
+                    "expected ')' after DISTINCT ON expressions",
+                )?;
             }
             Some(SelectQuantifier::Distinct)
         } else if self.consume_keyword(Keyword::All) {
@@ -2589,10 +2620,10 @@ impl Parser {
             TokenKind::Identifier(_)
             | TokenKind::Keyword(
                 Keyword::Left
-                    | Keyword::Right
-                    | Keyword::Replace
-                    | Keyword::Filter
-                    | Keyword::Grouping,
+                | Keyword::Right
+                | Keyword::Replace
+                | Keyword::Filter
+                | Keyword::Grouping,
             ) => self.parse_identifier_expr(),
             _ => Err(self.error_at_current("expected expression")),
         }
@@ -2688,14 +2719,8 @@ impl Parser {
                     |k| matches!(k, TokenKind::LParen),
                     "expected '(' after WITHIN GROUP",
                 )?;
-                self.expect_keyword(
-                    Keyword::Order,
-                    "expected ORDER after WITHIN GROUP (",
-                )?;
-                self.expect_keyword(
-                    Keyword::By,
-                    "expected BY after WITHIN GROUP ORDER",
-                )?;
+                self.expect_keyword(Keyword::Order, "expected ORDER after WITHIN GROUP (")?;
+                self.expect_keyword(Keyword::By, "expected BY after WITHIN GROUP ORDER")?;
                 let order_by = self.parse_order_by_list()?;
                 self.expect_token(
                     |k| matches!(k, TokenKind::RParen),
@@ -2785,10 +2810,7 @@ impl Parser {
             WindowFrameUnits::Range
         };
 
-        self.expect_keyword(
-            Keyword::Between,
-            "expected BETWEEN in window frame clause",
-        )?;
+        self.expect_keyword(Keyword::Between, "expected BETWEEN in window frame clause")?;
         let start = self.parse_window_frame_bound()?;
         self.expect_keyword(Keyword::And, "expected AND in window frame clause")?;
         let end = self.parse_window_frame_bound()?;
@@ -3137,9 +3159,7 @@ impl Parser {
                 break;
             }
             if matches!(self.current_kind(), TokenKind::Eof | TokenKind::Semicolon) {
-                return Err(self.error_at_current(&format!(
-                    "{command} requires ON TABLE clause"
-                )));
+                return Err(self.error_at_current(&format!("{command} requires ON TABLE clause")));
             }
             let Some(token) = self.take_keyword_or_identifier_upper() else {
                 return Err(self.error_at_current("expected privilege name"));
@@ -3173,9 +3193,9 @@ impl Parser {
                 TokenKind::Keyword(kw) => format!("{:?}", kw).to_lowercase(),
                 _ => {
                     let raw = format!("{:?}", self.current_kind());
-                    return Err(self.error_at_current(&format!(
-                        "unsupported {command} option {raw}"
-                    )));
+                    return Err(
+                        self.error_at_current(&format!("unsupported {command} option {raw}"))
+                    );
                 }
             };
             self.advance();
@@ -3191,9 +3211,9 @@ impl Parser {
                         options.push(RoleOption::Password(password));
                     }
                     _ => {
-                        return Err(self.error_at_current(&format!(
-                            "{command} PASSWORD requires a value"
-                        )));
+                        return Err(
+                            self.error_at_current(&format!("{command} PASSWORD requires a value"))
+                        );
                     }
                 },
                 _ => {
@@ -3222,13 +3242,11 @@ impl Parser {
             "DELIMITER" => {
                 let delimiter = self.parse_copy_string_literal("DELIMITER")?;
                 let mut chars = delimiter.chars();
-                let ch = chars.next().ok_or_else(|| {
-                    self.error_at_current("COPY DELIMITER cannot be empty")
-                })?;
+                let ch = chars
+                    .next()
+                    .ok_or_else(|| self.error_at_current("COPY DELIMITER cannot be empty"))?;
                 if chars.next().is_some() {
-                    return Err(self.error_at_current(
-                        "COPY DELIMITER must be a single character",
-                    ));
+                    return Err(self.error_at_current("COPY DELIMITER must be a single character"));
                 }
                 options.delimiter = Some(ch.to_string());
             }
@@ -3254,10 +3272,7 @@ impl Parser {
             "BINARY" => Ok(CopyFormat::Binary),
             "CSV" => Ok(CopyFormat::Csv),
             "TEXT" => Ok(CopyFormat::Text),
-            _ => Err(self.error_at_current(&format!(
-                "{message_prefix} {}",
-                token
-            ))),
+            _ => Err(self.error_at_current(&format!("{message_prefix} {}", token))),
         }
     }
 
@@ -3355,7 +3370,9 @@ impl Parser {
     }
 
     fn consume_ident(&mut self, value: &str) -> bool {
-        self.consume_if(|k| matches!(k, TokenKind::Identifier(ident) if ident.eq_ignore_ascii_case(value)))
+        self.consume_if(
+            |k| matches!(k, TokenKind::Identifier(ident) if ident.eq_ignore_ascii_case(value)),
+        )
     }
 
     fn peek_ident(&self, value: &str) -> bool {
@@ -3427,14 +3444,15 @@ impl Parser {
         let is_local = self.consume_keyword(Keyword::Local);
         let name = self.parse_identifier()?;
         // Accept = or TO
-        if !self.consume_if(|k| matches!(k, TokenKind::Equal))
-            && !self.consume_keyword(Keyword::To)
+        if !self.consume_if(|k| matches!(k, TokenKind::Equal)) && !self.consume_keyword(Keyword::To)
         {
             return Err(self.error_at_current("expected = or TO after SET variable name"));
         }
         // Collect the rest as value
         let mut value_parts = Vec::new();
-        while !matches!(self.current_kind(), TokenKind::Eof) && !matches!(self.current_kind(), TokenKind::Semicolon) {
+        while !matches!(self.current_kind(), TokenKind::Eof)
+            && !matches!(self.current_kind(), TokenKind::Semicolon)
+        {
             let token = &self.tokens[self.idx];
             match &token.kind {
                 TokenKind::Keyword(kw) => value_parts.push(format!("{:?}", kw).to_lowercase()),
@@ -3479,13 +3497,17 @@ impl Parser {
     fn parse_create_function(&mut self, or_replace: bool) -> Result<Statement, ParseError> {
         let name = self.parse_qualified_name()?;
         // Parse parameter list
-        self.expect_token(|k| matches!(k, TokenKind::LParen), "expected '(' after function name")?;
+        self.expect_token(
+            |k| matches!(k, TokenKind::LParen),
+            "expected '(' after function name",
+        )?;
         let mut params = Vec::new();
         if !self.consume_if(|k| matches!(k, TokenKind::RParen)) {
             loop {
                 // Try name TYPE or just TYPE
                 let first_ident = self.parse_identifier()?;
-                let (param_name, data_type) = if let Ok(dt) = self.try_parse_type_name(&first_ident) {
+                let (param_name, data_type) = if let Ok(dt) = self.try_parse_type_name(&first_ident)
+                {
                     (None, dt)
                 } else {
                     // first_ident is param name, next is type
@@ -3498,13 +3520,22 @@ impl Parser {
                 // Check for DEFAULT
                 if self.consume_keyword(Keyword::Default) {
                     // Skip the default expression (simple: just consume until , or ))
-                    while !matches!(self.current_kind(), TokenKind::Comma | TokenKind::RParen | TokenKind::Eof) {
+                    while !matches!(
+                        self.current_kind(),
+                        TokenKind::Comma | TokenKind::RParen | TokenKind::Eof
+                    ) {
                         self.advance();
                     }
                 }
-                params.push(FunctionParam { name: param_name, data_type });
+                params.push(FunctionParam {
+                    name: param_name,
+                    data_type,
+                });
                 if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
-                    self.expect_token(|k| matches!(k, TokenKind::RParen), "expected ')' or ',' in parameter list")?;
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' or ',' in parameter list",
+                    )?;
                     break;
                 }
             }
@@ -3513,7 +3544,10 @@ impl Parser {
         let return_type = if self.consume_keyword(Keyword::Returns) {
             if self.consume_keyword(Keyword::Table) {
                 // RETURNS TABLE(col type, ...)
-                self.expect_token(|k| matches!(k, TokenKind::LParen), "expected '(' after TABLE")?;
+                self.expect_token(
+                    |k| matches!(k, TokenKind::LParen),
+                    "expected '(' after TABLE",
+                )?;
                 let mut cols = Vec::new();
                 loop {
                     let col_name = self.parse_identifier()?;
@@ -3556,7 +3590,9 @@ impl Parser {
                 self.advance();
                 b
             }
-            _ => return Err(self.error_at_current("expected dollar-quoted or string function body")),
+            _ => {
+                return Err(self.error_at_current("expected dollar-quoted or string function body"));
+            }
         };
         // Optional LANGUAGE
         let language = if self.consume_keyword(Keyword::Language) {
@@ -3620,7 +3656,9 @@ impl Parser {
             _ => return Err(self.error_at_current("expected string body after DO")),
         };
         // Optional LANGUAGE clause
-        let language = if !matches!(self.current_kind(), TokenKind::Eof) && !matches!(self.current_kind(), TokenKind::Semicolon) {
+        let language = if !matches!(self.current_kind(), TokenKind::Eof)
+            && !matches!(self.current_kind(), TokenKind::Semicolon)
+        {
             if let Some(token) = self.tokens.get(self.idx) {
                 if let TokenKind::Identifier(id) = &token.kind {
                     if id.eq_ignore_ascii_case("language") {
@@ -3655,7 +3693,11 @@ impl Parser {
                     self.advance();
                     Some(p)
                 }
-                _ => return Err(self.error_at_current("expected string payload after NOTIFY channel,")),
+                _ => {
+                    return Err(
+                        self.error_at_current("expected string payload after NOTIFY channel,")
+                    );
+                }
             }
         } else {
             None
@@ -3668,7 +3710,9 @@ impl Parser {
             return Ok(Statement::Unlisten(UnlistenStatement { channel: None }));
         }
         let channel = self.parse_identifier()?;
-        Ok(Statement::Unlisten(UnlistenStatement { channel: Some(channel) }))
+        Ok(Statement::Unlisten(UnlistenStatement {
+            channel: Some(channel),
+        }))
     }
 
     fn parse_transaction_statement(&mut self) -> Result<Statement, ParseError> {
@@ -3692,7 +3736,9 @@ impl Parser {
         }
         if self.consume_keyword(Keyword::Savepoint) {
             let name = self.parse_identifier()?;
-            return Ok(Statement::Transaction(TransactionStatement::Savepoint(name)));
+            return Ok(Statement::Transaction(TransactionStatement::Savepoint(
+                name,
+            )));
         }
         if self.consume_keyword(Keyword::Release) {
             self.consume_keyword(Keyword::Savepoint);
@@ -3825,10 +3871,8 @@ mod tests {
 
     #[test]
     fn parses_lateral_subquery_in_from_clause() {
-        let stmt = parse_statement(
-            "SELECT t.id FROM test_table t, LATERAL (SELECT t.id AS id) l",
-        )
-        .expect("parse should succeed");
+        let stmt = parse_statement("SELECT t.id FROM test_table t, LATERAL (SELECT t.id AS id) l")
+            .expect("parse should succeed");
         let Statement::Query(query) = stmt else {
             panic!("expected query statement");
         };
@@ -3908,8 +3952,8 @@ mod tests {
         assert_eq!(select.targets.len(), 1);
         assert!(matches!(select.targets[0].expr, Expr::ArrayConstructor(_)));
 
-        let stmt = parse_statement("SELECT ARRAY(SELECT id FROM users)")
-            .expect("parse should succeed");
+        let stmt =
+            parse_statement("SELECT ARRAY(SELECT id FROM users)").expect("parse should succeed");
         let Statement::Query(query) = stmt else {
             panic!("expected query statement");
         };
@@ -5193,9 +5237,10 @@ mod tests {
 
     #[test]
     fn parses_window_function_with_partition_and_order_by() {
-        let stmt =
-            parse_statement("SELECT row_number() OVER (PARTITION BY team ORDER BY score DESC) FROM t")
-                .expect("parse should succeed");
+        let stmt = parse_statement(
+            "SELECT row_number() OVER (PARTITION BY team ORDER BY score DESC) FROM t",
+        )
+        .expect("parse should succeed");
         let Statement::Query(query) = stmt else {
             panic!("expected query statement");
         };
@@ -5203,10 +5248,7 @@ mod tests {
             panic!("expected select query body");
         };
         let Expr::FunctionCall {
-            name,
-            args,
-            over,
-            ..
+            name, args, over, ..
         } = &select.targets[0].expr
         else {
             panic!("expected function call");

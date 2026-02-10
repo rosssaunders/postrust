@@ -3,7 +3,7 @@
 //! Resolves table names against the catalog (respecting schema search path),
 //! validates column references against known table schemas, and tracks aliases.
 
-use crate::catalog::{with_catalog_read, SearchPath};
+use crate::catalog::{SearchPath, with_catalog_read};
 use crate::parser::ast::{Expr, JoinCondition, SelectStatement, TableExpression};
 use crate::tcop::engine::EngineError;
 
@@ -125,11 +125,7 @@ fn resolve_table_expression(
             ctx.add_table(alias.to_lowercase(), columns);
         }
         TableExpression::Subquery(subquery_ref) => {
-            let alias = subquery_ref
-                .alias
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase();
+            let alias = subquery_ref.alias.as_deref().unwrap_or("").to_lowercase();
             // Subqueries are opaque — we don't track their output columns here
             ctx.add_table(alias, Vec::new());
         }

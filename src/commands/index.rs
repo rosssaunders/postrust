@@ -1,7 +1,9 @@
-use crate::catalog::{IndexSpec, SearchPath, TableKind, with_catalog_read, with_catalog_write};
 use crate::catalog::dependency::index_backing_constraint_name as index_backing_constraint_name_in_catalog;
+use crate::catalog::{IndexSpec, SearchPath, TableKind, with_catalog_read, with_catalog_write};
 use crate::parser::ast::{CreateIndexStatement, DropBehavior, DropIndexStatement};
-use crate::tcop::engine::{EngineError, QueryResult, validate_table_constraints, with_storage_read};
+use crate::tcop::engine::{
+    EngineError, QueryResult, validate_table_constraints, with_storage_read,
+};
 
 #[derive(Debug, Clone)]
 struct IndexTarget {
@@ -89,8 +91,8 @@ pub async fn execute_create_index(
         };
         with_catalog_write(|catalog| catalog.add_index(table.schema_name(), table.name(), index))
             .map_err(|err| EngineError {
-                message: err.message,
-            })?;
+            message: err.message,
+        })?;
     }
 
     Ok(QueryResult {

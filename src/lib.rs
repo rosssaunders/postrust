@@ -1,8 +1,8 @@
 pub mod access;
 pub mod analyzer;
 pub mod browser;
-pub mod commands;
 pub mod catalog;
+pub mod commands;
 pub mod executor;
 pub mod parser;
 pub mod planner;

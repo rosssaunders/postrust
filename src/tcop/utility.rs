@@ -35,7 +35,9 @@ pub async fn execute_utility_statement(
         Statement::DropTable(drop_table) => drop::execute_drop_table(drop_table).await,
         Statement::DropSchema(drop_schema) => schema::execute_drop_schema(drop_schema).await,
         Statement::DropIndex(drop_index) => index::execute_drop_index(drop_index).await,
-        Statement::DropSequence(drop_sequence) => sequence::execute_drop_sequence(drop_sequence).await,
+        Statement::DropSequence(drop_sequence) => {
+            sequence::execute_drop_sequence(drop_sequence).await
+        }
         Statement::DropView(drop_view) => {
             if drop_view.materialized {
                 matview::execute_drop_materialized_view(drop_view).await

@@ -45,15 +45,27 @@ fn resolve_virtual_relation_name(name: &[String]) -> Option<(String, String)> {
 fn is_pg_catalog_virtual_relation(relation: &str) -> bool {
     matches!(
         relation,
-        "pg_namespace" | "pg_class" | "pg_attribute" | "pg_type"
-            | "pg_database" | "pg_roles" | "pg_settings"
-            | "pg_tables" | "pg_views" | "pg_indexes"
-            | "pg_proc" | "pg_constraint" | "pg_extension"
+        "pg_namespace"
+            | "pg_class"
+            | "pg_attribute"
+            | "pg_type"
+            | "pg_database"
+            | "pg_roles"
+            | "pg_settings"
+            | "pg_tables"
+            | "pg_views"
+            | "pg_indexes"
+            | "pg_proc"
+            | "pg_constraint"
+            | "pg_extension"
     )
 }
 
 fn is_information_schema_virtual_relation(relation: &str) -> bool {
-    matches!(relation, "tables" | "columns" | "schemata" | "key_column_usage" | "table_constraints")
+    matches!(
+        relation,
+        "tables" | "columns" | "schemata" | "key_column_usage" | "table_constraints"
+    )
 }
 
 fn virtual_relation_column_defs(
@@ -162,84 +174,236 @@ fn virtual_relation_column_defs(
             },
         ],
         ("information_schema", "schemata") => vec![
-            VirtualRelationColumnDef { name: "catalog_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "schema_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "schema_owner".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "catalog_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "schema_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "schema_owner".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("information_schema", "key_column_usage") => vec![
-            VirtualRelationColumnDef { name: "constraint_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "table_schema".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "table_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "column_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "ordinal_position".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef {
+                name: "constraint_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_schema".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "column_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "ordinal_position".to_string(),
+                type_oid: PG_INT8_OID,
+            },
         ],
         ("information_schema", "table_constraints") => vec![
-            VirtualRelationColumnDef { name: "constraint_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "table_schema".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "table_name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "constraint_type".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "constraint_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_schema".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "table_name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "constraint_type".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("pg_catalog", "pg_database") => vec![
-            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "datname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "datdba".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "encoding".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "datcollate".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "datname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "datdba".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "encoding".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "datcollate".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("pg_catalog", "pg_roles") => vec![
-            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "rolname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "rolsuper".to_string(), type_oid: PG_BOOL_OID },
-            VirtualRelationColumnDef { name: "rolcanlogin".to_string(), type_oid: PG_BOOL_OID },
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "rolname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "rolsuper".to_string(),
+                type_oid: PG_BOOL_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "rolcanlogin".to_string(),
+                type_oid: PG_BOOL_OID,
+            },
         ],
         ("pg_catalog", "pg_settings") => vec![
-            VirtualRelationColumnDef { name: "name".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "setting".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "category".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "short_desc".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "name".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "setting".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "category".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "short_desc".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("pg_catalog", "pg_tables") => vec![
-            VirtualRelationColumnDef { name: "schemaname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "tablename".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "tableowner".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "schemaname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "tablename".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "tableowner".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("pg_catalog", "pg_views") => vec![
-            VirtualRelationColumnDef { name: "schemaname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "viewname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "viewowner".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "schemaname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "viewname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "viewowner".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("pg_catalog", "pg_indexes") => vec![
-            VirtualRelationColumnDef { name: "schemaname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "tablename".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "indexname".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "schemaname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "tablename".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "indexname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("pg_catalog", "pg_proc") => vec![
-            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "proname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "pronamespace".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "proname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "pronamespace".to_string(),
+                type_oid: PG_INT8_OID,
+            },
         ],
         ("pg_catalog", "pg_constraint") => vec![
-            VirtualRelationColumnDef { name: "oid".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "conname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "connamespace".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "contype".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "conrelid".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef {
+                name: "oid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "conname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "connamespace".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "contype".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "conrelid".to_string(),
+                type_oid: PG_INT8_OID,
+            },
         ],
         ("pg_catalog", "pg_extension") => vec![
-            VirtualRelationColumnDef { name: "extname".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "extversion".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "extdescription".to_string(), type_oid: PG_TEXT_OID },
+            VirtualRelationColumnDef {
+                name: "extname".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "extversion".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "extdescription".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
         ],
         ("ws", "connections") => vec![
-            VirtualRelationColumnDef { name: "id".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "url".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "state".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "opened_at".to_string(), type_oid: PG_TEXT_OID },
-            VirtualRelationColumnDef { name: "messages_in".to_string(), type_oid: PG_INT8_OID },
-            VirtualRelationColumnDef { name: "messages_out".to_string(), type_oid: PG_INT8_OID },
+            VirtualRelationColumnDef {
+                name: "id".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "url".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "state".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "opened_at".to_string(),
+                type_oid: PG_TEXT_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "messages_in".to_string(),
+                type_oid: PG_INT8_OID,
+            },
+            VirtualRelationColumnDef {
+                name: "messages_out".to_string(),
+                type_oid: PG_INT8_OID,
+            },
         ],
         _ => return None,
     };
     Some(cols)
 }
-

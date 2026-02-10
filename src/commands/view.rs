@@ -1,6 +1,8 @@
 use crate::catalog::{SearchPath, TableKind, with_catalog_read, with_catalog_write};
 use crate::commands::create_table::relation_name_for_create;
-use crate::parser::ast::{AlterViewAction, AlterViewStatement, CreateViewStatement, DropBehavior, DropViewStatement};
+use crate::parser::ast::{
+    AlterViewAction, AlterViewStatement, CreateViewStatement, DropBehavior, DropViewStatement,
+};
 use crate::tcop::engine::{EngineError, QueryResult, with_storage_write};
 
 pub async fn execute_create_view(
@@ -14,9 +16,7 @@ pub async fn execute_alter_view(alter: &AlterViewStatement) -> Result<QueryResul
     execute_alter_view_internal(alter).await
 }
 
-pub async fn execute_drop_view(
-    drop_view: &DropViewStatement,
-) -> Result<QueryResult, EngineError> {
+pub async fn execute_drop_view(drop_view: &DropViewStatement) -> Result<QueryResult, EngineError> {
     execute_drop_view_internal(drop_view).await
 }
 
@@ -34,7 +34,9 @@ pub(crate) async fn execute_create_view_internal(
     }
     let columns = crate::tcop::engine::derive_query_columns(&create.query)?;
     let rows = if create.materialized && create.with_data {
-        crate::tcop::engine::execute_query(&create.query, params).await?.rows
+        crate::tcop::engine::execute_query(&create.query, params)
+            .await?
+            .rows
     } else {
         Vec::new()
     };

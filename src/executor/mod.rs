@@ -1,7 +1,7 @@
 pub mod exec_expr;
+pub mod exec_grouping;
 pub mod exec_main;
 pub mod exec_scan;
-pub mod exec_grouping;
 pub mod exec_srf;
 pub mod node_agg;
 pub mod node_append;

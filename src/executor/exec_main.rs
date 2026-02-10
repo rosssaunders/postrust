@@ -3,37 +3,34 @@ use std::collections::{HashMap, HashSet};
 
 use crate::catalog::{SearchPath, TableKind, TypeSignature, with_catalog_read};
 use crate::executor::exec_expr::{
-    eval_any_all, eval_between_predicate, eval_binary,
-    eval_cast_scalar, eval_expr, eval_expr_with_window, eval_is_distinct_from,
-    eval_like_predicate, eval_unary,
+    EngineFuture, EvalScope, eval_any_all, eval_between_predicate, eval_binary, eval_cast_scalar,
+    eval_expr, eval_expr_with_window, eval_is_distinct_from, eval_like_predicate, eval_unary,
     execute_ws_messages, is_ws_extension_loaded,
-    EngineFuture, EvalScope,
+};
+use crate::parser::ast::SubqueryRef;
+use crate::parser::ast::{
+    Expr, GroupByExpr, JoinCondition, JoinExpr, JoinType, OrderByExpr, Query, QueryExpr,
+    SelectQuantifier, SelectStatement, SetOperator, SetQuantifier, TableExpression,
+    TableFunctionRef, TableRef, WindowFrameBound,
+};
+use crate::security::{self, RlsCommand, TablePrivilege};
+use crate::storage::tuple::ScalarValue;
+use crate::tcop::engine::{
+    CteBinding, EngineError, ExpandedFromColumn, QueryResult, active_cte_context,
+    current_cte_binding, derive_select_columns, expand_from_columns, lookup_virtual_relation,
+    query_references_relation, relation_row_visible_for_command, require_relation_privilege,
+    type_signature_to_oid, validate_recursive_cte_terms, with_cte_context_async, with_ext_read,
+    with_storage_read,
 };
 use crate::utils::adt::json::{
-    json_value_text_output, jsonb_path_query_values, parse_json_document_arg,
-    scalar_to_json_value,
+    json_value_text_output, jsonb_path_query_values, parse_json_document_arg, scalar_to_json_value,
 };
 use crate::utils::adt::misc::{
     compare_values_for_predicate, eval_regexp_matches_set_function,
     eval_regexp_split_to_table_set_function, parse_f64_numeric_scalar, truthy,
 };
 use crate::utils::fmgr::eval_scalar_function;
-use crate::security::{self, RlsCommand, TablePrivilege};
-use crate::storage::tuple::ScalarValue;
-use crate::tcop::engine::{
-    active_cte_context, current_cte_binding, derive_select_columns, expand_from_columns,
-    lookup_virtual_relation, query_references_relation, relation_row_visible_for_command,
-    require_relation_privilege, type_signature_to_oid, validate_recursive_cte_terms,
-    with_cte_context_async, with_ext_read, with_storage_read, CteBinding, EngineError,
-    ExpandedFromColumn, QueryResult,
-};
-use crate::parser::ast::SubqueryRef;
 use serde_json::{Map as JsonMap, Value as JsonValue};
-use crate::parser::ast::{
-    Expr, GroupByExpr, JoinCondition, JoinExpr, JoinType, OrderByExpr, Query, QueryExpr,
-    SelectQuantifier, SelectStatement, SetOperator, SetQuantifier, TableExpression,
-    TableFunctionRef, TableRef, WindowFrameBound,
-};
 
 pub(crate) async fn execute_query(
     query: &Query,
@@ -54,27 +51,26 @@ pub(crate) fn execute_query_with_outer<'a>(
         if let Some(with) = &query.with {
             for cte in &with.ctes {
                 let cte_name = cte.name.to_ascii_lowercase();
-                let binding =
-                    if with.recursive && query_references_relation(&cte.query, &cte_name) {
-                        evaluate_recursive_cte_binding(cte, params, outer_scope, &local_ctes)
-                            .await?
-                    } else {
-                        let cte_result =
-                            with_cte_context_async(local_ctes.clone(), || async {
-                                execute_query_with_outer(&cte.query, params, outer_scope).await
-                            })
-                            .await?;
-                        CteBinding {
-                            columns: cte_result.columns.clone(),
-                            rows: cte_result.rows.clone(),
-                        }
-                    };
+                let binding = if with.recursive && query_references_relation(&cte.query, &cte_name)
+                {
+                    evaluate_recursive_cte_binding(cte, params, outer_scope, &local_ctes).await?
+                } else {
+                    let cte_result = with_cte_context_async(local_ctes.clone(), || async {
+                        execute_query_with_outer(&cte.query, params, outer_scope).await
+                    })
+                    .await?;
+                    CteBinding {
+                        columns: cte_result.columns.clone(),
+                        rows: cte_result.rows.clone(),
+                    }
+                };
                 local_ctes.insert(cte_name, binding);
             }
         }
 
         with_cte_context_async(local_ctes, || async {
-            let mut result = execute_query_expr_with_outer(&query.body, params, outer_scope).await?;
+            let mut result =
+                execute_query_expr_with_outer(&query.body, params, outer_scope).await?;
             apply_order_by(&mut result, query, params).await?;
             apply_offset_limit(&mut result, query, params).await?;
             Ok(result)
@@ -249,7 +245,11 @@ async fn execute_select(
         .iter()
         .any(|target| contains_window_expr(&target.expr));
 
-    if select.where_clause.as_ref().is_some_and(contains_window_expr) {
+    if select
+        .where_clause
+        .as_ref()
+        .is_some_and(contains_window_expr)
+    {
         return Err(EngineError {
             message: "window functions are not allowed in WHERE".to_string(),
         });
@@ -386,13 +386,9 @@ async fn execute_select(
         }
     } else {
         for scope in filtered_rows {
-            let row = project_select_row(
-                &select.targets,
-                &scope,
-                params,
-                wildcard_columns.as_deref(),
-            )
-            .await?;
+            let row =
+                project_select_row(&select.targets, &scope, params, wildcard_columns.as_deref())
+                    .await?;
             rows.push(row);
         }
     }
@@ -445,15 +441,15 @@ pub(crate) async fn evaluate_from_clause(
     for item in from {
         let mut next = Vec::new();
         match item {
-            TableExpression::Function(_) | TableExpression::Subquery(SubqueryRef { lateral: true, .. }) => {
+            TableExpression::Function(_)
+            | TableExpression::Subquery(SubqueryRef { lateral: true, .. }) => {
                 // Table functions in FROM may reference prior FROM bindings; evaluate per lhs scope.
                 for lhs_scope in &current {
                     let mut merged_outer = lhs_scope.clone();
                     if let Some(outer) = outer_scope {
                         merged_outer.inherit_outer(outer);
                     }
-                    let rhs =
-                        evaluate_table_expression(item, params, Some(&merged_outer)).await?;
+                    let rhs = evaluate_table_expression(item, params, Some(&merged_outer)).await?;
                     for rhs_scope in &rhs.rows {
                         next.push(combine_scopes(lhs_scope, rhs_scope, &HashSet::new()));
                     }
@@ -532,7 +528,10 @@ pub(crate) fn evaluate_table_expression<'a>(
 }
 
 fn is_lateral_table_expression(table: &TableExpression) -> bool {
-    matches!(table, TableExpression::Subquery(SubqueryRef { lateral: true, .. }))
+    matches!(
+        table,
+        TableExpression::Subquery(SubqueryRef { lateral: true, .. })
+    )
 }
 
 async fn evaluate_lateral_join(
@@ -559,7 +558,8 @@ async fn evaluate_lateral_join(
         if let Some(outer) = outer_scope {
             merged_outer.inherit_outer(outer);
         }
-        let right_eval = evaluate_table_expression(&join.right, params, Some(&merged_outer)).await?;
+        let right_eval =
+            evaluate_table_expression(&join.right, params, Some(&merged_outer)).await?;
         right_columns = Some(right_eval.columns.clone());
         right_null_scope = Some(right_eval.null_scope.clone());
     } else {
@@ -603,14 +603,16 @@ async fn evaluate_lateral_join(
             for right_row in &right_eval.rows {
                 let matches = match join.kind {
                     JoinType::Cross => true,
-                    _ => join_condition_matches(
-                        join.condition.as_ref(),
-                        cols,
-                        left_row,
-                        right_row,
-                        params,
-                    )
-                    .await?,
+                    _ => {
+                        join_condition_matches(
+                            join.condition.as_ref(),
+                            cols,
+                            left_row,
+                            right_row,
+                            params,
+                        )
+                        .await?
+                    }
                 };
                 if matches {
                     left_matched = true;
@@ -618,7 +620,8 @@ async fn evaluate_lateral_join(
                 }
             }
 
-            if !left_matched && matches!(join.kind, JoinType::Left)
+            if !left_matched
+                && matches!(join.kind, JoinType::Left)
                 && let Some(null_scope) = right_null_scope.as_ref()
             {
                 output_rows.push(combine_scopes(left_row, null_scope, set));
@@ -1004,34 +1007,56 @@ fn eval_generate_series(
     let start = match &args[0] {
         ScalarValue::Int(i) => *i as f64,
         ScalarValue::Float(f) => *f,
-        _ => return Err(EngineError { message: format!("{fn_name}() expects numeric arguments") }),
+        _ => {
+            return Err(EngineError {
+                message: format!("{fn_name}() expects numeric arguments"),
+            });
+        }
     };
     let stop = match &args[1] {
         ScalarValue::Int(i) => *i as f64,
         ScalarValue::Float(f) => *f,
-        _ => return Err(EngineError { message: format!("{fn_name}() expects numeric arguments") }),
+        _ => {
+            return Err(EngineError {
+                message: format!("{fn_name}() expects numeric arguments"),
+            });
+        }
     };
     let step = if args.len() == 3 {
         match &args[2] {
             ScalarValue::Int(i) => *i as f64,
             ScalarValue::Float(f) => *f,
-            _ => return Err(EngineError { message: format!("{fn_name}() expects numeric step") }),
+            _ => {
+                return Err(EngineError {
+                    message: format!("{fn_name}() expects numeric step"),
+                });
+            }
         }
     } else {
         if start <= stop { 1.0 } else { -1.0 }
     };
     if step == 0.0 {
-        return Err(EngineError { message: "step size cannot be zero".to_string() });
+        return Err(EngineError {
+            message: "step size cannot be zero".to_string(),
+        });
     }
-    let use_int = matches!((&args[0], &args[1]), (ScalarValue::Int(_), ScalarValue::Int(_)))
-        && (args.len() < 3 || matches!(&args[2], ScalarValue::Int(_)));
+    let use_int = matches!(
+        (&args[0], &args[1]),
+        (ScalarValue::Int(_), ScalarValue::Int(_))
+    ) && (args.len() < 3 || matches!(&args[2], ScalarValue::Int(_)));
     let mut rows = Vec::new();
     let mut current = start;
     let max_rows = 1_000_000;
     loop {
-        if rows.len() >= max_rows { break; }
-        if step > 0.0 && current > stop { break; }
-        if step < 0.0 && current < stop { break; }
+        if rows.len() >= max_rows {
+            break;
+        }
+        if step > 0.0 && current > stop {
+            break;
+        }
+        if step < 0.0 && current < stop {
+            break;
+        }
         if use_int {
             rows.push(vec![ScalarValue::Int(current as i64)]);
         } else {
@@ -1047,7 +1072,9 @@ fn eval_unnest_set_function(
     fn_name: &str,
 ) -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), EngineError> {
     if args.len() != 1 {
-        return Err(EngineError { message: format!("{fn_name}() expects one argument") });
+        return Err(EngineError {
+            message: format!("{fn_name}() expects one argument"),
+        });
     }
     if matches!(args[0], ScalarValue::Null) {
         return Ok((vec!["unnest".to_string()], Vec::new()));
@@ -1057,14 +1084,17 @@ fn eval_unnest_set_function(
     if inner.is_empty() {
         return Ok((vec!["unnest".to_string()], Vec::new()));
     }
-    let rows: Vec<Vec<ScalarValue>> = inner.split(',').map(|p| {
-        let p = p.trim();
-        if p == "NULL" {
-            vec![ScalarValue::Null]
-        } else {
-            vec![ScalarValue::Text(p.to_string())]
-        }
-    }).collect();
+    let rows: Vec<Vec<ScalarValue>> = inner
+        .split(',')
+        .map(|p| {
+            let p = p.trim();
+            if p == "NULL" {
+                vec![ScalarValue::Null]
+            } else {
+                vec![ScalarValue::Text(p.to_string())]
+            }
+        })
+        .collect();
     Ok((vec!["unnest".to_string()], rows))
 }
 
@@ -1081,10 +1111,21 @@ fn eval_pg_get_keywords() -> Result<(Vec<String>, Vec<Vec<ScalarValue>>), Engine
         ("alter", "U", "unreserved"),
         ("table", "U", "unreserved"),
     ];
-    let columns = vec!["word".to_string(), "catcode".to_string(), "catdesc".to_string()];
-    let rows = keywords.into_iter().map(|(w, c, d)| {
-        vec![ScalarValue::Text(w.to_string()), ScalarValue::Text(c.to_string()), ScalarValue::Text(d.to_string())]
-    }).collect();
+    let columns = vec![
+        "word".to_string(),
+        "catcode".to_string(),
+        "catdesc".to_string(),
+    ];
+    let rows = keywords
+        .into_iter()
+        .map(|(w, c, d)| {
+            vec![
+                ScalarValue::Text(w.to_string()),
+                ScalarValue::Text(c.to_string()),
+                ScalarValue::Text(d.to_string()),
+            ]
+        })
+        .collect();
     Ok((columns, rows))
 }
 
@@ -1202,9 +1243,7 @@ async fn evaluate_relation(
         require_relation_privilege(&table, TablePrivilege::Select)?;
         let mut visible_rows = Vec::with_capacity(rows.len());
         for row in rows {
-            if relation_row_visible_for_command(&table, &row, RlsCommand::Select, params)
-                .await?
-            {
+            if relation_row_visible_for_command(&table, &row, RlsCommand::Select, params).await? {
                 visible_rows.push(row);
             }
         }
@@ -1394,15 +1433,21 @@ fn virtual_relation_rows(
         }
         ("information_schema", "schemata") => {
             let schemas = with_catalog_read(|catalog| {
-                catalog.schemas().map(|s| s.name().to_string()).collect::<Vec<_>>()
+                catalog
+                    .schemas()
+                    .map(|s| s.name().to_string())
+                    .collect::<Vec<_>>()
             });
-            Ok(schemas.into_iter().map(|name| {
-                vec![
-                    ScalarValue::Text("postrust".to_string()),
-                    ScalarValue::Text(name),
-                    ScalarValue::Text("postrust".to_string()),
-                ]
-            }).collect())
+            Ok(schemas
+                .into_iter()
+                .map(|name| {
+                    vec![
+                        ScalarValue::Text("postrust".to_string()),
+                        ScalarValue::Text(name),
+                        ScalarValue::Text("postrust".to_string()),
+                    ]
+                })
+                .collect())
         }
         ("information_schema", "key_column_usage") => {
             // Return empty for now - would need constraint introspection
@@ -1430,98 +1475,95 @@ fn virtual_relation_rows(
                 ScalarValue::Bool(true),
             ]])
         }
-        ("pg_catalog", "pg_settings") => {
-            Ok(crate::commands::variable::with_guc_read(|guc| {
-                guc.iter()
-                    .map(|(name, value)| {
-                vec![
-                    ScalarValue::Text(name.clone()),
-                    ScalarValue::Text(value.clone()),
-                    ScalarValue::Text("Ungrouped".to_string()),
-                    ScalarValue::Text(String::new()),
-                ]
-            })
-                    .collect()
-            }))
-        }
-        ("pg_catalog", "pg_tables") => {
-            with_catalog_read(|catalog| {
-                let mut rows = Vec::new();
-                for schema in catalog.schemas() {
-                    for table in schema.tables() {
-                        if matches!(table.kind(), TableKind::Heap | TableKind::VirtualDual) {
-                            rows.push(vec![
-                                ScalarValue::Text(schema.name().to_string()),
-                                ScalarValue::Text(table.name().to_string()),
-                                ScalarValue::Text("postrust".to_string()),
-                            ]);
-                        }
+        ("pg_catalog", "pg_settings") => Ok(crate::commands::variable::with_guc_read(|guc| {
+            guc.iter()
+                .map(|(name, value)| {
+                    vec![
+                        ScalarValue::Text(name.clone()),
+                        ScalarValue::Text(value.clone()),
+                        ScalarValue::Text("Ungrouped".to_string()),
+                        ScalarValue::Text(String::new()),
+                    ]
+                })
+                .collect()
+        })),
+        ("pg_catalog", "pg_tables") => with_catalog_read(|catalog| {
+            let mut rows = Vec::new();
+            for schema in catalog.schemas() {
+                for table in schema.tables() {
+                    if matches!(table.kind(), TableKind::Heap | TableKind::VirtualDual) {
+                        rows.push(vec![
+                            ScalarValue::Text(schema.name().to_string()),
+                            ScalarValue::Text(table.name().to_string()),
+                            ScalarValue::Text("postrust".to_string()),
+                        ]);
                     }
                 }
-                Ok(rows)
-            })
-        }
-        ("pg_catalog", "pg_views") => {
-            with_catalog_read(|catalog| {
-                let mut rows = Vec::new();
-                for schema in catalog.schemas() {
-                    for table in schema.tables() {
-                        if matches!(table.kind(), TableKind::View | TableKind::MaterializedView) {
-                            rows.push(vec![
-                                ScalarValue::Text(schema.name().to_string()),
-                                ScalarValue::Text(table.name().to_string()),
-                                ScalarValue::Text("postrust".to_string()),
-                            ]);
-                        }
+            }
+            Ok(rows)
+        }),
+        ("pg_catalog", "pg_views") => with_catalog_read(|catalog| {
+            let mut rows = Vec::new();
+            for schema in catalog.schemas() {
+                for table in schema.tables() {
+                    if matches!(table.kind(), TableKind::View | TableKind::MaterializedView) {
+                        rows.push(vec![
+                            ScalarValue::Text(schema.name().to_string()),
+                            ScalarValue::Text(table.name().to_string()),
+                            ScalarValue::Text("postrust".to_string()),
+                        ]);
                     }
                 }
-                Ok(rows)
-            })
-        }
-        ("pg_catalog", "pg_indexes") => {
-            with_catalog_read(|catalog| {
-                let mut rows = Vec::new();
-                for schema in catalog.schemas() {
-                    for table in schema.tables() {
-                        for index in table.indexes() {
-                            rows.push(vec![
-                                ScalarValue::Text(schema.name().to_string()),
-                                ScalarValue::Text(table.name().to_string()),
-                                ScalarValue::Text(index.name.as_str().to_string()),
-                            ]);
-                        }
+            }
+            Ok(rows)
+        }),
+        ("pg_catalog", "pg_indexes") => with_catalog_read(|catalog| {
+            let mut rows = Vec::new();
+            for schema in catalog.schemas() {
+                for table in schema.tables() {
+                    for index in table.indexes() {
+                        rows.push(vec![
+                            ScalarValue::Text(schema.name().to_string()),
+                            ScalarValue::Text(table.name().to_string()),
+                            ScalarValue::Text(index.name.as_str().to_string()),
+                        ]);
                     }
                 }
-                Ok(rows)
-            })
-        }
+            }
+            Ok(rows)
+        }),
         ("pg_catalog", "pg_proc") => {
             // Return user-defined functions
             Ok(with_ext_read(|ext| {
-                ext.user_functions.iter().enumerate().map(|(i, f)| {
-                    vec![
-                        ScalarValue::Int(90000 + i as i64),
-                        ScalarValue::Text(f.name.last().cloned().unwrap_or_default()),
-                        ScalarValue::Int(0), // pronamespace placeholder
-                    ]
-                }).collect()
+                ext.user_functions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| {
+                        vec![
+                            ScalarValue::Int(90000 + i as i64),
+                            ScalarValue::Text(f.name.last().cloned().unwrap_or_default()),
+                            ScalarValue::Int(0), // pronamespace placeholder
+                        ]
+                    })
+                    .collect()
             }))
         }
         ("pg_catalog", "pg_constraint") => {
             // Return empty for now
             Ok(Vec::new())
         }
-        ("pg_catalog", "pg_extension") => {
-            Ok(with_ext_read(|ext| {
-                ext.extensions.iter().map(|e| {
+        ("pg_catalog", "pg_extension") => Ok(with_ext_read(|ext| {
+            ext.extensions
+                .iter()
+                .map(|e| {
                     vec![
                         ScalarValue::Text(e.name.clone()),
                         ScalarValue::Text(e.version.clone()),
                         ScalarValue::Text(e.description.clone()),
                     ]
-                }).collect()
-            }))
-        }
+                })
+                .collect()
+        })),
         ("ws", "connections") => {
             if !is_ws_extension_loaded() {
                 return Err(EngineError {
@@ -1531,16 +1573,19 @@ fn virtual_relation_rows(
             Ok(with_ext_read(|ext| {
                 let mut conns: Vec<_> = ext.ws_connections.values().collect();
                 conns.sort_by_key(|c| c.id);
-                conns.iter().map(|c| {
-                    vec![
-                        ScalarValue::Int(c.id),
-                        ScalarValue::Text(c.url.clone()),
-                        ScalarValue::Text(c.state.clone()),
-                        ScalarValue::Text(c.opened_at.clone()),
-                        ScalarValue::Int(c.messages_in),
-                        ScalarValue::Int(c.messages_out),
-                    ]
-                }).collect()
+                conns
+                    .iter()
+                    .map(|c| {
+                        vec![
+                            ScalarValue::Int(c.id),
+                            ScalarValue::Text(c.url.clone()),
+                            ScalarValue::Text(c.state.clone()),
+                            ScalarValue::Text(c.opened_at.clone()),
+                            ScalarValue::Int(c.messages_in),
+                            ScalarValue::Int(c.messages_out),
+                        ]
+                    })
+                    .collect()
             }))
         }
         _ => Err(EngineError {
@@ -1695,9 +1740,7 @@ async fn project_select_row_with_window(
             }
             continue;
         }
-        row.push(
-            eval_expr_with_window(&target.expr, scope, row_idx, all_rows, params).await?,
-        );
+        row.push(eval_expr_with_window(&target.expr, scope, row_idx, all_rows, params).await?);
     }
     Ok(row)
 }
@@ -1797,14 +1840,21 @@ fn contains_window_expr(expr: &Expr) -> bool {
         } => {
             over.is_some()
                 || args.iter().any(contains_window_expr)
-                || order_by.iter().any(|entry| contains_window_expr(&entry.expr))
+                || order_by
+                    .iter()
+                    .any(|entry| contains_window_expr(&entry.expr))
                 || within_group
                     .iter()
                     .any(|entry| contains_window_expr(&entry.expr))
-                || filter.as_ref().is_some_and(|entry| contains_window_expr(entry))
+                || filter
+                    .as_ref()
+                    .is_some_and(|entry| contains_window_expr(entry))
                 || over.as_ref().is_some_and(|window| {
                     window.partition_by.iter().any(contains_window_expr)
-                        || window.order_by.iter().any(|entry| contains_window_expr(&entry.expr))
+                        || window
+                            .order_by
+                            .iter()
+                            .any(|entry| contains_window_expr(&entry.expr))
                         || window.frame.as_ref().is_some_and(|frame| {
                             contains_window_bound_expr(&frame.start)
                                 || contains_window_bound_expr(&frame.end)
@@ -1813,7 +1863,9 @@ fn contains_window_expr(expr: &Expr) -> bool {
         }
         Expr::Cast { expr, .. } => contains_window_expr(expr),
         Expr::Unary { expr, .. } => contains_window_expr(expr),
-        Expr::Binary { left, right, .. } => contains_window_expr(left) || contains_window_expr(right),
+        Expr::Binary { left, right, .. } => {
+            contains_window_expr(left) || contains_window_expr(right)
+        }
         Expr::AnyAll { left, right, .. } => {
             contains_window_expr(left) || contains_window_expr(right)
         }
@@ -1823,7 +1875,9 @@ fn contains_window_expr(expr: &Expr) -> bool {
         Expr::Between {
             expr, low, high, ..
         } => contains_window_expr(expr) || contains_window_expr(low) || contains_window_expr(high),
-        Expr::Like { expr, pattern, .. } => contains_window_expr(expr) || contains_window_expr(pattern),
+        Expr::Like { expr, pattern, .. } => {
+            contains_window_expr(expr) || contains_window_expr(pattern)
+        }
         Expr::IsNull { expr, .. } => contains_window_expr(expr),
         Expr::IsDistinctFrom { left, right, .. } => {
             contains_window_expr(left) || contains_window_expr(right)
@@ -1834,23 +1888,22 @@ fn contains_window_expr(expr: &Expr) -> bool {
             else_expr,
         } => {
             contains_window_expr(operand)
-                || when_then
-                    .iter()
-                    .any(|(when_expr, then_expr)| {
-                        contains_window_expr(when_expr) || contains_window_expr(then_expr)
-                    })
-                || else_expr.as_ref().is_some_and(|expr| contains_window_expr(expr))
+                || when_then.iter().any(|(when_expr, then_expr)| {
+                    contains_window_expr(when_expr) || contains_window_expr(then_expr)
+                })
+                || else_expr
+                    .as_ref()
+                    .is_some_and(|expr| contains_window_expr(expr))
         }
         Expr::CaseSearched {
             when_then,
             else_expr,
         } => {
-            when_then
-                .iter()
-                .any(|(when_expr, then_expr)| {
-                    contains_window_expr(when_expr) || contains_window_expr(then_expr)
-                })
-                || else_expr.as_ref().is_some_and(|expr| contains_window_expr(expr))
+            when_then.iter().any(|(when_expr, then_expr)| {
+                contains_window_expr(when_expr) || contains_window_expr(then_expr)
+            }) || else_expr
+                .as_ref()
+                .is_some_and(|expr| contains_window_expr(expr))
         }
         Expr::ArrayConstructor(items) => items.iter().any(contains_window_expr),
         Expr::ArraySubquery(_) => false,
@@ -1873,9 +1926,9 @@ fn contains_window_bound_expr(bound: &WindowFrameBound) -> bool {
 fn group_by_contains_window_expr(group_by: &[GroupByExpr]) -> bool {
     group_by.iter().any(|expr| match expr {
         GroupByExpr::Expr(expr) => contains_window_expr(expr),
-        GroupByExpr::GroupingSets(sets) => sets
-            .iter()
-            .any(|set| set.iter().any(contains_window_expr)),
+        GroupByExpr::GroupingSets(sets) => {
+            sets.iter().any(|set| set.iter().any(contains_window_expr))
+        }
         GroupByExpr::Rollup(exprs) | GroupByExpr::Cube(exprs) => {
             exprs.iter().any(contains_window_expr)
         }
@@ -2025,221 +2078,258 @@ fn eval_group_expr<'a>(
 ) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
     Box::pin(async move {
         match expr {
-        Expr::FunctionCall {
-            name,
-            args,
-            distinct,
-            order_by,
-            within_group,
-            filter,
-            over,
-        } => {
-            if over.is_some() {
-                return Err(EngineError {
-                    message: "window functions are not allowed in grouped aggregate expressions"
-                        .to_string(),
-                });
-            }
-            let fn_name = name
-                .last()
-                .map(|n| n.to_ascii_lowercase())
-                .unwrap_or_default();
-            if fn_name == "grouping" {
-                if *distinct || !order_by.is_empty() || !within_group.is_empty() || filter.is_some() {
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+                order_by,
+                within_group,
+                filter,
+                over,
+            } => {
+                if over.is_some() {
                     return Err(EngineError {
-                        message: "grouping() does not accept aggregate modifiers".to_string(),
+                        message:
+                            "window functions are not allowed in grouped aggregate expressions"
+                                .to_string(),
                     });
                 }
-                if args.len() != 1 {
-                    return Err(EngineError {
-                        message: "grouping() expects exactly one argument".to_string(),
-                    });
+                let fn_name = name
+                    .last()
+                    .map(|n| n.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if fn_name == "grouping" {
+                    if *distinct
+                        || !order_by.is_empty()
+                        || !within_group.is_empty()
+                        || filter.is_some()
+                    {
+                        return Err(EngineError {
+                            message: "grouping() does not accept aggregate modifiers".to_string(),
+                        });
+                    }
+                    if args.len() != 1 {
+                        return Err(EngineError {
+                            message: "grouping() expects exactly one argument".to_string(),
+                        });
+                    }
+                    let Some(key) = identifier_key(&args[0]) else {
+                        return Err(EngineError {
+                            message: "grouping() expects a column reference".to_string(),
+                        });
+                    };
+                    let value = if grouping.current_grouping.contains(&key) {
+                        0
+                    } else {
+                        1
+                    };
+                    return Ok(ScalarValue::Int(value));
                 }
-                let Some(key) = identifier_key(&args[0]) else {
-                    return Err(EngineError {
-                        message: "grouping() expects a column reference".to_string(),
-                    });
-                };
-                let value = if grouping.current_grouping.contains(&key) {
-                    0
-                } else {
-                    1
-                };
-                return Ok(ScalarValue::Int(value));
-            }
-            if is_aggregate_function(&fn_name) {
-                return eval_aggregate_function(
-                    &fn_name,
-                    args,
-                    *distinct,
-                    order_by,
-                    within_group,
-                    filter.as_deref(),
-                    group_rows,
-                    params,
-                )
-                .await;
-            }
-            if *distinct || !order_by.is_empty() || !within_group.is_empty() || filter.is_some() {
-                return Err(EngineError {
-                    message: format!(
-                        "{}() aggregate modifiers require grouped aggregate evaluation",
-                        fn_name
-                    ),
-                });
-            }
-
-            let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                values.push(
-                    eval_group_expr(arg, group_rows, representative, params, grouping).await?,
-                );
-            }
-            eval_scalar_function(&fn_name, &values).await
-        }
-        Expr::Unary { op, expr } => {
-            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
-            eval_unary(op.clone(), value)
-        }
-        Expr::Binary { left, op, right } => {
-            let lhs = eval_group_expr(left, group_rows, representative, params, grouping).await?;
-            let rhs = eval_group_expr(right, group_rows, representative, params, grouping).await?;
-            eval_binary(op.clone(), lhs, rhs)
-        }
-        Expr::AnyAll {
-            left,
-            op,
-            right,
-            quantifier,
-        } => {
-            let lhs = eval_group_expr(left, group_rows, representative, params, grouping).await?;
-            let rhs = eval_group_expr(right, group_rows, representative, params, grouping).await?;
-            eval_any_all(op.clone(), lhs, rhs, quantifier.clone())
-        }
-        Expr::Cast { expr, type_name } => {
-            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
-            eval_cast_scalar(value, type_name)
-        }
-        Expr::Between {
-            expr,
-            low,
-            high,
-            negated,
-        } => {
-            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
-            let low_value = eval_group_expr(low, group_rows, representative, params, grouping).await?;
-            let high_value = eval_group_expr(high, group_rows, representative, params, grouping).await?;
-            eval_between_predicate(value, low_value, high_value, *negated)
-        }
-        Expr::Like {
-            expr,
-            pattern,
-            case_insensitive,
-            negated,
-        } => {
-            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
-            let pattern_value = eval_group_expr(pattern, group_rows, representative, params, grouping).await?;
-            eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
-        }
-        Expr::IsNull { expr, negated } => {
-            let value = eval_group_expr(expr, group_rows, representative, params, grouping).await?;
-            let is_null = matches!(value, ScalarValue::Null);
-            Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
-        }
-        Expr::IsDistinctFrom {
-            left,
-            right,
-            negated,
-        } => {
-            let left_value = eval_group_expr(left, group_rows, representative, params, grouping).await?;
-            let right_value = eval_group_expr(right, group_rows, representative, params, grouping).await?;
-            eval_is_distinct_from(left_value, right_value, *negated)
-        }
-        Expr::CaseSimple {
-            operand,
-            when_then,
-            else_expr,
-        } => {
-            let operand_value =
-                eval_group_expr(operand, group_rows, representative, params, grouping).await?;
-            for (when_expr, then_expr) in when_then {
-                let when_value =
-                    eval_group_expr(when_expr, group_rows, representative, params, grouping).await?;
-                if matches!(operand_value, ScalarValue::Null)
-                    || matches!(when_value, ScalarValue::Null)
+                if is_aggregate_function(&fn_name) {
+                    return eval_aggregate_function(
+                        &fn_name,
+                        args,
+                        *distinct,
+                        order_by,
+                        within_group,
+                        filter.as_deref(),
+                        group_rows,
+                        params,
+                    )
+                    .await;
+                }
+                if *distinct || !order_by.is_empty() || !within_group.is_empty() || filter.is_some()
                 {
-                    continue;
+                    return Err(EngineError {
+                        message: format!(
+                            "{}() aggregate modifiers require grouped aggregate evaluation",
+                            fn_name
+                        ),
+                    });
                 }
-                if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_group_expr(then_expr, group_rows, representative, params, grouping)
+
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(
+                        eval_group_expr(arg, group_rows, representative, params, grouping).await?,
+                    );
+                }
+                eval_scalar_function(&fn_name, &values).await
+            }
+            Expr::Unary { op, expr } => {
+                let value =
+                    eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+                eval_unary(op.clone(), value)
+            }
+            Expr::Binary { left, op, right } => {
+                let lhs =
+                    eval_group_expr(left, group_rows, representative, params, grouping).await?;
+                let rhs =
+                    eval_group_expr(right, group_rows, representative, params, grouping).await?;
+                eval_binary(op.clone(), lhs, rhs)
+            }
+            Expr::AnyAll {
+                left,
+                op,
+                right,
+                quantifier,
+            } => {
+                let lhs =
+                    eval_group_expr(left, group_rows, representative, params, grouping).await?;
+                let rhs =
+                    eval_group_expr(right, group_rows, representative, params, grouping).await?;
+                eval_any_all(op.clone(), lhs, rhs, quantifier.clone())
+            }
+            Expr::Cast { expr, type_name } => {
+                let value =
+                    eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+                eval_cast_scalar(value, type_name)
+            }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
+                let value =
+                    eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+                let low_value =
+                    eval_group_expr(low, group_rows, representative, params, grouping).await?;
+                let high_value =
+                    eval_group_expr(high, group_rows, representative, params, grouping).await?;
+                eval_between_predicate(value, low_value, high_value, *negated)
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                case_insensitive,
+                negated,
+            } => {
+                let value =
+                    eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+                let pattern_value =
+                    eval_group_expr(pattern, group_rows, representative, params, grouping).await?;
+                eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
+            }
+            Expr::IsNull { expr, negated } => {
+                let value =
+                    eval_group_expr(expr, group_rows, representative, params, grouping).await?;
+                let is_null = matches!(value, ScalarValue::Null);
+                Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
+            }
+            Expr::IsDistinctFrom {
+                left,
+                right,
+                negated,
+            } => {
+                let left_value =
+                    eval_group_expr(left, group_rows, representative, params, grouping).await?;
+                let right_value =
+                    eval_group_expr(right, group_rows, representative, params, grouping).await?;
+                eval_is_distinct_from(left_value, right_value, *negated)
+            }
+            Expr::CaseSimple {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                let operand_value =
+                    eval_group_expr(operand, group_rows, representative, params, grouping).await?;
+                for (when_expr, then_expr) in when_then {
+                    let when_value =
+                        eval_group_expr(when_expr, group_rows, representative, params, grouping)
+                            .await?;
+                    if matches!(operand_value, ScalarValue::Null)
+                        || matches!(when_value, ScalarValue::Null)
+                    {
+                        continue;
+                    }
+                    if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal
+                    {
+                        return eval_group_expr(
+                            then_expr,
+                            group_rows,
+                            representative,
+                            params,
+                            grouping,
+                        )
                         .await;
+                    }
+                }
+                if let Some(else_expr) = else_expr {
+                    eval_group_expr(else_expr, group_rows, representative, params, grouping).await
+                } else {
+                    Ok(ScalarValue::Null)
                 }
             }
-            if let Some(else_expr) = else_expr {
-                eval_group_expr(else_expr, group_rows, representative, params, grouping).await
-            } else {
-                Ok(ScalarValue::Null)
-            }
-        }
-        Expr::CaseSearched {
-            when_then,
-            else_expr,
-        } => {
-            for (when_expr, then_expr) in when_then {
-                let condition =
-                    eval_group_expr(when_expr, group_rows, representative, params, grouping).await?;
-                if truthy(&condition) {
-                    return eval_group_expr(then_expr, group_rows, representative, params, grouping)
+            Expr::CaseSearched {
+                when_then,
+                else_expr,
+            } => {
+                for (when_expr, then_expr) in when_then {
+                    let condition =
+                        eval_group_expr(when_expr, group_rows, representative, params, grouping)
+                            .await?;
+                    if truthy(&condition) {
+                        return eval_group_expr(
+                            then_expr,
+                            group_rows,
+                            representative,
+                            params,
+                            grouping,
+                        )
                         .await;
+                    }
+                }
+                if let Some(else_expr) = else_expr {
+                    eval_group_expr(else_expr, group_rows, representative, params, grouping).await
+                } else {
+                    Ok(ScalarValue::Null)
                 }
             }
-            if let Some(else_expr) = else_expr {
-                eval_group_expr(else_expr, group_rows, representative, params, grouping).await
-            } else {
-                Ok(ScalarValue::Null)
+            Expr::ArrayConstructor(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(
+                        eval_group_expr(item, group_rows, representative, params, grouping).await?,
+                    );
+                }
+                Ok(ScalarValue::Array(values))
+            }
+            Expr::ArraySubquery(query) => {
+                let result = execute_query_with_outer(query, params, Some(representative)).await?;
+                if !result.columns.is_empty() && result.columns.len() != 1 {
+                    return Err(EngineError {
+                        message: "subquery must return only one column".to_string(),
+                    });
+                }
+                let mut values = Vec::with_capacity(result.rows.len());
+                for row in &result.rows {
+                    values.push(row.first().cloned().unwrap_or(ScalarValue::Null));
+                }
+                Ok(ScalarValue::Array(values))
+            }
+            Expr::Identifier(_) => {
+                if let Some(key) = identifier_key(expr)
+                    && grouping.all_grouping.contains(&key)
+                    && !grouping.current_grouping.contains(&key)
+                {
+                    return Ok(ScalarValue::Null);
+                }
+                if group_rows.is_empty() {
+                    eval_expr(expr, &EvalScope::default(), params).await
+                } else {
+                    eval_expr(expr, representative, params).await
+                }
+            }
+            _ => {
+                if group_rows.is_empty() {
+                    eval_expr(expr, &EvalScope::default(), params).await
+                } else {
+                    eval_expr(expr, representative, params).await
+                }
             }
         }
-        Expr::ArrayConstructor(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(eval_group_expr(item, group_rows, representative, params, grouping).await?);
-            }
-            Ok(ScalarValue::Array(values))
-        }
-        Expr::ArraySubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(representative)).await?;
-            if !result.columns.is_empty() && result.columns.len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
-            }
-            let mut values = Vec::with_capacity(result.rows.len());
-            for row in &result.rows {
-                values.push(row.first().cloned().unwrap_or(ScalarValue::Null));
-            }
-            Ok(ScalarValue::Array(values))
-        }
-        Expr::Identifier(_) => {
-            if let Some(key) = identifier_key(expr)
-                && grouping.all_grouping.contains(&key)
-                && !grouping.current_grouping.contains(&key)
-            {
-                return Ok(ScalarValue::Null);
-            }
-            if group_rows.is_empty() {
-                eval_expr(expr, &EvalScope::default(), params).await
-            } else {
-                eval_expr(expr, representative, params).await
-            }
-        }
-        _ => {
-            if group_rows.is_empty() {
-                eval_expr(expr, &EvalScope::default(), params).await
-            } else {
-                eval_expr(expr, representative, params).await
-            }
-        }
-    }
     })
 }
 
@@ -2385,7 +2475,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: "count() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2402,7 +2493,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: "sum() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2447,7 +2539,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: "avg() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2485,7 +2578,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: format!("{fn_name}() expects exactly one argument"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2520,7 +2614,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: format!("{fn_name}() expects exactly one argument"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2540,7 +2635,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: "string_agg() expects exactly two arguments".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2551,7 +2647,8 @@ pub(crate) async fn eval_aggregate_function(
                 Some(other) => other.render(),
                 None => return Ok(ScalarValue::Null),
             };
-            let parts: Vec<String> = rows.iter()
+            let parts: Vec<String> = rows
+                .iter()
                 .filter(|r| !matches!(r.args[0], ScalarValue::Null))
                 .map(|r| r.args[0].render())
                 .collect();
@@ -2567,7 +2664,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: "array_agg() expects exactly one argument".to_string(),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2575,119 +2673,187 @@ pub(crate) async fn eval_aggregate_function(
             if rows.is_empty() {
                 return Ok(ScalarValue::Null);
             }
-            let parts: Vec<String> = rows.iter().map(|r| {
-                if matches!(r.args[0], ScalarValue::Null) { "NULL".to_string() } else { r.args[0].render() }
-            }).collect();
+            let parts: Vec<String> = rows
+                .iter()
+                .map(|r| {
+                    if matches!(r.args[0], ScalarValue::Null) {
+                        "NULL".to_string()
+                    } else {
+                        r.args[0].render()
+                    }
+                })
+                .collect();
             Ok(ScalarValue::Text(format!("{{{}}}", parts.join(","))))
         }
         "bool_and" | "every" => {
             if args.len() != 1 {
-                return Err(EngineError { message: format!("{fn_name}() expects one argument") });
+                return Err(EngineError {
+                    message: format!("{fn_name}() expects one argument"),
+                });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let mut result = true;
             let mut saw_any = false;
             for row in &rows {
                 match &row.args[0] {
                     ScalarValue::Null => {}
-                    ScalarValue::Bool(b) => { saw_any = true; if !b { result = false; } }
-                    _ => return Err(EngineError { message: format!("{fn_name}() expects boolean") }),
+                    ScalarValue::Bool(b) => {
+                        saw_any = true;
+                        if !b {
+                            result = false;
+                        }
+                    }
+                    _ => {
+                        return Err(EngineError {
+                            message: format!("{fn_name}() expects boolean"),
+                        });
+                    }
                 }
             }
-            if !saw_any { Ok(ScalarValue::Null) } else { Ok(ScalarValue::Bool(result)) }
+            if !saw_any {
+                Ok(ScalarValue::Null)
+            } else {
+                Ok(ScalarValue::Bool(result))
+            }
         }
         "bool_or" => {
             if args.len() != 1 {
-                return Err(EngineError { message: "bool_or() expects one argument".to_string() });
+                return Err(EngineError {
+                    message: "bool_or() expects one argument".to_string(),
+                });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             let mut result = false;
             let mut saw_any = false;
             for row in &rows {
                 match &row.args[0] {
                     ScalarValue::Null => {}
-                    ScalarValue::Bool(b) => { saw_any = true; if *b { result = true; } }
-                    _ => return Err(EngineError { message: "bool_or() expects boolean".to_string() }),
+                    ScalarValue::Bool(b) => {
+                        saw_any = true;
+                        if *b {
+                            result = true;
+                        }
+                    }
+                    _ => {
+                        return Err(EngineError {
+                            message: "bool_or() expects boolean".to_string(),
+                        });
+                    }
                 }
             }
-            if !saw_any { Ok(ScalarValue::Null) } else { Ok(ScalarValue::Bool(result)) }
+            if !saw_any {
+                Ok(ScalarValue::Null)
+            } else {
+                Ok(ScalarValue::Bool(result))
+            }
         }
         "stddev" | "stddev_samp" => {
             if args.len() != 1 {
-                return Err(EngineError { message: format!("{fn_name}() expects one argument") });
+                return Err(EngineError {
+                    message: format!("{fn_name}() expects one argument"),
+                });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
-            let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
-                ScalarValue::Int(i) => Some(*i as f64),
-                ScalarValue::Float(f) => Some(*f),
-                _ => None,
-            }).collect();
-            if values.len() < 2 { return Ok(ScalarValue::Null); }
+            let rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| match &r.args[0] {
+                    ScalarValue::Int(i) => Some(*i as f64),
+                    ScalarValue::Float(f) => Some(*f),
+                    _ => None,
+                })
+                .collect();
+            if values.len() < 2 {
+                return Ok(ScalarValue::Null);
+            }
             let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
             Ok(ScalarValue::Float(variance.sqrt()))
         }
         "stddev_pop" => {
             if args.len() != 1 {
-                return Err(EngineError { message: "stddev_pop() expects one argument".to_string() });
+                return Err(EngineError {
+                    message: "stddev_pop() expects one argument".to_string(),
+                });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
-            let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
-                ScalarValue::Int(i) => Some(*i as f64),
-                ScalarValue::Float(f) => Some(*f),
-                _ => None,
-            }).collect();
-            if values.is_empty() { return Ok(ScalarValue::Null); }
+            let rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| match &r.args[0] {
+                    ScalarValue::Int(i) => Some(*i as f64),
+                    ScalarValue::Float(f) => Some(*f),
+                    _ => None,
+                })
+                .collect();
+            if values.is_empty() {
+                return Ok(ScalarValue::Null);
+            }
             let mean = values.iter().sum::<f64>() / values.len() as f64;
-            let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
+            let variance =
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
             Ok(ScalarValue::Float(variance.sqrt()))
         }
         "variance" | "var_samp" => {
             if args.len() != 1 {
-                return Err(EngineError { message: format!("{fn_name}() expects one argument") });
+                return Err(EngineError {
+                    message: format!("{fn_name}() expects one argument"),
+                });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
-            let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
-                ScalarValue::Int(i) => Some(*i as f64),
-                ScalarValue::Float(f) => Some(*f),
-                _ => None,
-            }).collect();
-            if values.len() < 2 { return Ok(ScalarValue::Null); }
+            let rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| match &r.args[0] {
+                    ScalarValue::Int(i) => Some(*i as f64),
+                    ScalarValue::Float(f) => Some(*f),
+                    _ => None,
+                })
+                .collect();
+            if values.len() < 2 {
+                return Ok(ScalarValue::Null);
+            }
             let mean = values.iter().sum::<f64>() / values.len() as f64;
-            Ok(ScalarValue::Float(values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64))
+            Ok(ScalarValue::Float(
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64,
+            ))
         }
         "var_pop" => {
             if args.len() != 1 {
-                return Err(EngineError { message: "var_pop() expects one argument".to_string() });
+                return Err(EngineError {
+                    message: "var_pop() expects one argument".to_string(),
+                });
             }
-            let rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
-            let values: Vec<f64> = rows.iter().filter_map(|r| match &r.args[0] {
-                ScalarValue::Int(i) => Some(*i as f64),
-                ScalarValue::Float(f) => Some(*f),
-                _ => None,
-            }).collect();
-            if values.is_empty() { return Ok(ScalarValue::Null); }
+            let rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| match &r.args[0] {
+                    ScalarValue::Int(i) => Some(*i as f64),
+                    ScalarValue::Float(f) => Some(*f),
+                    _ => None,
+                })
+                .collect();
+            if values.is_empty() {
+                return Ok(ScalarValue::Null);
+            }
             let mean = values.iter().sum::<f64>() / values.len() as f64;
-            Ok(ScalarValue::Float(values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64))
+            Ok(ScalarValue::Float(
+                values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64,
+            ))
         }
-        "corr"
-        | "covar_pop"
-        | "covar_samp"
-        | "regr_slope"
-        | "regr_intercept"
-        | "regr_count"
-        | "regr_r2"
-        | "regr_avgx"
-        | "regr_avgy"
-        | "regr_sxx"
-        | "regr_sxy"
-        | "regr_syy" => {
+        "corr" | "covar_pop" | "covar_samp" | "regr_slope" | "regr_intercept" | "regr_count"
+        | "regr_r2" | "regr_avgx" | "regr_avgy" | "regr_sxx" | "regr_sxy" | "regr_syy" => {
             if args.len() != 2 {
                 return Err(EngineError {
                     message: format!("{fn_name}() expects exactly two arguments"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -2802,10 +2968,8 @@ pub(crate) async fn eval_aggregate_function(
                 if matches!(value, ScalarValue::Null) {
                     continue;
                 }
-                let parsed = parse_f64_numeric_scalar(
-                    value,
-                    "percentile_cont() expects numeric values",
-                )?;
+                let parsed =
+                    parse_f64_numeric_scalar(value, "percentile_cont() expects numeric values")?;
                 values.push(parsed);
             }
             if values.is_empty() {
@@ -2945,7 +3109,8 @@ pub(crate) async fn eval_aggregate_function(
                     message: format!("{fn_name}() expects exactly two arguments"),
                 });
             }
-            let mut rows = build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
+            let mut rows =
+                build_aggregate_input_rows(args, order_by, filter, group_rows, params).await?;
             if distinct {
                 apply_aggregate_distinct(&mut rows);
             }
@@ -3033,10 +3198,7 @@ fn scope_from_row(
     scope
 }
 
-pub(crate) fn scope_for_table_row(
-    table: &crate::catalog::Table,
-    row: &[ScalarValue],
-) -> EvalScope {
+pub(crate) fn scope_for_table_row(table: &crate::catalog::Table, row: &[ScalarValue]) -> EvalScope {
     let qualifiers = vec![table.name().to_string(), table.qualified_name()];
     scope_for_table_row_with_qualifiers(table, row, &qualifiers)
 }
@@ -3240,10 +3402,7 @@ async fn apply_order_by(
         let scope = EvalScope::from_output_row(&columns, &row);
         let mut keys = Vec::with_capacity(query.order_by.len());
         for spec in &query.order_by {
-            keys.push(resolve_order_key(
-                &spec.expr, &scope, &columns, &row, params,
-            )
-            .await?);
+            keys.push(resolve_order_key(&spec.expr, &scope, &columns, &row, params).await?);
         }
         decorated.push((keys, row));
     }

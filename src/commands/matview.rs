@@ -3,7 +3,9 @@ use std::sync::{OnceLock, RwLock};
 
 use crate::catalog::{SearchPath, TableKind, with_catalog_read};
 use crate::commands::sequence::with_sequences_write;
-use crate::parser::ast::{CreateViewStatement, DropViewStatement, RefreshMaterializedViewStatement, AlterViewStatement};
+use crate::parser::ast::{
+    AlterViewStatement, CreateViewStatement, DropViewStatement, RefreshMaterializedViewStatement,
+};
 use crate::tcop::engine::{EngineError, QueryResult, ScalarValue, with_storage_write};
 
 #[derive(Debug, Default)]
@@ -167,7 +169,9 @@ async fn evaluate_materialized_view_rows_live(
             relation.qualified_name()
         ),
     })?;
-    Ok(crate::tcop::engine::execute_query(definition, params).await?.rows)
+    Ok(crate::tcop::engine::execute_query(definition, params)
+        .await?
+        .rows)
 }
 
 async fn evaluate_materialized_view_rows_concurrently(

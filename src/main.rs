@@ -163,8 +163,8 @@ async fn execute_simple_query_via_session(sql: &str) -> Result<Vec<CliQueryResul
     let mut session = PostgresSession::new();
     let messages = session
         .run([FrontendMessage::Query {
-        sql: sql.to_string(),
-    }])
+            sql: sql.to_string(),
+        }])
         .await;
 
     let mut results = Vec::new();

@@ -1,5 +1,5 @@
 use crate::catalog::{ColumnSpec, TableKind, TypeSignature, with_catalog_write};
-use crate::commands::sequence::{with_sequences_read, with_sequences_write, SequenceState};
+use crate::commands::sequence::{SequenceState, with_sequences_read, with_sequences_write};
 use crate::parser::ast::{CreateTableStatement, Expr, TableConstraint, TypeName};
 use crate::security;
 use crate::tcop::engine::{EngineError, QueryResult, with_storage_write};

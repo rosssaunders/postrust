@@ -55,9 +55,8 @@ pub async fn execute_drop_extension(
         }
         if name == "ws" {
             ext.ws_connections.clear();
-            ext.user_functions.retain(|f| {
-                f.name.first().map(|s| s.as_str()) != Some("ws")
-            });
+            ext.user_functions
+                .retain(|f| f.name.first().map(|s| s.as_str()) != Some("ws"));
         }
         Ok(())
     })?;

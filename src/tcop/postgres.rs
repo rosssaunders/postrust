@@ -13,6 +13,8 @@ use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
 
+use crate::access::transam::visibility::VisibilityMode;
+use crate::access::transam::xact::TransactionContext;
 use crate::parser::ast::{
     AlterRoleStatement, CopyDirection as AstCopyDirection, CopyFormat as AstCopyFormat,
     CopyOptions as AstCopyOptions, CopyStatement, CreateRoleStatement, DropRoleStatement, Expr,
@@ -28,8 +30,6 @@ use crate::tcop::engine::{
     copy_table_binary_snapshot, copy_table_column_oids, execute_planned_query, plan_statement,
     restore_state, snapshot_state, type_oid_size,
 };
-use crate::access::transam::visibility::VisibilityMode;
-use crate::access::transam::xact::TransactionContext;
 
 pub type PgType = u32;
 
@@ -535,7 +535,9 @@ impl PostgresSession {
     where
         I: IntoIterator<Item = FrontendMessage>,
     {
-        tokio::runtime::Builder::new_current_thread().enable_all().build()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .expect("tokio runtime should start")
             .block_on(self.run(messages))
     }
@@ -650,7 +652,8 @@ impl PostgresSession {
                 portal_name,
                 max_rows,
             } => {
-                self.exec_execute_message(&portal_name, max_rows, out).await?;
+                self.exec_execute_message(&portal_name, max_rows, out)
+                    .await?;
                 Ok(ControlFlow::Continue)
             }
             FrontendMessage::DescribeStatement { statement_name } => {
@@ -1449,114 +1452,116 @@ impl PostgresSession {
         let role = self.current_role.clone();
         security::with_current_role_async(&role, || async {
             match operation {
-            PlannedOperation::ParsedQuery(plan) => {
-                let result = match self.tx_state.visibility_mode() {
-                    VisibilityMode::Global => {
-                        execute_planned_query(plan, params)
+                PlannedOperation::ParsedQuery(plan) => {
+                    let result = match self.tx_state.visibility_mode() {
+                        VisibilityMode::Global => execute_planned_query(plan, params)
                             .await
-                            .map_err(SessionError::from)?
+                            .map_err(SessionError::from)?,
+                        VisibilityMode::TransactionLocal => {
+                            self.execute_query_in_transaction_scope(plan, params)
+                                .await?
+                        }
+                    };
+                    if plan.returns_data() {
+                        Ok(ExecutionOutcome::Query(result))
+                    } else {
+                        Ok(ExecutionOutcome::Command(Completion {
+                            tag: result.command_tag,
+                            rows: result.rows_affected,
+                        }))
                     }
-                    VisibilityMode::TransactionLocal => {
-                        self.execute_query_in_transaction_scope(plan, params).await?
-                    }
-                };
-                if plan.returns_data() {
-                    Ok(ExecutionOutcome::Query(result))
-                } else {
+                }
+                PlannedOperation::Transaction(command) => {
+                    self.apply_transaction_command(command.clone())?;
                     Ok(ExecutionOutcome::Command(Completion {
-                        tag: result.command_tag,
-                        rows: result.rows_affected,
+                        tag: operation.command_tag(),
+                        rows: 0,
                     }))
                 }
-            }
-            PlannedOperation::Transaction(command) => {
-                self.apply_transaction_command(command.clone())?;
-                Ok(ExecutionOutcome::Command(Completion {
-                    tag: operation.command_tag(),
-                    rows: 0,
-                }))
-            }
-            PlannedOperation::Security(command) => {
-                match self.tx_state.visibility_mode() {
-                    VisibilityMode::Global => self.execute_security_command(command)?,
-                    VisibilityMode::TransactionLocal => {
-                        self.execute_security_in_transaction_scope(command)?
-                    }
-                }
-                Ok(ExecutionOutcome::Command(Completion {
-                    tag: operation.command_tag(),
-                    rows: 0,
-                }))
-            }
-            PlannedOperation::Copy(command) => match command.direction {
-                CopyDirection::FromStdin => {
-                    let column_type_oids = self.copy_column_type_oids(&command.table_name)?;
-                    let (overall_format, column_formats) = match command.format {
-                        CopyFormat::Binary => (1, vec![1i16; column_type_oids.len()]),
-                        CopyFormat::Text | CopyFormat::Csv => {
-                            (0, vec![0i16; column_type_oids.len()])
-                        }
-                    };
-                    self.copy_in_state = Some(CopyInState {
-                        table_name: command.table_name.clone(),
-                        format: command.format,
-                        delimiter: command.delimiter,
-                        null_marker: command.null_marker.clone(),
-                        column_type_oids: column_type_oids.clone(),
-                        payload: Vec::new(),
-                    });
-                    Ok(ExecutionOutcome::CopyInStart {
-                        overall_format,
-                        column_formats,
-                    })
-                }
-                CopyDirection::ToStdout => {
-                    let snapshot = match self.tx_state.visibility_mode() {
-                        VisibilityMode::Global => self.copy_snapshot(&command.table_name).await?,
+                PlannedOperation::Security(command) => {
+                    match self.tx_state.visibility_mode() {
+                        VisibilityMode::Global => self.execute_security_command(command)?,
                         VisibilityMode::TransactionLocal => {
-                            self.copy_snapshot_in_transaction_scope(&command.table_name).await?
+                            self.execute_security_in_transaction_scope(command)?
                         }
-                    };
-                    let snapshot_column_type_oids = snapshot
-                        .columns
-                        .iter()
-                        .map(|column| column.type_oid)
-                        .collect::<Vec<_>>();
-                    let (overall_format, column_formats, data) = match command.format {
-                        CopyFormat::Binary => (
-                            1,
-                            vec![1i16; snapshot.columns.len()],
-                            encode_copy_binary_stream(&snapshot.columns, &snapshot.rows)?,
-                        ),
-                        CopyFormat::Text | CopyFormat::Csv => (
-                            0,
-                            vec![0i16; snapshot.columns.len()],
-                            encode_copy_text_stream(
-                                &snapshot.rows,
-                                &snapshot_column_type_oids,
-                                command.delimiter,
-                                &command.null_marker,
-                                matches!(command.format, CopyFormat::Csv),
-                            )?,
-                        ),
-                    };
-                    Ok(ExecutionOutcome::CopyOut {
-                        overall_format,
-                        column_formats,
-                        data,
-                        rows: snapshot.rows.len() as u64,
-                    })
+                    }
+                    Ok(ExecutionOutcome::Command(Completion {
+                        tag: operation.command_tag(),
+                        rows: 0,
+                    }))
                 }
-            },
-            PlannedOperation::Utility(tag) => Ok(ExecutionOutcome::Command(Completion {
-                tag: tag.clone(),
-                rows: 0,
-            })),
-            PlannedOperation::Empty => Ok(ExecutionOutcome::Command(Completion {
-                tag: "EMPTY".to_string(),
-                rows: 0,
-            })),
-        }
+                PlannedOperation::Copy(command) => match command.direction {
+                    CopyDirection::FromStdin => {
+                        let column_type_oids = self.copy_column_type_oids(&command.table_name)?;
+                        let (overall_format, column_formats) = match command.format {
+                            CopyFormat::Binary => (1, vec![1i16; column_type_oids.len()]),
+                            CopyFormat::Text | CopyFormat::Csv => {
+                                (0, vec![0i16; column_type_oids.len()])
+                            }
+                        };
+                        self.copy_in_state = Some(CopyInState {
+                            table_name: command.table_name.clone(),
+                            format: command.format,
+                            delimiter: command.delimiter,
+                            null_marker: command.null_marker.clone(),
+                            column_type_oids: column_type_oids.clone(),
+                            payload: Vec::new(),
+                        });
+                        Ok(ExecutionOutcome::CopyInStart {
+                            overall_format,
+                            column_formats,
+                        })
+                    }
+                    CopyDirection::ToStdout => {
+                        let snapshot = match self.tx_state.visibility_mode() {
+                            VisibilityMode::Global => {
+                                self.copy_snapshot(&command.table_name).await?
+                            }
+                            VisibilityMode::TransactionLocal => {
+                                self.copy_snapshot_in_transaction_scope(&command.table_name)
+                                    .await?
+                            }
+                        };
+                        let snapshot_column_type_oids = snapshot
+                            .columns
+                            .iter()
+                            .map(|column| column.type_oid)
+                            .collect::<Vec<_>>();
+                        let (overall_format, column_formats, data) = match command.format {
+                            CopyFormat::Binary => (
+                                1,
+                                vec![1i16; snapshot.columns.len()],
+                                encode_copy_binary_stream(&snapshot.columns, &snapshot.rows)?,
+                            ),
+                            CopyFormat::Text | CopyFormat::Csv => (
+                                0,
+                                vec![0i16; snapshot.columns.len()],
+                                encode_copy_text_stream(
+                                    &snapshot.rows,
+                                    &snapshot_column_type_oids,
+                                    command.delimiter,
+                                    &command.null_marker,
+                                    matches!(command.format, CopyFormat::Csv),
+                                )?,
+                            ),
+                        };
+                        Ok(ExecutionOutcome::CopyOut {
+                            overall_format,
+                            column_formats,
+                            data,
+                            rows: snapshot.rows.len() as u64,
+                        })
+                    }
+                },
+                PlannedOperation::Utility(tag) => Ok(ExecutionOutcome::Command(Completion {
+                    tag: tag.clone(),
+                    rows: 0,
+                })),
+                PlannedOperation::Empty => Ok(ExecutionOutcome::Command(Completion {
+                    tag: "EMPTY".to_string(),
+                    rows: 0,
+                })),
+            }
         })
         .await
     }
@@ -1848,7 +1853,8 @@ impl PostgresSession {
                 .map_err(SessionError::from)?
             }
             VisibilityMode::TransactionLocal => {
-                self.copy_insert_rows_in_transaction_scope(&state.table_name, rows).await?
+                self.copy_insert_rows_in_transaction_scope(&state.table_name, rows)
+                    .await?
             }
         };
 

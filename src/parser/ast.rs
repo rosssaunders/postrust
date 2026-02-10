@@ -221,14 +221,14 @@ pub struct CopyStatement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeName {
     Bool,
-    Int2, // SMALLINT
-    Int4, // INTEGER
-    Int8, // BIGINT
+    Int2,   // SMALLINT
+    Int4,   // INTEGER
+    Int8,   // BIGINT
     Float4, // REAL
     Float8, // DOUBLE PRECISION
     Text,
     Varchar, // VARCHAR(n) - length stored separately in ColumnDefinition
-    Char, // CHAR(n)
+    Char,    // CHAR(n)
     Bytea,
     Uuid,
     Json,
@@ -237,7 +237,7 @@ pub enum TypeName {
     Timestamp,
     TimestampTz,
     Interval,
-    Serial,   // auto-incrementing INT4
+    Serial,    // auto-incrementing INT4
     BigSerial, // auto-incrementing INT8
     Numeric,   // DECIMAL/NUMERIC
 }

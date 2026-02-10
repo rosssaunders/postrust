@@ -1,6 +1,8 @@
 use crate::parser::ast::{ExplainStatement, QueryExpr, Statement, TableExpression};
 use crate::planner::{self, PlanNode};
-use crate::tcop::engine::{execute_planned_query, plan_statement, EngineError, QueryResult, ScalarValue};
+use crate::tcop::engine::{
+    EngineError, QueryResult, ScalarValue, execute_planned_query, plan_statement,
+};
 
 pub async fn execute_explain(
     explain: &ExplainStatement,
@@ -15,8 +17,8 @@ pub async fn execute_explain(
 
     if explain.analyze {
         let start = std::time::Instant::now();
-        let inner_result = execute_planned_query(&plan_statement((*explain.statement).clone())?, params)
-            .await?;
+        let inner_result =
+            execute_planned_query(&plan_statement((*explain.statement).clone())?, params).await?;
         let elapsed = start.elapsed();
         plan_lines.push("Planning Time: 0.001 ms".to_string());
         plan_lines.push(format!(
@@ -74,13 +76,22 @@ fn describe_statement_plan(stmt: &Statement, lines: &mut Vec<String>, indent: us
             }
         },
         Statement::Insert(_) => {
-            lines.push(format!("{}Insert  (cost=0.00..1.00 rows=0 width=0)", prefix));
+            lines.push(format!(
+                "{}Insert  (cost=0.00..1.00 rows=0 width=0)",
+                prefix
+            ));
         }
         Statement::Update(_) => {
-            lines.push(format!("{}Update  (cost=0.00..1.00 rows=0 width=0)", prefix));
+            lines.push(format!(
+                "{}Update  (cost=0.00..1.00 rows=0 width=0)",
+                prefix
+            ));
         }
         Statement::Delete(_) => {
-            lines.push(format!("{}Delete  (cost=0.00..1.00 rows=0 width=0)", prefix));
+            lines.push(format!(
+                "{}Delete  (cost=0.00..1.00 rows=0 width=0)",
+                prefix
+            ));
         }
         _ => lines.push(format!("{}Utility Statement", prefix)),
     }

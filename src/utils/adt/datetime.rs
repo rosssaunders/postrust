@@ -90,7 +90,10 @@ pub(crate) fn eval_extract_or_date_part(
     Ok(value)
 }
 
-pub(crate) fn eval_date_trunc(field: &ScalarValue, source: &ScalarValue) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_date_trunc(
+    field: &ScalarValue,
+    source: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
     if matches!(field, ScalarValue::Null) || matches!(source, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -493,9 +496,15 @@ fn parse_datetime_parts_with_format(
     }
 
     let date = date_from_parts(
-        year.ok_or_else(|| EngineError { message: "missing year".to_string() })?,
-        month.ok_or_else(|| EngineError { message: "missing month".to_string() })?,
-        day.ok_or_else(|| EngineError { message: "missing day".to_string() })?,
+        year.ok_or_else(|| EngineError {
+            message: "missing year".to_string(),
+        })?,
+        month.ok_or_else(|| EngineError {
+            message: "missing month".to_string(),
+        })?,
+        day.ok_or_else(|| EngineError {
+            message: "missing day".to_string(),
+        })?,
     )?;
 
     if hour > 23 || minute > 59 || second > 59 {
@@ -638,21 +647,15 @@ fn parse_interval_text(text: &str) -> Result<IntervalValue, EngineError> {
             message: "invalid interval time".to_string(),
         });
     }
-    let hour = time_parts[0]
-        .parse::<i64>()
-        .map_err(|_| EngineError {
-            message: "invalid interval hour".to_string(),
-        })?;
-    let minute = time_parts[1]
-        .parse::<i64>()
-        .map_err(|_| EngineError {
-            message: "invalid interval minute".to_string(),
-        })?;
-    let second = time_parts[2]
-        .parse::<i64>()
-        .map_err(|_| EngineError {
-            message: "invalid interval second".to_string(),
-        })?;
+    let hour = time_parts[0].parse::<i64>().map_err(|_| EngineError {
+        message: "invalid interval hour".to_string(),
+    })?;
+    let minute = time_parts[1].parse::<i64>().map_err(|_| EngineError {
+        message: "invalid interval minute".to_string(),
+    })?;
+    let second = time_parts[2].parse::<i64>().map_err(|_| EngineError {
+        message: "invalid interval second".to_string(),
+    })?;
     let total_seconds = hour * 3_600 + minute * 60 + second;
     Ok(IntervalValue {
         months,
@@ -701,4 +704,3 @@ fn civil_from_days(days: i64) -> DateValue {
         day: day as u32,
     }
 }
-

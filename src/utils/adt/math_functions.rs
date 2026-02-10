@@ -2,7 +2,10 @@ use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::EngineError;
 use crate::utils::adt::misc::{parse_f64_scalar, parse_i64_scalar};
 
-pub(crate) fn numeric_mod(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, EngineError> {
+pub(crate) fn numeric_mod(
+    left: ScalarValue,
+    right: ScalarValue,
+) -> Result<ScalarValue, EngineError> {
     if matches!(left, ScalarValue::Null) || matches!(right, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -20,7 +23,9 @@ pub(crate) fn coerce_to_f64(v: &ScalarValue, context: &str) -> Result<f64, Engin
     match v {
         ScalarValue::Int(i) => Ok(*i as f64),
         ScalarValue::Float(f) => Ok(*f),
-        _ => Err(EngineError { message: format!("{} expects numeric argument", context) }),
+        _ => Err(EngineError {
+            message: format!("{} expects numeric argument", context),
+        }),
     }
 }
 
@@ -34,7 +39,6 @@ pub(crate) fn gcd_i64(mut a: i64, mut b: i64) -> i64 {
     }
     a
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum NumericOperand {
@@ -141,4 +145,3 @@ pub(crate) fn eval_factorial(value: &ScalarValue) -> Result<ScalarValue, EngineE
     }
     Ok(ScalarValue::Int(acc))
 }
-

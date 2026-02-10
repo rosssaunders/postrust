@@ -152,8 +152,8 @@ async fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, Stri
     let mut session = PostgresSession::new();
     let messages = session
         .run([FrontendMessage::Query {
-        sql: sql.to_string(),
-    }])
+            sql: sql.to_string(),
+        }])
         .await;
 
     let mut results = Vec::new();
@@ -377,7 +377,9 @@ mod tests {
     use std::future::Future;
 
     fn block_on<T>(future: impl Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread().enable_all().build()
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
             .expect("tokio runtime should start")
             .block_on(future)
     }
@@ -418,8 +420,7 @@ mod tests {
             let import_out = block_on(import_state_snapshot(&snapshot));
             assert!(!import_out.starts_with("Execution error:"));
 
-            let select_out =
-                block_on(execute_sql("select * from browser_snap_users order by id;"));
+            let select_out = block_on(execute_sql("select * from browser_snap_users order by id;"));
             assert!(select_out.contains("Ada"));
             assert!(select_out.contains("Linus"));
         });

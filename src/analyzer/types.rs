@@ -79,10 +79,7 @@ pub fn check_expr_is_numeric(expr: &Expr) -> Result<(), EngineError> {
             // PostgreSQL allows string literals if they parse as numbers
             if s.parse::<i64>().is_err() && s.parse::<f64>().is_err() {
                 return Err(EngineError {
-                    message: format!(
-                        "invalid input syntax for type bigint: \"{}\"",
-                        s
-                    ),
+                    message: format!("invalid input syntax for type bigint: \"{}\"", s),
                 });
             }
             Ok(())
@@ -130,28 +127,46 @@ mod type_tests {
 
     #[test]
     fn test_implicit_coercion_same_type() {
-        assert!(can_coerce_implicit(&TypeSignature::Int8, &TypeSignature::Int8));
-        assert!(can_coerce_implicit(&TypeSignature::Text, &TypeSignature::Text));
+        assert!(can_coerce_implicit(
+            &TypeSignature::Int8,
+            &TypeSignature::Int8
+        ));
+        assert!(can_coerce_implicit(
+            &TypeSignature::Text,
+            &TypeSignature::Text
+        ));
     }
 
     #[test]
     fn test_implicit_coercion_int_to_float() {
-        assert!(can_coerce_implicit(&TypeSignature::Int8, &TypeSignature::Float8));
+        assert!(can_coerce_implicit(
+            &TypeSignature::Int8,
+            &TypeSignature::Float8
+        ));
     }
 
     #[test]
     fn test_implicit_coercion_not_float_to_int() {
-        assert!(!can_coerce_implicit(&TypeSignature::Float8, &TypeSignature::Int8));
+        assert!(!can_coerce_implicit(
+            &TypeSignature::Float8,
+            &TypeSignature::Int8
+        ));
     }
 
     #[test]
     fn test_implicit_coercion_date_to_timestamp() {
-        assert!(can_coerce_implicit(&TypeSignature::Date, &TypeSignature::Timestamp));
+        assert!(can_coerce_implicit(
+            &TypeSignature::Date,
+            &TypeSignature::Timestamp
+        ));
     }
 
     #[test]
     fn test_implicit_coercion_text_to_date() {
-        assert!(can_coerce_implicit(&TypeSignature::Text, &TypeSignature::Date));
+        assert!(can_coerce_implicit(
+            &TypeSignature::Text,
+            &TypeSignature::Date
+        ));
     }
 
     #[test]
@@ -211,21 +226,33 @@ mod type_tests {
 
     #[test]
     fn test_types_comparable_same() {
-        assert!(types_are_comparable(&TypeSignature::Int8, &TypeSignature::Int8));
+        assert!(types_are_comparable(
+            &TypeSignature::Int8,
+            &TypeSignature::Int8
+        ));
     }
 
     #[test]
     fn test_types_comparable_numeric_mix() {
-        assert!(types_are_comparable(&TypeSignature::Int8, &TypeSignature::Float8));
+        assert!(types_are_comparable(
+            &TypeSignature::Int8,
+            &TypeSignature::Float8
+        ));
     }
 
     #[test]
     fn test_types_comparable_temporal() {
-        assert!(types_are_comparable(&TypeSignature::Date, &TypeSignature::Timestamp));
+        assert!(types_are_comparable(
+            &TypeSignature::Date,
+            &TypeSignature::Timestamp
+        ));
     }
 
     #[test]
     fn test_types_not_comparable_bool_date() {
-        assert!(!types_are_comparable(&TypeSignature::Bool, &TypeSignature::Date));
+        assert!(!types_are_comparable(
+            &TypeSignature::Bool,
+            &TypeSignature::Date
+        ));
     }
 }

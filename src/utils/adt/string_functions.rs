@@ -46,9 +46,9 @@ pub(crate) fn md5_hex(input: &str) -> String {
 
 pub(crate) fn md5_digest(input: &[u8]) -> [u8; 16] {
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9,
-        14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-        4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
     const K: [u32; 64] = [
         0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
@@ -103,10 +103,7 @@ pub(crate) fn md5_digest(input: &[u8]) -> [u8; 16] {
             let temp = d;
             d = c;
             c = b;
-            let rotate = a
-                .wrapping_add(f)
-                .wrapping_add(K[i])
-                .wrapping_add(m[g]);
+            let rotate = a.wrapping_add(f).wrapping_add(K[i]).wrapping_add(m[g]);
             b = b.wrapping_add(rotate.rotate_left(S[i]));
             a = temp;
         }
@@ -176,7 +173,10 @@ fn escape_bytes(input: &[u8]) -> String {
 
 fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, EngineError> {
     let trimmed = input.trim();
-    let hex = trimmed.strip_prefix("\\x").or_else(|| trimmed.strip_prefix("\\X")).unwrap_or(trimmed);
+    let hex = trimmed
+        .strip_prefix("\\x")
+        .or_else(|| trimmed.strip_prefix("\\X"))
+        .unwrap_or(trimmed);
     if !hex.len().is_multiple_of(2) {
         return Err(EngineError {
             message: "decode() invalid hex input length".to_string(),
@@ -215,7 +215,8 @@ fn decode_escape_bytes(input: &str) -> Result<Vec<u8>, EngineError> {
         let mut octal = String::new();
         for _ in 0..3 {
             if let Some(digit) = chars.peek().copied()
-                && digit.is_ascii_digit() && digit <= '7'
+                && digit.is_ascii_digit()
+                && digit <= '7'
             {
                 octal.push(digit);
                 chars.next();
@@ -234,8 +235,6 @@ fn decode_escape_bytes(input: &str) -> Result<Vec<u8>, EngineError> {
     Ok(out)
 }
 
-
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrimMode {
     Left,
@@ -243,7 +242,11 @@ pub(crate) enum TrimMode {
     Both,
 }
 
-pub(crate) fn substring_chars(input: &str, start: i64, length: Option<i64>) -> Result<String, EngineError> {
+pub(crate) fn substring_chars(
+    input: &str,
+    start: i64,
+    length: Option<i64>,
+) -> Result<String, EngineError> {
     if let Some(length) = length
         && length < 0
     {
@@ -336,7 +339,6 @@ pub(crate) fn chr_from_code(code: i64) -> Result<String, EngineError> {
     Ok(ch.to_string())
 }
 
-
 pub(crate) fn trim_text(input: &str, trim_chars: Option<&str>, mode: TrimMode) -> String {
     match trim_chars {
         None => match mode {
@@ -371,7 +373,7 @@ fn trim_chars_from_text(input: &str, trim_chars: &str, mode: TrimMode) -> String
 }
 
 pub(crate) fn sha256_hex(input: &str) -> String {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
@@ -379,4 +381,3 @@ pub(crate) fn sha256_hex(input: &str) -> String {
     let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
     format!("\\x{}", hex)
 }
-

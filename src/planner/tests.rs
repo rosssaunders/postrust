@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use super::{plan, PlanNode};
+use super::{PlanNode, plan};
 use crate::catalog::{reset_global_catalog_for_tests, with_global_state_lock};
 use crate::parser::sql_parser::parse_statement;
 use crate::planner::logical::LogicalPlan;
@@ -147,8 +147,8 @@ fn plans_nested_loop_join_for_small_inputs() {
         run_statement("CREATE TABLE b (id int8)");
         run_statement("INSERT INTO a VALUES (1)");
         run_statement("INSERT INTO b VALUES (1)");
-        let stmt =
-            parse_statement("SELECT * FROM a JOIN b ON a.id = b.id").expect("statement should parse");
+        let stmt = parse_statement("SELECT * FROM a JOIN b ON a.id = b.id")
+            .expect("statement should parse");
         let plan = plan(&stmt);
         match plan {
             PlanNode::Query(query_plan) => {

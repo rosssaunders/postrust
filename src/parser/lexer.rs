@@ -701,11 +701,18 @@ impl<'a> Lexer<'a> {
         }
 
         // Dollar-quoted string: $$ ... $$ or $tag$ ... $tag$
-        if self.peek_char() == Some('$') || self.peek_char().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+        if self.peek_char() == Some('$')
+            || self
+                .peek_char()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        {
             // Build the delimiter tag
             let tag_start = self.pos;
             // Collect tag chars (if any) before closing $
-            while self.peek_char().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            while self
+                .peek_char()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+            {
                 self.advance_char();
             }
             if self.peek_char() == Some('$') {
@@ -717,7 +724,10 @@ impl<'a> Lexer<'a> {
                 loop {
                     if self.pos >= self.input.len() {
                         return Err(LexError {
-                            message: format!("unterminated dollar-quoted string (expected {})", delimiter),
+                            message: format!(
+                                "unterminated dollar-quoted string (expected {})",
+                                delimiter
+                            ),
                             position: start,
                         });
                     }

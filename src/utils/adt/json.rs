@@ -91,7 +91,10 @@ fn maybe_pretty_json(value: &JsonValue, pretty: bool) -> Result<String, EngineEr
     }
 }
 
-pub(crate) fn eval_row_to_json(args: &[ScalarValue], fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_row_to_json(
+    args: &[ScalarValue],
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if matches!(args[0], ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -118,7 +121,10 @@ pub(crate) fn eval_row_to_json(args: &[ScalarValue], fn_name: &str) -> Result<Sc
     Ok(ScalarValue::Text(maybe_pretty_json(&object, pretty)?))
 }
 
-pub(crate) fn eval_array_to_json(args: &[ScalarValue], fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_array_to_json(
+    args: &[ScalarValue],
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if matches!(args[0], ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -192,7 +198,10 @@ fn parse_json_object_pairs_from_array(
     Ok(pairs)
 }
 
-pub(crate) fn eval_json_object(args: &[ScalarValue], fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_json_object(
+    args: &[ScalarValue],
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if args.iter().any(|arg| matches!(arg, ScalarValue::Null)) {
         return Ok(ScalarValue::Null);
     }
@@ -334,7 +343,10 @@ pub(crate) fn eval_json_extract_path(
     }
 }
 
-pub(crate) fn eval_json_array_length(value: &ScalarValue, fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_json_array_length(
+    value: &ScalarValue,
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if matches!(value, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -347,7 +359,10 @@ pub(crate) fn eval_json_array_length(value: &ScalarValue, fn_name: &str) -> Resu
     Ok(ScalarValue::Int(items.len() as i64))
 }
 
-pub(crate) fn eval_json_typeof(value: &ScalarValue, fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_json_typeof(
+    value: &ScalarValue,
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if matches!(value, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -385,7 +400,10 @@ fn strip_null_object_fields(value: &mut JsonValue) {
     }
 }
 
-pub(crate) fn eval_json_strip_nulls(value: &ScalarValue, fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_json_strip_nulls(
+    value: &ScalarValue,
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if matches!(value, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -394,7 +412,10 @@ pub(crate) fn eval_json_strip_nulls(value: &ScalarValue, fn_name: &str) -> Resul
     Ok(ScalarValue::Text(parsed.to_string()))
 }
 
-pub(crate) fn eval_json_pretty(value: &ScalarValue, fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_json_pretty(
+    value: &ScalarValue,
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if matches!(value, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -405,7 +426,10 @@ pub(crate) fn eval_json_pretty(value: &ScalarValue, fn_name: &str) -> Result<Sca
     Ok(ScalarValue::Text(pretty))
 }
 
-pub(crate) fn eval_jsonb_exists(target: &ScalarValue, key: &ScalarValue) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_jsonb_exists(
+    target: &ScalarValue,
+    key: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
     if matches!(target, ScalarValue::Null) || matches!(key, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }
@@ -855,9 +879,7 @@ fn parse_json_path_operand(
             for value in values {
                 if matches!(value, ScalarValue::Null) {
                     return Err(EngineError {
-                        message: format!(
-                            "{operator_name} operator path array cannot contain null"
-                        ),
+                        message: format!("{operator_name} operator path array cannot contain null"),
                     });
                 }
                 out.push(value.render());
@@ -1601,7 +1623,10 @@ pub(crate) fn jsonb_path_query_values(
     }
 }
 
-pub(crate) fn eval_jsonb_path_exists(args: &[ScalarValue], fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_jsonb_path_exists(
+    args: &[ScalarValue],
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if args.len() < 2 {
         return Err(EngineError {
             message: format!("{fn_name}() expects at least two arguments"),
@@ -1614,7 +1639,10 @@ pub(crate) fn eval_jsonb_path_exists(args: &[ScalarValue], fn_name: &str) -> Res
     Ok(ScalarValue::Bool(!values.is_empty()))
 }
 
-pub(crate) fn eval_jsonb_path_match(args: &[ScalarValue], fn_name: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_jsonb_path_match(
+    args: &[ScalarValue],
+    fn_name: &str,
+) -> Result<ScalarValue, EngineError> {
     if args.len() < 2 {
         return Err(EngineError {
             message: format!("{fn_name}() expects at least two arguments"),
@@ -1965,7 +1993,9 @@ pub(crate) fn eval_json_has_any_all_operator(
     Ok(ScalarValue::Bool(matched))
 }
 
-pub(crate) async fn eval_http_get_builtin(url_value: &ScalarValue) -> Result<ScalarValue, EngineError> {
+pub(crate) async fn eval_http_get_builtin(
+    url_value: &ScalarValue,
+) -> Result<ScalarValue, EngineError> {
     if matches!(url_value, ScalarValue::Null) {
         return Ok(ScalarValue::Null);
     }

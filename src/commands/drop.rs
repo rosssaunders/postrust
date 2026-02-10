@@ -1,14 +1,20 @@
-use crate::catalog::dependency::{describe_table as describe_table_from_catalog, expand_and_order_relation_drop as expand_and_order_relation_drop_in_catalog, expand_table_dependency_set as expand_table_dependencies_in_catalog};
-use crate::catalog::{with_catalog_read, with_catalog_write, SearchPath};
+use crate::catalog::dependency::{
+    describe_table as describe_table_from_catalog,
+    expand_and_order_relation_drop as expand_and_order_relation_drop_in_catalog,
+    expand_table_dependency_set as expand_table_dependencies_in_catalog,
+};
+use crate::catalog::{SearchPath, with_catalog_read, with_catalog_write};
 use crate::parser::ast::{DropBehavior, DropTableStatement, TruncateStatement};
 use crate::tcop::engine::{EngineError, QueryResult, with_storage_write};
 
-pub fn drop_relations_by_oid_order(drop_order: &[crate::catalog::oid::Oid]) -> Result<(), EngineError> {
+pub fn drop_relations_by_oid_order(
+    drop_order: &[crate::catalog::oid::Oid],
+) -> Result<(), EngineError> {
     for table_oid in drop_order {
         let ident = with_catalog_read(|catalog| describe_table_from_catalog(catalog, *table_oid))
             .map_err(|err| EngineError {
-                message: err.message,
-            })?;
+            message: err.message,
+        })?;
         with_catalog_write(|catalog| catalog.drop_table(&ident.schema_name, &ident.table_name))
             .map_err(|err| EngineError {
                 message: err.message,
@@ -86,9 +92,7 @@ pub async fn execute_drop_table(
     })
 }
 
-pub async fn execute_truncate(
-    truncate: &TruncateStatement,
-) -> Result<QueryResult, EngineError> {
+pub async fn execute_truncate(truncate: &TruncateStatement) -> Result<QueryResult, EngineError> {
     let mut base_table_oids = Vec::with_capacity(truncate.table_names.len());
     for table_name in &truncate.table_names {
         let table = with_catalog_read(|catalog| {

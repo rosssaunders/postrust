@@ -81,14 +81,12 @@ impl TransactionContext {
         match self.state {
             TransactionState::InTransaction => {}
             TransactionState::Idle => {
-                return Err("SAVEPOINT can only be used in transaction blocks".to_string())
+                return Err("SAVEPOINT can only be used in transaction blocks".to_string());
             }
-            TransactionState::Failed => {
-                return Err(
-                    "current transaction is aborted, commands ignored until end of transaction block"
-                        .to_string(),
-                )
-            }
+            TransactionState::Failed => return Err(
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .to_string(),
+            ),
         }
         let Some(snapshots) = &self.snapshots else {
             return Err("transaction state missing working snapshot".to_string());
@@ -104,14 +102,12 @@ impl TransactionContext {
         match self.state {
             TransactionState::InTransaction => {}
             TransactionState::Idle => {
-                return Err("RELEASE SAVEPOINT can only be used in transaction blocks".to_string())
+                return Err("RELEASE SAVEPOINT can only be used in transaction blocks".to_string());
             }
-            TransactionState::Failed => {
-                return Err(
-                    "current transaction is aborted, commands ignored until end of transaction block"
-                        .to_string(),
-                )
-            }
+            TransactionState::Failed => return Err(
+                "current transaction is aborted, commands ignored until end of transaction block"
+                    .to_string(),
+            ),
         }
         let normalized = name.to_ascii_lowercase();
         let Some(idx) = self

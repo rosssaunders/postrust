@@ -2,8 +2,8 @@
 
 use crate::analyzer::analyze;
 use crate::catalog::{
-    with_catalog_write, with_global_state_lock, reset_global_catalog_for_tests, ColumnSpec,
-    SearchPath, TableKind, TypeSignature,
+    ColumnSpec, SearchPath, TableKind, TypeSignature, reset_global_catalog_for_tests,
+    with_catalog_write, with_global_state_lock,
 };
 use crate::parser::ast::*;
 
@@ -28,10 +28,11 @@ fn setup_test_table(schema: &str, name: &str, columns: Vec<(&str, TypeSignature)
 fn test_analyze_select_from_existing_table() {
     with_global_state_lock(|| {
         reset_global_catalog_for_tests();
-        setup_test_table("public", "users", vec![
-            ("id", TypeSignature::Int8),
-            ("name", TypeSignature::Text),
-        ]);
+        setup_test_table(
+            "public",
+            "users",
+            vec![("id", TypeSignature::Int8), ("name", TypeSignature::Text)],
+        );
 
         let stmt = Statement::Query(Query {
             with: None,

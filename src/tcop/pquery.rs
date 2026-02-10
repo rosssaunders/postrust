@@ -3,14 +3,12 @@ use std::collections::{HashMap, HashSet};
 
 use crate::catalog::search_path::SearchPath;
 use crate::catalog::system_catalogs::lookup_virtual_relation;
-use crate::catalog::{with_catalog_read, TypeSignature};
-use crate::executor::exec_expr::{eval_expr, EvalScope};
-use crate::executor::exec_main::{
-    scope_for_table_row, scope_for_table_row_with_qualifiers,
-};
+use crate::catalog::{TypeSignature, with_catalog_read};
+use crate::executor::exec_expr::{EvalScope, eval_expr};
+use crate::executor::exec_main::{scope_for_table_row, scope_for_table_row_with_qualifiers};
 use crate::parser::ast::{
-    BinaryOp, Expr, GroupByExpr, JoinCondition, OrderByExpr, Query, QueryExpr,
-    SelectItem, SelectStatement, SetOperator, TableExpression, TableFunctionRef, UnaryOp,
+    BinaryOp, Expr, GroupByExpr, JoinCondition, OrderByExpr, Query, QueryExpr, SelectItem,
+    SelectStatement, SetOperator, TableExpression, TableFunctionRef, UnaryOp,
 };
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::EngineError;
@@ -170,17 +168,24 @@ fn infer_function_return_oid(
         .map(|part| part.to_ascii_lowercase())
         .unwrap_or_default();
     match fn_name.as_str() {
-        "count" | "char_length" | "length" | "nextval" | "currval" | "setval"
-        | "strpos" | "position" | "ascii" | "pg_backend_pid" | "width_bucket"
-        | "scale" | "factorial" | "num_nulls" | "num_nonnulls" => PG_INT8_OID,
+        "count" | "char_length" | "length" | "nextval" | "currval" | "setval" | "strpos"
+        | "position" | "ascii" | "pg_backend_pid" | "width_bucket" | "scale" | "factorial"
+        | "num_nulls" | "num_nonnulls" => PG_INT8_OID,
         "extract" | "date_part" => PG_INT8_OID,
         "avg" | "stddev" | "stddev_samp" | "stddev_pop" | "variance" | "var_samp" | "var_pop"
         | "corr" | "covar_pop" | "covar_samp" | "regr_slope" | "regr_intercept" | "regr_r2"
-        | "regr_avgx" | "regr_avgy" | "regr_sxx" | "regr_sxy" | "regr_syy"
-        | "percentile_cont" => PG_FLOAT8_OID,
+        | "regr_avgx" | "regr_avgy" | "regr_sxx" | "regr_sxy" | "regr_syy" | "percentile_cont" => {
+            PG_FLOAT8_OID
+        }
         "regr_count" => PG_INT8_OID,
-        "bool_and" | "bool_or" | "every" | "has_table_privilege" | "has_column_privilege"
-        | "has_schema_privilege" | "pg_table_is_visible" | "pg_type_is_visible"
+        "bool_and"
+        | "bool_or"
+        | "every"
+        | "has_table_privilege"
+        | "has_column_privilege"
+        | "has_schema_privilege"
+        | "pg_table_is_visible"
+        | "pg_type_is_visible"
         | "isfinite" => PG_BOOL_OID,
         "abs" | "ceil" | "ceiling" | "floor" | "round" | "trunc" | "sign" | "mod" => args
             .first()
@@ -366,7 +371,9 @@ fn infer_select_target_name(target: &SelectItem) -> Result<String, EngineError> 
     Ok(name)
 }
 
-pub(crate) fn derive_query_output_columns(query: &Query) -> Result<Vec<PlannedOutputColumn>, EngineError> {
+pub(crate) fn derive_query_output_columns(
+    query: &Query,
+) -> Result<Vec<PlannedOutputColumn>, EngineError> {
     let mut ctes = HashMap::new();
     derive_query_output_columns_with_ctes(query, &mut ctes)
 }
@@ -1023,10 +1030,7 @@ fn with_cte_context<T>(ctes: HashMap<String, CteBinding>, f: impl FnOnce() -> T)
     })
 }
 
-pub(crate) async fn with_cte_context_async<T, F, Fut>(
-    ctes: HashMap<String, CteBinding>,
-    f: F,
-) -> T
+pub(crate) async fn with_cte_context_async<T, F, Fut>(ctes: HashMap<String, CteBinding>, f: F) -> T
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
@@ -1390,7 +1394,11 @@ fn table_function_output_columns(function: &TableFunctionRef) -> Vec<String> {
         "unnest" => vec!["unnest".to_string()],
         "regexp_matches" => vec!["regexp_matches".to_string()],
         "regexp_split_to_table" => vec!["regexp_split_to_table".to_string()],
-        "pg_get_keywords" => vec!["word".to_string(), "catcode".to_string(), "catdesc".to_string()],
+        "pg_get_keywords" => vec![
+            "word".to_string(),
+            "catcode".to_string(),
+            "catdesc".to_string(),
+        ],
         _ => vec!["value".to_string()],
     }
 }
@@ -1429,5 +1437,3 @@ fn table_function_output_type_oids(function: &TableFunctionRef, count: usize) ->
     }
     oids
 }
-
-

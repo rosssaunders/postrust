@@ -5,9 +5,12 @@ use crate::tcop::engine::EngineError;
 use crate::utils::adt::datetime::{
     datetime_to_epoch_seconds, days_from_civil, parse_temporal_operand,
 };
-use crate::utils::adt::math_functions::{parse_numeric_operand, NumericOperand};
+use crate::utils::adt::math_functions::{NumericOperand, parse_numeric_operand};
 
-pub(crate) fn array_value_matches(target: &ScalarValue, candidate: &ScalarValue) -> Result<bool, EngineError> {
+pub(crate) fn array_value_matches(
+    target: &ScalarValue,
+    candidate: &ScalarValue,
+) -> Result<bool, EngineError> {
     match (target, candidate) {
         (ScalarValue::Null, ScalarValue::Null) => Ok(true),
         (ScalarValue::Null, _) | (_, ScalarValue::Null) => Ok(false),
@@ -15,8 +18,11 @@ pub(crate) fn array_value_matches(target: &ScalarValue, candidate: &ScalarValue)
     }
 }
 
-
-pub(crate) fn build_regex(pattern: &str, flags: &str, fn_name: &str) -> Result<regex::Regex, EngineError> {
+pub(crate) fn build_regex(
+    pattern: &str,
+    flags: &str,
+    fn_name: &str,
+) -> Result<regex::Regex, EngineError> {
     let mut builder = regex::RegexBuilder::new(pattern);
     for flag in flags.chars() {
         match flag {
@@ -50,7 +56,11 @@ pub(crate) fn text_array_from_options(items: &[Option<String>]) -> String {
     format!("{{{}}}", rendered.join(","))
 }
 
-pub(crate) fn eval_regexp_match(text: &str, pattern: &str, flags: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_regexp_match(
+    text: &str,
+    pattern: &str,
+    flags: &str,
+) -> Result<ScalarValue, EngineError> {
     let regex = build_regex(pattern, flags, "regexp_match")?;
     let Some(caps) = regex.captures(text) else {
         return Ok(ScalarValue::Null);
@@ -79,12 +89,20 @@ pub(crate) fn eval_regexp_matches_set_function(
             message: format!("{fn_name}() expects 2 or 3 arguments"),
         });
     }
-    if args.iter().take(2).any(|arg| matches!(arg, ScalarValue::Null)) {
+    if args
+        .iter()
+        .take(2)
+        .any(|arg| matches!(arg, ScalarValue::Null))
+    {
         return Ok((vec![fn_name.to_string()], Vec::new()));
     }
     let text = args[0].render();
     let pattern = args[1].render();
-    let flags = if args.len() == 3 { args[2].render() } else { String::new() };
+    let flags = if args.len() == 3 {
+        args[2].render()
+    } else {
+        String::new()
+    };
     let global = flags.contains('g');
     let regex = build_regex(&pattern, &flags, fn_name)?;
     let mut rows = Vec::new();
@@ -98,7 +116,10 @@ pub(crate) fn eval_regexp_matches_set_function(
     Ok((vec![fn_name.to_string()], rows))
 }
 
-pub(crate) fn eval_regexp_split_to_array(text: &str, pattern: &str) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_regexp_split_to_array(
+    text: &str,
+    pattern: &str,
+) -> Result<ScalarValue, EngineError> {
     let regex = build_regex(pattern, "", "regexp_split_to_array")?;
     let parts = regex
         .split(text)
@@ -154,7 +175,10 @@ pub(crate) fn eval_regexp_replace(
     Ok(ScalarValue::Text(out))
 }
 
-pub(crate) fn eval_extremum(args: &[ScalarValue], greatest: bool) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_extremum(
+    args: &[ScalarValue],
+    greatest: bool,
+) -> Result<ScalarValue, EngineError> {
     let mut best: Option<ScalarValue> = None;
     for arg in args {
         if matches!(arg, ScalarValue::Null) {
@@ -177,7 +201,6 @@ pub(crate) fn eval_extremum(args: &[ScalarValue], greatest: bool) -> Result<Scal
     }
     Ok(best.unwrap_or(ScalarValue::Null))
 }
-
 
 pub(crate) fn compare_values_for_predicate(
     left: &ScalarValue,
@@ -248,7 +271,10 @@ pub(crate) fn try_parse_bool(value: &ScalarValue) -> Option<bool> {
     }
 }
 
-pub(crate) fn parse_nullable_bool(value: &ScalarValue, message: &str) -> Result<Option<bool>, EngineError> {
+pub(crate) fn parse_nullable_bool(
+    value: &ScalarValue,
+    message: &str,
+) -> Result<Option<bool>, EngineError> {
     match value {
         ScalarValue::Bool(v) => Ok(Some(*v)),
         ScalarValue::Null => Ok(None),
@@ -275,7 +301,9 @@ pub(crate) fn quote_nullable(value: &ScalarValue) -> String {
 }
 
 pub(crate) fn count_nulls(args: &[ScalarValue]) -> usize {
-    args.iter().filter(|arg| matches!(arg, ScalarValue::Null)).count()
+    args.iter()
+        .filter(|arg| matches!(arg, ScalarValue::Null))
+        .count()
 }
 
 pub(crate) fn count_nonnulls(args: &[ScalarValue]) -> usize {
@@ -331,10 +359,7 @@ pub(crate) fn parse_f64_numeric_scalar(
     }
 }
 
-pub(crate) fn parse_bool_scalar(
-    value: &ScalarValue,
-    message: &str,
-) -> Result<bool, EngineError> {
+pub(crate) fn parse_bool_scalar(value: &ScalarValue, message: &str) -> Result<bool, EngineError> {
     try_parse_bool(value).ok_or_else(|| EngineError {
         message: message.to_string(),
     })
@@ -352,4 +377,3 @@ pub(crate) fn truthy(value: &ScalarValue) -> bool {
 }
 
 // ── Extension & Function execution ──────────────────────────────────────────
-

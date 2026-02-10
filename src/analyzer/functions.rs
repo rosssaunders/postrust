@@ -12,7 +12,7 @@ use crate::tcop::engine::EngineError;
 /// validate the most common functions to catch obvious mistakes early.
 const KNOWN_FUNCTIONS: &[(&str, usize, usize)] = &[
     // Aggregate functions
-    ("count", 0, 1),   // count(*) = 0 args after expansion, count(x) = 1
+    ("count", 0, 1), // count(*) = 0 args after expansion, count(x) = 1
     ("sum", 1, 1),
     ("avg", 1, 1),
     ("min", 1, 1),
@@ -195,9 +195,8 @@ fn check_expr_functions(expr: &Expr) -> Result<(), EngineError> {
             let lower_name = func_name.to_lowercase();
 
             // Check argument count against known signatures
-            if let Some((_name, min_args, max_args)) = KNOWN_FUNCTIONS
-                .iter()
-                .find(|(n, _, _)| *n == lower_name)
+            if let Some((_name, min_args, max_args)) =
+                KNOWN_FUNCTIONS.iter().find(|(n, _, _)| *n == lower_name)
             {
                 let arg_count = if args.len() == 1 && matches!(args[0], Expr::Wildcard) {
                     // count(*) — treat as 0 args for validation purposes

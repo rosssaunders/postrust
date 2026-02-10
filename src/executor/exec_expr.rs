@@ -3,30 +3,30 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 
+use crate::executor::exec_main::{
+    compare_order_keys, eval_aggregate_function, execute_query_with_outer, is_aggregate_function,
+    parse_non_negative_int, row_key,
+};
 use crate::parser::ast::{
-    BinaryOp, ComparisonQuantifier, Expr, OrderByExpr, UnaryOp, WindowFrameBound,
-    WindowFrameUnits, WindowSpec,
+    BinaryOp, ComparisonQuantifier, Expr, OrderByExpr, UnaryOp, WindowFrameBound, WindowFrameUnits,
+    WindowSpec,
 };
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::{
-    drain_native_ws_messages, execute_planned_query, native_ws_handles, plan_statement,
-    with_ext_read, with_ext_write, ws_native, EngineError, QueryResult, WsConnection,
-};
-use crate::executor::exec_main::{
-    compare_order_keys, eval_aggregate_function, execute_query_with_outer,
-    is_aggregate_function, parse_non_negative_int, row_key,
+    EngineError, QueryResult, WsConnection, drain_native_ws_messages, execute_planned_query,
+    native_ws_handles, plan_statement, with_ext_read, with_ext_write, ws_native,
 };
 use crate::utils::adt::datetime::{
     datetime_to_epoch_seconds, days_from_civil, format_date, format_timestamp,
     parse_datetime_scalar, parse_temporal_operand, temporal_add_days,
 };
 use crate::utils::adt::json::{
-    eval_json_concat_operator, eval_json_contained_by_operator,
-    eval_json_contains_operator, eval_json_delete_operator, eval_json_delete_path_operator,
-    eval_json_get_operator, eval_json_has_any_all_operator, eval_json_has_key_operator,
-    eval_json_path_operator, eval_json_path_predicate_operator, parse_json_document_arg,
+    eval_json_concat_operator, eval_json_contained_by_operator, eval_json_contains_operator,
+    eval_json_delete_operator, eval_json_delete_path_operator, eval_json_get_operator,
+    eval_json_has_any_all_operator, eval_json_has_key_operator, eval_json_path_operator,
+    eval_json_path_predicate_operator, parse_json_document_arg,
 };
-use crate::utils::adt::math_functions::{numeric_mod, parse_numeric_operand, NumericOperand};
+use crate::utils::adt::math_functions::{NumericOperand, numeric_mod, parse_numeric_operand};
 use crate::utils::adt::misc::{
     compare_values_for_predicate, parse_bool_scalar, parse_f64_scalar, parse_i64_scalar,
     parse_nullable_bool, truthy,
@@ -34,7 +34,6 @@ use crate::utils::adt::misc::{
 use crate::utils::fmgr::eval_scalar_function;
 
 pub(crate) type EngineFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
-
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EvalScope {
@@ -167,212 +166,215 @@ pub(crate) fn eval_expr<'a>(
 ) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
     Box::pin(async move {
         match expr {
-        Expr::Null => Ok(ScalarValue::Null),
-        Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
-        Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
-        Expr::Float(v) => {
-            let parsed = v.parse::<f64>().map_err(|_| EngineError {
-                message: format!("invalid float literal \"{v}\""),
-            })?;
-            Ok(ScalarValue::Float(parsed))
-        }
-        Expr::String(v) => Ok(ScalarValue::Text(v.clone())),
-        Expr::Parameter(idx) => parse_param(*idx, params),
-        Expr::Identifier(parts) => scope.lookup_identifier(parts),
-        Expr::Unary { op, expr } => {
-            let value = eval_expr(expr, scope, params).await?;
-            eval_unary(op.clone(), value)
-        }
-        Expr::Binary { left, op, right } => {
-            let lhs = eval_expr(left, scope, params).await?;
-            let rhs = eval_expr(right, scope, params).await?;
-            eval_binary(op.clone(), lhs, rhs)
-        }
-        Expr::AnyAll {
-            left,
-            op,
-            right,
-            quantifier,
-        } => {
-            let lhs = eval_expr(left, scope, params).await?;
-            let rhs = eval_expr(right, scope, params).await?;
-            eval_any_all(op.clone(), lhs, rhs, quantifier.clone())
-        }
-        Expr::Exists(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope)).await?;
-            Ok(ScalarValue::Bool(!result.rows.is_empty()))
-        }
-        Expr::ScalarSubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope)).await?;
-            if result.rows.is_empty() {
-                return Ok(ScalarValue::Null);
+            Expr::Null => Ok(ScalarValue::Null),
+            Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
+            Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
+            Expr::Float(v) => {
+                let parsed = v.parse::<f64>().map_err(|_| EngineError {
+                    message: format!("invalid float literal \"{v}\""),
+                })?;
+                Ok(ScalarValue::Float(parsed))
             }
-            if result.rows.len() > 1 {
-                return Err(EngineError {
-                    message: "more than one row returned by a subquery used as an expression"
-                        .to_string(),
-                });
+            Expr::String(v) => Ok(ScalarValue::Text(v.clone())),
+            Expr::Parameter(idx) => parse_param(*idx, params),
+            Expr::Identifier(parts) => scope.lookup_identifier(parts),
+            Expr::Unary { op, expr } => {
+                let value = eval_expr(expr, scope, params).await?;
+                eval_unary(op.clone(), value)
             }
-            if result.rows[0].len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
+            Expr::Binary { left, op, right } => {
+                let lhs = eval_expr(left, scope, params).await?;
+                let rhs = eval_expr(right, scope, params).await?;
+                eval_binary(op.clone(), lhs, rhs)
             }
-            Ok(result.rows[0][0].clone())
-        }
-        Expr::ArrayConstructor(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(eval_expr(item, scope, params).await?);
+            Expr::AnyAll {
+                left,
+                op,
+                right,
+                quantifier,
+            } => {
+                let lhs = eval_expr(left, scope, params).await?;
+                let rhs = eval_expr(right, scope, params).await?;
+                eval_any_all(op.clone(), lhs, rhs, quantifier.clone())
             }
-            Ok(ScalarValue::Array(values))
-        }
-        Expr::ArraySubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope)).await?;
-            if !result.columns.is_empty() && result.columns.len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
+            Expr::Exists(query) => {
+                let result = execute_query_with_outer(query, params, Some(scope)).await?;
+                Ok(ScalarValue::Bool(!result.rows.is_empty()))
             }
-            let mut values = Vec::with_capacity(result.rows.len());
-            for row in &result.rows {
-                values.push(row.first().cloned().unwrap_or(ScalarValue::Null));
-            }
-            Ok(ScalarValue::Array(values))
-        }
-        Expr::InList {
-            expr,
-            list,
-            negated,
-        } => {
-            let lhs = eval_expr(expr, scope, params).await?;
-            let mut rhs_values = Vec::with_capacity(list.len());
-            for item in list {
-                rhs_values.push(eval_expr(item, scope, params).await?);
-            }
-            eval_in_membership(lhs, rhs_values, *negated)
-        }
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => {
-            let lhs = eval_expr(expr, scope, params).await?;
-            let result = execute_query_with_outer(subquery, params, Some(scope)).await?;
-            if !result.columns.is_empty() && result.columns.len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
-            }
-            let rhs_values = result
-                .rows
-                .iter()
-                .map(|row| row.first().cloned().unwrap_or(ScalarValue::Null))
-                .collect::<Vec<_>>();
-            eval_in_membership(lhs, rhs_values, *negated)
-        }
-        Expr::Between {
-            expr,
-            low,
-            high,
-            negated,
-        } => {
-            let value = eval_expr(expr, scope, params).await?;
-            let low_value = eval_expr(low, scope, params).await?;
-            let high_value = eval_expr(high, scope, params).await?;
-            eval_between_predicate(value, low_value, high_value, *negated)
-        }
-        Expr::Like {
-            expr,
-            pattern,
-            case_insensitive,
-            negated,
-        } => {
-            let value = eval_expr(expr, scope, params).await?;
-            let pattern_value = eval_expr(pattern, scope, params).await?;
-            eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
-        }
-        Expr::IsNull { expr, negated } => {
-            let value = eval_expr(expr, scope, params).await?;
-            let is_null = matches!(value, ScalarValue::Null);
-            Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
-        }
-        Expr::IsDistinctFrom {
-            left,
-            right,
-            negated,
-        } => {
-            let left_value = eval_expr(left, scope, params).await?;
-            let right_value = eval_expr(right, scope, params).await?;
-            eval_is_distinct_from(left_value, right_value, *negated)
-        }
-        Expr::CaseSimple {
-            operand,
-            when_then,
-            else_expr,
-        } => {
-            let operand_value = eval_expr(operand, scope, params).await?;
-            for (when_expr, then_expr) in when_then {
-                let when_value = eval_expr(when_expr, scope, params).await?;
-                if matches!(operand_value, ScalarValue::Null)
-                    || matches!(when_value, ScalarValue::Null)
-                {
-                    continue;
+            Expr::ScalarSubquery(query) => {
+                let result = execute_query_with_outer(query, params, Some(scope)).await?;
+                if result.rows.is_empty() {
+                    return Ok(ScalarValue::Null);
                 }
-                if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_expr(then_expr, scope, params).await;
+                if result.rows.len() > 1 {
+                    return Err(EngineError {
+                        message: "more than one row returned by a subquery used as an expression"
+                            .to_string(),
+                    });
                 }
+                if result.rows[0].len() != 1 {
+                    return Err(EngineError {
+                        message: "subquery must return only one column".to_string(),
+                    });
+                }
+                Ok(result.rows[0][0].clone())
             }
-            if let Some(else_expr) = else_expr {
-                eval_expr(else_expr, scope, params).await
-            } else {
-                Ok(ScalarValue::Null)
+            Expr::ArrayConstructor(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(eval_expr(item, scope, params).await?);
+                }
+                Ok(ScalarValue::Array(values))
             }
-        }
-        Expr::CaseSearched {
-            when_then,
-            else_expr,
-        } => {
-            for (when_expr, then_expr) in when_then {
-                let condition = eval_expr(when_expr, scope, params).await?;
-                if truthy(&condition) {
-                    return eval_expr(then_expr, scope, params).await;
+            Expr::ArraySubquery(query) => {
+                let result = execute_query_with_outer(query, params, Some(scope)).await?;
+                if !result.columns.is_empty() && result.columns.len() != 1 {
+                    return Err(EngineError {
+                        message: "subquery must return only one column".to_string(),
+                    });
+                }
+                let mut values = Vec::with_capacity(result.rows.len());
+                for row in &result.rows {
+                    values.push(row.first().cloned().unwrap_or(ScalarValue::Null));
+                }
+                Ok(ScalarValue::Array(values))
+            }
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let lhs = eval_expr(expr, scope, params).await?;
+                let mut rhs_values = Vec::with_capacity(list.len());
+                for item in list {
+                    rhs_values.push(eval_expr(item, scope, params).await?);
+                }
+                eval_in_membership(lhs, rhs_values, *negated)
+            }
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                let lhs = eval_expr(expr, scope, params).await?;
+                let result = execute_query_with_outer(subquery, params, Some(scope)).await?;
+                if !result.columns.is_empty() && result.columns.len() != 1 {
+                    return Err(EngineError {
+                        message: "subquery must return only one column".to_string(),
+                    });
+                }
+                let rhs_values = result
+                    .rows
+                    .iter()
+                    .map(|row| row.first().cloned().unwrap_or(ScalarValue::Null))
+                    .collect::<Vec<_>>();
+                eval_in_membership(lhs, rhs_values, *negated)
+            }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
+                let value = eval_expr(expr, scope, params).await?;
+                let low_value = eval_expr(low, scope, params).await?;
+                let high_value = eval_expr(high, scope, params).await?;
+                eval_between_predicate(value, low_value, high_value, *negated)
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                case_insensitive,
+                negated,
+            } => {
+                let value = eval_expr(expr, scope, params).await?;
+                let pattern_value = eval_expr(pattern, scope, params).await?;
+                eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
+            }
+            Expr::IsNull { expr, negated } => {
+                let value = eval_expr(expr, scope, params).await?;
+                let is_null = matches!(value, ScalarValue::Null);
+                Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
+            }
+            Expr::IsDistinctFrom {
+                left,
+                right,
+                negated,
+            } => {
+                let left_value = eval_expr(left, scope, params).await?;
+                let right_value = eval_expr(right, scope, params).await?;
+                eval_is_distinct_from(left_value, right_value, *negated)
+            }
+            Expr::CaseSimple {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                let operand_value = eval_expr(operand, scope, params).await?;
+                for (when_expr, then_expr) in when_then {
+                    let when_value = eval_expr(when_expr, scope, params).await?;
+                    if matches!(operand_value, ScalarValue::Null)
+                        || matches!(when_value, ScalarValue::Null)
+                    {
+                        continue;
+                    }
+                    if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal
+                    {
+                        return eval_expr(then_expr, scope, params).await;
+                    }
+                }
+                if let Some(else_expr) = else_expr {
+                    eval_expr(else_expr, scope, params).await
+                } else {
+                    Ok(ScalarValue::Null)
                 }
             }
-            if let Some(else_expr) = else_expr {
-                eval_expr(else_expr, scope, params).await
-            } else {
-                Ok(ScalarValue::Null)
+            Expr::CaseSearched {
+                when_then,
+                else_expr,
+            } => {
+                for (when_expr, then_expr) in when_then {
+                    let condition = eval_expr(when_expr, scope, params).await?;
+                    if truthy(&condition) {
+                        return eval_expr(then_expr, scope, params).await;
+                    }
+                }
+                if let Some(else_expr) = else_expr {
+                    eval_expr(else_expr, scope, params).await
+                } else {
+                    Ok(ScalarValue::Null)
+                }
             }
+            Expr::Cast { expr, type_name } => {
+                let value = eval_expr(expr, scope, params).await?;
+                eval_cast_scalar(value, type_name)
+            }
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+                order_by,
+                within_group,
+                filter,
+                over,
+            } => {
+                eval_function(
+                    name,
+                    args,
+                    *distinct,
+                    order_by,
+                    within_group,
+                    filter.as_deref(),
+                    over.as_deref(),
+                    scope,
+                    params,
+                )
+                .await
+            }
+            Expr::Wildcard => Err(EngineError {
+                message: "wildcard expression requires FROM support".to_string(),
+            }),
         }
-        Expr::Cast { expr, type_name } => {
-            let value = eval_expr(expr, scope, params).await?;
-            eval_cast_scalar(value, type_name)
-        }
-        Expr::FunctionCall {
-            name,
-            args,
-            distinct,
-            order_by,
-            within_group,
-            filter,
-            over,
-        } => eval_function(
-            name,
-            args,
-            *distinct,
-            order_by,
-            within_group,
-            filter.as_deref(),
-            over.as_deref(),
-            scope,
-            params,
-        )
-        .await,
-        Expr::Wildcard => Err(EngineError {
-            message: "wildcard expression requires FROM support".to_string(),
-        }),
-    }
     })
 }
 
@@ -385,254 +387,266 @@ pub(crate) fn eval_expr_with_window<'a>(
 ) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
     Box::pin(async move {
         match expr {
-        Expr::Null => Ok(ScalarValue::Null),
-        Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
-        Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
-        Expr::Float(v) => {
-            let parsed = v.parse::<f64>().map_err(|_| EngineError {
-                message: format!("invalid float literal \"{v}\""),
-            })?;
-            Ok(ScalarValue::Float(parsed))
-        }
-        Expr::String(v) => Ok(ScalarValue::Text(v.clone())),
-        Expr::Parameter(idx) => parse_param(*idx, params),
-        Expr::Identifier(parts) => scope.lookup_identifier(parts),
-        Expr::Unary { op, expr } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            eval_unary(op.clone(), value)
-        }
-        Expr::Binary { left, op, right } => {
-            let lhs = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
-            let rhs = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
-            eval_binary(op.clone(), lhs, rhs)
-        }
-        Expr::AnyAll {
-            left,
-            op,
-            right,
-            quantifier,
-        } => {
-            let lhs = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
-            let rhs = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
-            eval_any_all(op.clone(), lhs, rhs, quantifier.clone())
-        }
-        Expr::Exists(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope)).await?;
-            Ok(ScalarValue::Bool(!result.rows.is_empty()))
-        }
-        Expr::ScalarSubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope)).await?;
-            if result.rows.is_empty() {
-                return Ok(ScalarValue::Null);
+            Expr::Null => Ok(ScalarValue::Null),
+            Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
+            Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
+            Expr::Float(v) => {
+                let parsed = v.parse::<f64>().map_err(|_| EngineError {
+                    message: format!("invalid float literal \"{v}\""),
+                })?;
+                Ok(ScalarValue::Float(parsed))
             }
-            if result.rows.len() > 1 {
-                return Err(EngineError {
-                    message: "more than one row returned by a subquery used as an expression"
-                        .to_string(),
-                });
+            Expr::String(v) => Ok(ScalarValue::Text(v.clone())),
+            Expr::Parameter(idx) => parse_param(*idx, params),
+            Expr::Identifier(parts) => scope.lookup_identifier(parts),
+            Expr::Unary { op, expr } => {
+                let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                eval_unary(op.clone(), value)
             }
-            if result.rows[0].len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
+            Expr::Binary { left, op, right } => {
+                let lhs = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
+                let rhs = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
+                eval_binary(op.clone(), lhs, rhs)
             }
-            Ok(result.rows[0][0].clone())
-        }
-        Expr::ArrayConstructor(items) => {
-            let mut values = Vec::with_capacity(items.len());
-            for item in items {
-                values.push(eval_expr_with_window(item, scope, row_idx, all_rows, params).await?);
+            Expr::AnyAll {
+                left,
+                op,
+                right,
+                quantifier,
+            } => {
+                let lhs = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
+                let rhs = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
+                eval_any_all(op.clone(), lhs, rhs, quantifier.clone())
             }
-            Ok(ScalarValue::Array(values))
-        }
-        Expr::ArraySubquery(query) => {
-            let result = execute_query_with_outer(query, params, Some(scope)).await?;
-            if !result.columns.is_empty() && result.columns.len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
+            Expr::Exists(query) => {
+                let result = execute_query_with_outer(query, params, Some(scope)).await?;
+                Ok(ScalarValue::Bool(!result.rows.is_empty()))
             }
-            let mut values = Vec::with_capacity(result.rows.len());
-            for row in &result.rows {
-                values.push(row.first().cloned().unwrap_or(ScalarValue::Null));
-            }
-            Ok(ScalarValue::Array(values))
-        }
-        Expr::InList {
-            expr,
-            list,
-            negated,
-        } => {
-            let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            let mut rhs = Vec::with_capacity(list.len());
-            for item in list {
-                rhs.push(eval_expr_with_window(item, scope, row_idx, all_rows, params).await?);
-            }
-            eval_in_membership(lhs, rhs, *negated)
-        }
-        Expr::InSubquery {
-            expr,
-            subquery,
-            negated,
-        } => {
-            let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            let result = execute_query_with_outer(subquery, params, Some(scope)).await?;
-            if !result.columns.is_empty() && result.columns.len() != 1 {
-                return Err(EngineError {
-                    message: "subquery must return only one column".to_string(),
-                });
-            }
-            let rhs_values = result
-                .rows
-                .iter()
-                .map(|row| row.first().cloned().unwrap_or(ScalarValue::Null))
-                .collect::<Vec<_>>();
-            eval_in_membership(lhs, rhs_values, *negated)
-        }
-        Expr::Between {
-            expr,
-            low,
-            high,
-            negated,
-        } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            let low_value = eval_expr_with_window(low, scope, row_idx, all_rows, params).await?;
-            let high_value = eval_expr_with_window(high, scope, row_idx, all_rows, params).await?;
-            eval_between_predicate(value, low_value, high_value, *negated)
-        }
-        Expr::Like {
-            expr,
-            pattern,
-            case_insensitive,
-            negated,
-        } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            let pattern_value =
-                eval_expr_with_window(pattern, scope, row_idx, all_rows, params).await?;
-            eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
-        }
-        Expr::IsNull { expr, negated } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            let is_null = matches!(value, ScalarValue::Null);
-            Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
-        }
-        Expr::IsDistinctFrom {
-            left,
-            right,
-            negated,
-        } => {
-            let left_value = eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
-            let right_value = eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
-            eval_is_distinct_from(left_value, right_value, *negated)
-        }
-        Expr::CaseSimple {
-            operand,
-            when_then,
-            else_expr,
-        } => {
-            let operand_value =
-                eval_expr_with_window(operand, scope, row_idx, all_rows, params).await?;
-            for (when_expr, then_expr) in when_then {
-                let when_value =
-                    eval_expr_with_window(when_expr, scope, row_idx, all_rows, params).await?;
-                if matches!(operand_value, ScalarValue::Null)
-                    || matches!(when_value, ScalarValue::Null)
-                {
-                    continue;
+            Expr::ScalarSubquery(query) => {
+                let result = execute_query_with_outer(query, params, Some(scope)).await?;
+                if result.rows.is_empty() {
+                    return Ok(ScalarValue::Null);
                 }
-                if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal {
-                    return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params).await;
-                }
-            }
-            if let Some(else_expr) = else_expr {
-                eval_expr_with_window(else_expr, scope, row_idx, all_rows, params).await
-            } else {
-                Ok(ScalarValue::Null)
-            }
-        }
-        Expr::CaseSearched {
-            when_then,
-            else_expr,
-        } => {
-            for (when_expr, then_expr) in when_then {
-                let condition =
-                    eval_expr_with_window(when_expr, scope, row_idx, all_rows, params).await?;
-                if truthy(&condition) {
-                    return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params).await;
-                }
-            }
-            if let Some(else_expr) = else_expr {
-                eval_expr_with_window(else_expr, scope, row_idx, all_rows, params).await
-            } else {
-                Ok(ScalarValue::Null)
-            }
-        }
-        Expr::Cast { expr, type_name } => {
-            let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
-            eval_cast_scalar(value, type_name)
-        }
-        Expr::FunctionCall {
-            name,
-            args,
-            distinct,
-            order_by,
-            within_group,
-            filter,
-            over,
-        } => {
-            if let Some(window) = over.as_deref() {
-                if !within_group.is_empty() {
+                if result.rows.len() > 1 {
                     return Err(EngineError {
-                        message: "WITHIN GROUP is not allowed for window functions".to_string(),
+                        message: "more than one row returned by a subquery used as an expression"
+                            .to_string(),
                     });
                 }
-                eval_window_function(
-                    name,
-                    args,
-                    *distinct,
-                    order_by,
-                filter.as_deref(),
-                window,
-                row_idx,
-                all_rows,
-                params,
-            )
-            .await
-            } else {
-                let fn_name = name
-                    .last()
-                    .map(|n| n.to_ascii_lowercase())
-                    .unwrap_or_default();
-                if *distinct || !order_by.is_empty() || !within_group.is_empty() || filter.is_some() {
+                if result.rows[0].len() != 1 {
                     return Err(EngineError {
-                        message: format!(
-                            "{}() aggregate modifiers require grouped aggregate evaluation",
-                            fn_name
-                        ),
+                        message: "subquery must return only one column".to_string(),
                     });
                 }
-                if is_aggregate_function(&fn_name) {
+                Ok(result.rows[0][0].clone())
+            }
+            Expr::ArrayConstructor(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values
+                        .push(eval_expr_with_window(item, scope, row_idx, all_rows, params).await?);
+                }
+                Ok(ScalarValue::Array(values))
+            }
+            Expr::ArraySubquery(query) => {
+                let result = execute_query_with_outer(query, params, Some(scope)).await?;
+                if !result.columns.is_empty() && result.columns.len() != 1 {
                     return Err(EngineError {
-                        message: format!(
-                            "aggregate function {}() must be used with grouped evaluation",
-                            fn_name
-                        ),
+                        message: "subquery must return only one column".to_string(),
                     });
                 }
+                let mut values = Vec::with_capacity(result.rows.len());
+                for row in &result.rows {
+                    values.push(row.first().cloned().unwrap_or(ScalarValue::Null));
+                }
+                Ok(ScalarValue::Array(values))
+            }
+            Expr::InList {
+                expr,
+                list,
+                negated,
+            } => {
+                let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                let mut rhs = Vec::with_capacity(list.len());
+                for item in list {
+                    rhs.push(eval_expr_with_window(item, scope, row_idx, all_rows, params).await?);
+                }
+                eval_in_membership(lhs, rhs, *negated)
+            }
+            Expr::InSubquery {
+                expr,
+                subquery,
+                negated,
+            } => {
+                let lhs = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                let result = execute_query_with_outer(subquery, params, Some(scope)).await?;
+                if !result.columns.is_empty() && result.columns.len() != 1 {
+                    return Err(EngineError {
+                        message: "subquery must return only one column".to_string(),
+                    });
+                }
+                let rhs_values = result
+                    .rows
+                    .iter()
+                    .map(|row| row.first().cloned().unwrap_or(ScalarValue::Null))
+                    .collect::<Vec<_>>();
+                eval_in_membership(lhs, rhs_values, *negated)
+            }
+            Expr::Between {
+                expr,
+                low,
+                high,
+                negated,
+            } => {
+                let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                let low_value =
+                    eval_expr_with_window(low, scope, row_idx, all_rows, params).await?;
+                let high_value =
+                    eval_expr_with_window(high, scope, row_idx, all_rows, params).await?;
+                eval_between_predicate(value, low_value, high_value, *negated)
+            }
+            Expr::Like {
+                expr,
+                pattern,
+                case_insensitive,
+                negated,
+            } => {
+                let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                let pattern_value =
+                    eval_expr_with_window(pattern, scope, row_idx, all_rows, params).await?;
+                eval_like_predicate(value, pattern_value, *case_insensitive, *negated)
+            }
+            Expr::IsNull { expr, negated } => {
+                let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                let is_null = matches!(value, ScalarValue::Null);
+                Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
+            }
+            Expr::IsDistinctFrom {
+                left,
+                right,
+                negated,
+            } => {
+                let left_value =
+                    eval_expr_with_window(left, scope, row_idx, all_rows, params).await?;
+                let right_value =
+                    eval_expr_with_window(right, scope, row_idx, all_rows, params).await?;
+                eval_is_distinct_from(left_value, right_value, *negated)
+            }
+            Expr::CaseSimple {
+                operand,
+                when_then,
+                else_expr,
+            } => {
+                let operand_value =
+                    eval_expr_with_window(operand, scope, row_idx, all_rows, params).await?;
+                for (when_expr, then_expr) in when_then {
+                    let when_value =
+                        eval_expr_with_window(when_expr, scope, row_idx, all_rows, params).await?;
+                    if matches!(operand_value, ScalarValue::Null)
+                        || matches!(when_value, ScalarValue::Null)
+                    {
+                        continue;
+                    }
+                    if compare_values_for_predicate(&operand_value, &when_value)? == Ordering::Equal
+                    {
+                        return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params)
+                            .await;
+                    }
+                }
+                if let Some(else_expr) = else_expr {
+                    eval_expr_with_window(else_expr, scope, row_idx, all_rows, params).await
+                } else {
+                    Ok(ScalarValue::Null)
+                }
+            }
+            Expr::CaseSearched {
+                when_then,
+                else_expr,
+            } => {
+                for (when_expr, then_expr) in when_then {
+                    let condition =
+                        eval_expr_with_window(when_expr, scope, row_idx, all_rows, params).await?;
+                    if truthy(&condition) {
+                        return eval_expr_with_window(then_expr, scope, row_idx, all_rows, params)
+                            .await;
+                    }
+                }
+                if let Some(else_expr) = else_expr {
+                    eval_expr_with_window(else_expr, scope, row_idx, all_rows, params).await
+                } else {
+                    Ok(ScalarValue::Null)
+                }
+            }
+            Expr::Cast { expr, type_name } => {
+                let value = eval_expr_with_window(expr, scope, row_idx, all_rows, params).await?;
+                eval_cast_scalar(value, type_name)
+            }
+            Expr::FunctionCall {
+                name,
+                args,
+                distinct,
+                order_by,
+                within_group,
+                filter,
+                over,
+            } => {
+                if let Some(window) = over.as_deref() {
+                    if !within_group.is_empty() {
+                        return Err(EngineError {
+                            message: "WITHIN GROUP is not allowed for window functions".to_string(),
+                        });
+                    }
+                    eval_window_function(
+                        name,
+                        args,
+                        *distinct,
+                        order_by,
+                        filter.as_deref(),
+                        window,
+                        row_idx,
+                        all_rows,
+                        params,
+                    )
+                    .await
+                } else {
+                    let fn_name = name
+                        .last()
+                        .map(|n| n.to_ascii_lowercase())
+                        .unwrap_or_default();
+                    if *distinct
+                        || !order_by.is_empty()
+                        || !within_group.is_empty()
+                        || filter.is_some()
+                    {
+                        return Err(EngineError {
+                            message: format!(
+                                "{}() aggregate modifiers require grouped aggregate evaluation",
+                                fn_name
+                            ),
+                        });
+                    }
+                    if is_aggregate_function(&fn_name) {
+                        return Err(EngineError {
+                            message: format!(
+                                "aggregate function {}() must be used with grouped evaluation",
+                                fn_name
+                            ),
+                        });
+                    }
 
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(
-                        eval_expr_with_window(arg, scope, row_idx, all_rows, params).await?,
-                    );
+                    let mut values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        values.push(
+                            eval_expr_with_window(arg, scope, row_idx, all_rows, params).await?,
+                        );
+                    }
+                    eval_scalar_function(&fn_name, &values).await
                 }
-                eval_scalar_function(&fn_name, &values).await
             }
+            Expr::Wildcard => Err(EngineError {
+                message: "wildcard expression requires FROM support".to_string(),
+            }),
         }
-        Expr::Wildcard => Err(EngineError {
-            message: "wildcard expression requires FROM support".to_string(),
-        }),
-    }
     })
 }
 
@@ -747,46 +761,81 @@ async fn eval_window_function(
         }
         "ntile" => {
             if args.len() != 1 {
-                return Err(EngineError { message: "ntile() expects exactly one argument".to_string() });
+                return Err(EngineError {
+                    message: "ntile() expects exactly one argument".to_string(),
+                });
             }
             let n = {
                 let v = eval_expr(&args[0], &all_rows[row_idx], params).await?;
                 parse_i64_scalar(&v, "ntile() expects integer")? as usize
             };
-            if n == 0 { return Err(EngineError { message: "ntile() argument must be positive".to_string() }); }
+            if n == 0 {
+                return Err(EngineError {
+                    message: "ntile() argument must be positive".to_string(),
+                });
+            }
             let total = partition.len();
             let bucket = (current_pos * n / total) + 1;
             Ok(ScalarValue::Int(bucket as i64))
         }
         "percent_rank" => {
-            if !args.is_empty() { return Err(EngineError { message: "percent_rank() takes no arguments".to_string() }); }
-            if partition.len() <= 1 { return Ok(ScalarValue::Float(0.0)); }
+            if !args.is_empty() {
+                return Err(EngineError {
+                    message: "percent_rank() takes no arguments".to_string(),
+                });
+            }
+            if partition.len() <= 1 {
+                return Ok(ScalarValue::Float(0.0));
+            }
             // rank - 1 / count - 1
             let mut rank = 1usize;
             if !order_keys.is_empty() {
                 for idx in 1..=current_pos {
-                    if compare_order_keys(&order_keys[idx - 1], &order_keys[idx], &window.order_by) != Ordering::Equal {
+                    if compare_order_keys(&order_keys[idx - 1], &order_keys[idx], &window.order_by)
+                        != Ordering::Equal
+                    {
                         rank = idx + 1;
                     }
                 }
             }
-            Ok(ScalarValue::Float((rank - 1) as f64 / (partition.len() - 1) as f64))
+            Ok(ScalarValue::Float(
+                (rank - 1) as f64 / (partition.len() - 1) as f64,
+            ))
         }
         "cume_dist" => {
-            if !args.is_empty() { return Err(EngineError { message: "cume_dist() takes no arguments".to_string() }); }
-            if order_keys.is_empty() { return Ok(ScalarValue::Float(1.0)); }
+            if !args.is_empty() {
+                return Err(EngineError {
+                    message: "cume_dist() takes no arguments".to_string(),
+                });
+            }
+            if order_keys.is_empty() {
+                return Ok(ScalarValue::Float(1.0));
+            }
             // Number of rows <= current row / total rows
             let current_key = &order_keys[current_pos];
-            let count_le = order_keys.iter().filter(|k| {
-                compare_order_keys(k, current_key, &window.order_by) != Ordering::Greater
-            }).count();
+            let count_le = order_keys
+                .iter()
+                .filter(|k| {
+                    compare_order_keys(k, current_key, &window.order_by) != Ordering::Greater
+                })
+                .count();
             Ok(ScalarValue::Float(count_le as f64 / partition.len() as f64))
         }
         "first_value" => {
-            if args.len() != 1 { return Err(EngineError { message: "first_value() expects one argument".to_string() }); }
-            let frame_rows =
-                window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)
-                    .await?;
+            if args.len() != 1 {
+                return Err(EngineError {
+                    message: "first_value() expects one argument".to_string(),
+                });
+            }
+            let frame_rows = window_frame_rows(
+                window,
+                &partition,
+                &order_keys,
+                current_pos,
+                all_rows,
+                params,
+            )
+            .await?;
             if let Some(&first) = frame_rows.first() {
                 eval_expr(&args[0], &all_rows[first], params).await
             } else {
@@ -794,10 +843,20 @@ async fn eval_window_function(
             }
         }
         "last_value" => {
-            if args.len() != 1 { return Err(EngineError { message: "last_value() expects one argument".to_string() }); }
-            let frame_rows =
-                window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)
-                    .await?;
+            if args.len() != 1 {
+                return Err(EngineError {
+                    message: "last_value() expects one argument".to_string(),
+                });
+            }
+            let frame_rows = window_frame_rows(
+                window,
+                &partition,
+                &order_keys,
+                current_pos,
+                all_rows,
+                params,
+            )
+            .await?;
             if let Some(&last) = frame_rows.last() {
                 eval_expr(&args[0], &all_rows[last], params).await
             } else {
@@ -805,15 +864,29 @@ async fn eval_window_function(
             }
         }
         "nth_value" => {
-            if args.len() != 2 { return Err(EngineError { message: "nth_value() expects two arguments".to_string() }); }
+            if args.len() != 2 {
+                return Err(EngineError {
+                    message: "nth_value() expects two arguments".to_string(),
+                });
+            }
             let n = {
                 let v = eval_expr(&args[1], &all_rows[row_idx], params).await?;
                 parse_i64_scalar(&v, "nth_value() expects integer")? as usize
             };
-            if n == 0 { return Err(EngineError { message: "nth_value() argument must be positive".to_string() }); }
-            let frame_rows =
-                window_frame_rows(window, &partition, &order_keys, current_pos, all_rows, params)
-                    .await?;
+            if n == 0 {
+                return Err(EngineError {
+                    message: "nth_value() argument must be positive".to_string(),
+                });
+            }
+            let frame_rows = window_frame_rows(
+                window,
+                &partition,
+                &order_keys,
+                current_pos,
+                all_rows,
+                params,
+            )
+            .await?;
             if let Some(&target) = frame_rows.get(n - 1) {
                 eval_expr(&args[0], &all_rows[target], params).await
             } else {
@@ -953,7 +1026,11 @@ async fn window_frame_rows(
                 params,
             )
             .await?;
-            let effective_current = if ascending { current_value } else { -current_value };
+            let effective_current = if ascending {
+                current_value
+            } else {
+                -current_value
+            };
             let start = range_bound_threshold(
                 &frame.start,
                 effective_current,
@@ -978,12 +1055,7 @@ async fn window_frame_rows(
             let mut out = Vec::new();
             for (pos, row_idx) in partition.iter().enumerate() {
                 let value = window_first_order_numeric_key(
-                    order_keys,
-                    pos,
-                    *row_idx,
-                    all_rows,
-                    window,
-                    params,
+                    order_keys, pos, *row_idx, all_rows, window, params,
                 )
                 .await?;
                 let effective = if ascending { value } else { -value };
@@ -1474,7 +1546,7 @@ fn compare_any_all_predicate(
         _ => {
             return Err(EngineError {
                 message: "ANY/ALL expects comparison operator".to_string(),
-            })
+            });
         }
     };
     Ok(Some(result))
@@ -1494,7 +1566,7 @@ pub(crate) fn eval_any_all(
         _ => {
             return Err(EngineError {
                 message: "ANY/ALL expects array argument".to_string(),
-            })
+            });
         }
     };
     if items.is_empty() {
@@ -1587,7 +1659,6 @@ fn numeric_div(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, Eng
         (NumericOperand::Float(a), NumericOperand::Float(b)) => Ok(ScalarValue::Float(a / b)),
     }
 }
-
 
 #[allow(clippy::too_many_arguments)]
 async fn eval_function(
@@ -1703,19 +1774,22 @@ async fn execute_ws_connect(args: &[ScalarValue]) -> Result<ScalarValue, EngineE
     let id = with_ext_write(|ext| {
         let id = ext.ws_next_id;
         ext.ws_next_id += 1;
-        ext.ws_connections.insert(id, WsConnection {
+        ext.ws_connections.insert(
             id,
-            url,
-            state: initial_state,
-            opened_at: "2024-01-01 00:00:00".to_string(),
-            messages_in: 0,
-            messages_out: 0,
-            on_open,
-            on_message,
-            on_close,
-            inbound_queue: Vec::new(),
-            real_io,
-        });
+            WsConnection {
+                id,
+                url,
+                state: initial_state,
+                opened_at: "2024-01-01 00:00:00".to_string(),
+                messages_in: 0,
+                messages_out: 0,
+                on_open,
+                on_message,
+                on_close,
+                inbound_queue: Vec::new(),
+                real_io,
+            },
+        );
         id
     });
 
@@ -1779,9 +1853,8 @@ async fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineErro
     }
     #[cfg(target_arch = "wasm32")]
     if is_real {
-        let send_result = ws_wasm::with_handle(conn_id, |handle| {
-            ws_wasm::send_message(handle, &_message)
-        });
+        let send_result =
+            ws_wasm::with_handle(conn_id, |handle| ws_wasm::send_message(handle, &_message));
         if let Some(Err(e)) = send_result {
             return Err(EngineError { message: e });
         }
@@ -1861,7 +1934,10 @@ async fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineErro
     #[cfg(not(target_arch = "wasm32"))]
     drain_native_ws_messages(conn_id);
     #[cfg(target_arch = "wasm32")]
-    { sync_wasm_ws_state(conn_id); drain_wasm_ws_messages(conn_id); }
+    {
+        sync_wasm_ws_state(conn_id);
+        drain_wasm_ws_messages(conn_id);
+    }
 
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
@@ -1899,11 +1975,15 @@ pub(crate) async fn execute_ws_messages(
     #[cfg(not(target_arch = "wasm32"))]
     drain_native_ws_messages(conn_id);
     #[cfg(target_arch = "wasm32")]
-    { sync_wasm_ws_state(conn_id); drain_wasm_ws_messages(conn_id); }
+    {
+        sync_wasm_ws_state(conn_id);
+        drain_wasm_ws_messages(conn_id);
+    }
 
     with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
-            let rows: Vec<Vec<ScalarValue>> = conn.inbound_queue
+            let rows: Vec<Vec<ScalarValue>> = conn
+                .inbound_queue
                 .drain(..)
                 .map(|m| vec![ScalarValue::Text(m)])
                 .collect();
@@ -1918,7 +1998,10 @@ pub(crate) async fn execute_ws_messages(
 
 /// Simulate receiving a message on a WebSocket connection (for testing).
 /// Dispatches the on_message callback if set.
-pub async fn ws_simulate_message(conn_id: i64, message: &str) -> Result<Vec<QueryResult>, EngineError> {
+pub async fn ws_simulate_message(
+    conn_id: i64,
+    message: &str,
+) -> Result<Vec<QueryResult>, EngineError> {
     let callback = with_ext_write(|ext| {
         if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
             conn.messages_in += 1;
@@ -1953,8 +2036,11 @@ pub async fn ws_simulate_message(conn_id: i64, message: &str) -> Result<Vec<Quer
             } else {
                 body.replace("$1", &format!("'{}'", message.replace('\'', "''")))
             };
-            let stmt = crate::parser::sql_parser::parse_statement(&substituted)
-                .map_err(|e| EngineError { message: format!("callback parse error: {}", e) })?;
+            let stmt = crate::parser::sql_parser::parse_statement(&substituted).map_err(|e| {
+                EngineError {
+                    message: format!("callback parse error: {}", e),
+                }
+            })?;
             let planned = plan_statement(stmt)?;
             let result = execute_planned_query(&planned, &[]).await?;
             results.push(result);

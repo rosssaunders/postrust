@@ -1,4 +1,7 @@
-use crate::catalog::dependency::{describe_table, expand_and_order_relation_drop, plan_sequence_drop as plan_sequence_drop_in_catalog};
+use crate::catalog::dependency::{
+    describe_table, expand_and_order_relation_drop,
+    plan_sequence_drop as plan_sequence_drop_in_catalog,
+};
 use crate::catalog::{with_catalog_read, with_catalog_write};
 use crate::commands::sequence::{with_sequences_read, with_sequences_write};
 use crate::parser::ast::{CreateSchemaStatement, DropBehavior, DropSchemaStatement};
@@ -101,9 +104,9 @@ pub async fn execute_drop_schema(
     })?;
     for relation_oid in &drop_order {
         let relation = with_catalog_read(|catalog| describe_table(catalog, *relation_oid))
-        .map_err(|err| EngineError {
-            message: err.message,
-        })?;
+            .map_err(|err| EngineError {
+                message: err.message,
+            })?;
         let relation_table = with_catalog_read(|catalog| {
             catalog
                 .table(&relation.schema_name, &relation.table_name)

@@ -1,14 +1,21 @@
-use crate::catalog::{with_catalog_read, with_catalog_write, TableKind};
-use crate::commands::create_table::{column_spec_from_ast, foreign_key_constraint_specs_from_ast, key_constraint_specs_from_ast};
+use crate::catalog::{TableKind, with_catalog_read, with_catalog_write};
+use crate::commands::create_table::{
+    column_spec_from_ast, foreign_key_constraint_specs_from_ast, key_constraint_specs_from_ast,
+};
 use crate::parser::ast::{AlterTableAction, AlterTableStatement, TableConstraint};
-use crate::tcop::engine::{EngineError, QueryResult, ScalarValue, with_storage_read, with_storage_write};
+use crate::tcop::engine::{
+    EngineError, QueryResult, ScalarValue, with_storage_read, with_storage_write,
+};
 
 pub async fn execute_alter_table(
     alter_table: &AlterTableStatement,
 ) -> Result<QueryResult, EngineError> {
     let table = with_catalog_read(|catalog| {
         catalog
-            .resolve_table(&alter_table.table_name, &crate::catalog::SearchPath::default())
+            .resolve_table(
+                &alter_table.table_name,
+                &crate::catalog::SearchPath::default(),
+            )
             .cloned()
     })
     .map_err(|err| EngineError {
@@ -29,8 +36,16 @@ pub async fn execute_alter_table(
         AlterTableAction::AddColumn(column_def) => {
             let column_spec = column_spec_from_ast(column_def)?;
             let default_value = if let Some(default_expr) = &column_spec.default {
-                let raw = crate::tcop::engine::eval_expr(default_expr, &crate::tcop::engine::EvalScope::default(), &[]).await?;
-                Some(crate::tcop::engine::coerce_value_for_column_spec(raw, &column_spec)?)
+                let raw = crate::tcop::engine::eval_expr(
+                    default_expr,
+                    &crate::tcop::engine::EvalScope::default(),
+                    &[],
+                )
+                .await?;
+                Some(crate::tcop::engine::coerce_value_for_column_spec(
+                    raw,
+                    &column_spec,
+                )?)
             } else {
                 None
             };
@@ -72,7 +87,8 @@ pub async fn execute_alter_table(
                     .cloned()
                     .unwrap_or_default()
             });
-            let preview = crate::tcop::engine::preview_table_with_added_constraint(&table, constraint)?;
+            let preview =
+                crate::tcop::engine::preview_table_with_added_constraint(&table, constraint)?;
             crate::tcop::engine::validate_table_constraints(&preview, &current_rows).await?;
 
             match constraint {

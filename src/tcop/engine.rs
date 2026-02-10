@@ -4,42 +4,39 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::sync::{OnceLock, RwLock};
 
-use crate::commands::sequence::{with_sequences_read, with_sequences_write, SequenceState};
-pub(crate) use crate::storage::heap::{with_storage_read, with_storage_write};
-use crate::utils::adt::datetime::{
-    datetime_from_epoch_seconds, format_date, format_timestamp, parse_datetime_text,
-};
+use crate::catalog::oid::Oid;
+pub(crate) use crate::catalog::system_catalogs::lookup_virtual_relation;
+use crate::catalog::with_catalog_write;
+use crate::catalog::{Column, ColumnSpec, SearchPath, TableKind, TypeSignature, with_catalog_read};
+use crate::commands::sequence::{SequenceState, with_sequences_read, with_sequences_write};
+pub(crate) use crate::executor::exec_expr::{EvalScope, eval_expr};
+pub(crate) use crate::executor::exec_main::execute_query;
 use crate::executor::exec_main::{
     combine_scopes, evaluate_from_clause, evaluate_table_expression, scope_for_table_row,
     scope_for_table_row_with_qualifiers,
 };
-pub(crate) use crate::catalog::system_catalogs::lookup_virtual_relation;
-use crate::tcop::pquery::{
-    derive_dml_returning_column_type_oids, derive_dml_returning_columns,
-    derive_query_output_columns, derive_returning_columns_from_table,
-    project_returning_row, project_returning_row_with_qualifiers,
-};
-pub(crate) use crate::tcop::pquery::{
-    active_cte_context, current_cte_binding, derive_query_columns, derive_select_columns,
-    expand_from_columns, query_references_relation, type_oid_size, type_signature_to_oid,
-    validate_recursive_cte_terms, with_cte_context_async, CteBinding, ExpandedFromColumn,
-};
-pub(crate) use crate::executor::exec_expr::{eval_expr, EvalScope};
-pub(crate) use crate::utils::adt::misc::truthy;
-pub(crate) use crate::executor::exec_main::execute_query;
-use crate::catalog::oid::Oid;
-use crate::catalog::with_catalog_write;
-use crate::catalog::{
-    Column, ColumnSpec, SearchPath, TableKind, TypeSignature, with_catalog_read,
-};
 use crate::parser::ast::{
-    ConflictTarget, DeleteStatement, Expr, ForeignKeyAction, FunctionParam,
-    FunctionReturnType, InsertSource, InsertStatement,
-    MergeStatement, MergeWhenClause, OnConflictClause, Statement, TableConstraint,
-    UpdateStatement,
+    ConflictTarget, DeleteStatement, Expr, ForeignKeyAction, FunctionParam, FunctionReturnType,
+    InsertSource, InsertStatement, MergeStatement, MergeWhenClause, OnConflictClause, Statement,
+    TableConstraint, UpdateStatement,
 };
 use crate::planner::{self, PlanNode};
 use crate::security::{self, RlsCommand, TablePrivilege};
+pub(crate) use crate::storage::heap::{with_storage_read, with_storage_write};
+pub(crate) use crate::tcop::pquery::{
+    CteBinding, ExpandedFromColumn, active_cte_context, current_cte_binding, derive_query_columns,
+    derive_select_columns, expand_from_columns, query_references_relation, type_oid_size,
+    type_signature_to_oid, validate_recursive_cte_terms, with_cte_context_async,
+};
+use crate::tcop::pquery::{
+    derive_dml_returning_column_type_oids, derive_dml_returning_columns,
+    derive_query_output_columns, derive_returning_columns_from_table, project_returning_row,
+    project_returning_row_with_qualifiers,
+};
+use crate::utils::adt::datetime::{
+    datetime_from_epoch_seconds, format_date, format_timestamp, parse_datetime_text,
+};
+pub(crate) use crate::utils::adt::misc::truthy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineError {
@@ -65,7 +62,6 @@ pub struct QueryResult {
     pub command_tag: String,
     pub rows_affected: u64,
 }
-
 
 #[derive(Debug, Clone)]
 pub struct PlannedQuery {
@@ -225,9 +221,18 @@ pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError>
         Statement::Listen(_) => (Vec::new(), Vec::new(), false, "LISTEN".to_string()),
         Statement::Notify(_) => (Vec::new(), Vec::new(), false, "NOTIFY".to_string()),
         Statement::Unlisten(_) => (Vec::new(), Vec::new(), false, "UNLISTEN".to_string()),
-        Statement::CreateExtension(_) => (Vec::new(), Vec::new(), false, "CREATE EXTENSION".to_string()),
-        Statement::DropExtension(_) => (Vec::new(), Vec::new(), false, "DROP EXTENSION".to_string()),
-        Statement::CreateFunction(_) => (Vec::new(), Vec::new(), false, "CREATE FUNCTION".to_string()),
+        Statement::CreateExtension(_) => (
+            Vec::new(),
+            Vec::new(),
+            false,
+            "CREATE EXTENSION".to_string(),
+        ),
+        Statement::DropExtension(_) => {
+            (Vec::new(), Vec::new(), false, "DROP EXTENSION".to_string())
+        }
+        Statement::CreateFunction(_) => {
+            (Vec::new(), Vec::new(), false, "CREATE FUNCTION".to_string())
+        }
         Statement::Transaction(statement) => {
             let tag = match statement {
                 crate::parser::ast::TransactionStatement::Begin => "BEGIN",
@@ -322,15 +327,23 @@ pub(crate) mod ws_native {
 
     /// A native WebSocket handle using tungstenite with a background reader thread.
     pub struct NativeWsHandle {
-        pub writer: Arc<Mutex<Option<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>>>>,
+        pub writer: Arc<
+            Mutex<
+                Option<
+                    tungstenite::WebSocket<
+                        tungstenite::stream::MaybeTlsStream<std::net::TcpStream>,
+                    >,
+                >,
+            >,
+        >,
         pub incoming: mpsc::Receiver<String>,
         pub _reader_thread: thread::JoinHandle<()>,
     }
 
     /// Open a real WebSocket connection. Returns a handle for sending/receiving.
     pub fn open_connection(url: &str) -> Result<NativeWsHandle, String> {
-        let (socket, _response) = tungstenite::connect(url)
-            .map_err(|e| format!("WebSocket connect failed: {}", e))?;
+        let (socket, _response) =
+            tungstenite::connect(url).map_err(|e| format!("WebSocket connect failed: {}", e))?;
 
         let writer = Arc::new(Mutex::new(Some(socket)));
         let reader_writer = Arc::clone(&writer);
@@ -380,7 +393,8 @@ pub(crate) mod ws_native {
         if let Some(ref mut ws) = *guard {
             ws.write(tungstenite::Message::Text(msg.to_string()))
                 .map_err(|e| format!("WebSocket send failed: {}", e))?;
-            ws.flush().map_err(|e| format!("WebSocket flush failed: {}", e))?;
+            ws.flush()
+                .map_err(|e| format!("WebSocket flush failed: {}", e))?;
             Ok(())
         } else {
             Err("connection already closed".to_string())
@@ -409,11 +423,13 @@ pub(crate) mod ws_native {
 #[cfg(not(target_arch = "wasm32"))]
 /// Global map of connection id -> native WS handle (non-wasm only)
 #[cfg(not(target_arch = "wasm32"))]
-static NATIVE_WS_HANDLES: std::sync::OnceLock<std::sync::Mutex<HashMap<i64, ws_native::NativeWsHandle>>> = std::sync::OnceLock::new();
+static NATIVE_WS_HANDLES: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<i64, ws_native::NativeWsHandle>>,
+> = std::sync::OnceLock::new();
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn native_ws_handles(
-) -> &'static std::sync::Mutex<HashMap<i64, ws_native::NativeWsHandle>> {
+pub(crate) fn native_ws_handles()
+-> &'static std::sync::Mutex<HashMap<i64, ws_native::NativeWsHandle>> {
     NATIVE_WS_HANDLES.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -457,9 +473,9 @@ mod ws_wasm {
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::rc::Rc;
-    use wasm_bindgen::prelude::*;
     use wasm_bindgen::JsCast;
-    use web_sys::{WebSocket, MessageEvent, CloseEvent, ErrorEvent};
+    use wasm_bindgen::prelude::*;
+    use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
     /// Stored closures must be kept alive for the lifetime of the WebSocket connection.
     struct WasmWsClosures {
@@ -491,11 +507,12 @@ mod ws_wasm {
 
         // onmessage
         let msgs_clone = Rc::clone(&messages);
-        let on_message = Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(move |e: MessageEvent| {
-            if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
-                msgs_clone.borrow_mut().push(String::from(txt));
-            }
-        }));
+        let on_message =
+            Closure::<dyn FnMut(MessageEvent)>::wrap(Box::new(move |e: MessageEvent| {
+                if let Ok(txt) = e.data().dyn_into::<js_sys::JsString>() {
+                    msgs_clone.borrow_mut().push(String::from(txt));
+                }
+            }));
         ws.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
 
         // onclose
@@ -526,12 +543,16 @@ mod ws_wasm {
     }
 
     pub fn send_message(handle: &WasmWsHandle, msg: &str) -> Result<(), String> {
-        handle.socket.send_with_str(msg)
+        handle
+            .socket
+            .send_with_str(msg)
             .map_err(|e| format!("WebSocket send failed: {:?}", e))
     }
 
     pub fn close_connection(handle: &WasmWsHandle) -> Result<(), String> {
-        handle.socket.close()
+        handle
+            .socket
+            .close()
             .map_err(|e| format!("WebSocket close failed: {:?}", e))
     }
 
@@ -567,9 +588,7 @@ mod ws_wasm {
 /// Drain incoming messages from WASM WebSocket connections into the inbound_queue
 #[cfg(target_arch = "wasm32")]
 fn drain_wasm_ws_messages(conn_id: i64) {
-    let msgs = ws_wasm::with_handle(conn_id, |handle| {
-        ws_wasm::drain_incoming(handle)
-    });
+    let msgs = ws_wasm::with_handle(conn_id, |handle| ws_wasm::drain_incoming(handle));
     if let Some(msgs) = msgs {
         if !msgs.is_empty() {
             with_ext_write(|ext| {
@@ -585,9 +604,7 @@ fn drain_wasm_ws_messages(conn_id: i64) {
 /// Update connection state from WASM WebSocket handle
 #[cfg(target_arch = "wasm32")]
 fn sync_wasm_ws_state(conn_id: i64) {
-    let new_state = ws_wasm::with_handle(conn_id, |handle| {
-        ws_wasm::get_state(handle)
-    });
+    let new_state = ws_wasm::with_handle(conn_id, |handle| ws_wasm::get_state(handle));
     if let Some(state) = new_state {
         with_ext_write(|ext| {
             if let Some(conn) = ext.ws_connections.get_mut(&conn_id) {
@@ -612,12 +629,16 @@ fn global_extension_state() -> &'static RwLock<ExtensionState> {
 }
 
 pub(crate) fn with_ext_read<T>(f: impl FnOnce(&ExtensionState) -> T) -> T {
-    let state = global_extension_state().read().expect("ext state lock poisoned");
+    let state = global_extension_state()
+        .read()
+        .expect("ext state lock poisoned");
     f(&state)
 }
 
 pub(crate) fn with_ext_write<T>(f: impl FnOnce(&mut ExtensionState) -> T) -> T {
-    let mut state = global_extension_state().write().expect("ext state lock poisoned");
+    let mut state = global_extension_state()
+        .write()
+        .expect("ext state lock poisoned");
     f(&mut state)
 }
 
@@ -817,9 +838,7 @@ pub async fn copy_insert_rows(
                 });
             }
         }
-        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, &[])
-            .await?
-        {
+        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, &[]).await? {
             return Err(EngineError {
                 message: format!(
                     "new row violates row-level security policy for relation \"{}\"",
@@ -1308,8 +1327,7 @@ async fn execute_update(
     }
 
     validate_table_constraints(&table, &next_rows).await?;
-    let staged_updates =
-        apply_on_update_actions(&table, &current_rows, next_rows.clone()).await?;
+    let staged_updates = apply_on_update_actions(&table, &current_rows, next_rows.clone()).await?;
 
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -1415,8 +1433,7 @@ async fn execute_delete(
         }
     }
 
-    let staged_updates =
-        apply_on_delete_actions(&table, retained, removed_rows.clone()).await?;
+    let staged_updates = apply_on_delete_actions(&table, retained, removed_rows.clone()).await?;
 
     with_storage_write(|storage| {
         for (table_oid, rows) in staged_updates {
@@ -1628,14 +1645,16 @@ async fn execute_merge(
                         }
                         candidate_rows[target_idx].values = new_row;
                         if !merge.returning.is_empty() {
-                            returning_rows.push(project_returning_row_with_qualifiers(
-                                &merge.returning,
-                                &table,
-                                &candidate_rows[target_idx].values,
-                                &target_qualifiers,
-                                params,
-                            )
-                            .await?);
+                            returning_rows.push(
+                                project_returning_row_with_qualifiers(
+                                    &merge.returning,
+                                    &table,
+                                    &candidate_rows[target_idx].values,
+                                    &target_qualifiers,
+                                    params,
+                                )
+                                .await?,
+                            );
                         }
                         changed += 1;
                         clause_applied = true;
@@ -1675,14 +1694,16 @@ async fn execute_merge(
                         }
                         let removed = candidate_rows.remove(target_idx);
                         if !merge.returning.is_empty() {
-                            returning_rows.push(project_returning_row_with_qualifiers(
-                                &merge.returning,
-                                &table,
-                                &removed.values,
-                                &target_qualifiers,
-                                params,
-                            )
-                            .await?);
+                            returning_rows.push(
+                                project_returning_row_with_qualifiers(
+                                    &merge.returning,
+                                    &table,
+                                    &removed.values,
+                                    &target_qualifiers,
+                                    params,
+                                )
+                                .await?,
+                            );
                         }
                         if removed.source_row_index.is_some() {
                             deleted_rows.push(removed.values);
@@ -1748,8 +1769,7 @@ async fn execute_merge(
                             if !provided[idx]
                                 && let Some(default_expr) = column.default()
                             {
-                                let raw =
-                                    eval_expr(default_expr, &source_scope, params).await?;
+                                let raw = eval_expr(default_expr, &source_scope, params).await?;
                                 row[idx] = coerce_value_for_column(raw, column)?;
                             }
                             if matches!(row[idx], ScalarValue::Null) && !column.nullable() {
@@ -1778,14 +1798,16 @@ async fn execute_merge(
                             });
                         }
                         if !merge.returning.is_empty() {
-                            returning_rows.push(project_returning_row_with_qualifiers(
-                                &merge.returning,
-                                &table,
-                                &row,
-                                &target_qualifiers,
-                                params,
-                            )
-                            .await?);
+                            returning_rows.push(
+                                project_returning_row_with_qualifiers(
+                                    &merge.returning,
+                                    &table,
+                                    &row,
+                                    &target_qualifiers,
+                                    params,
+                                )
+                                .await?,
+                            );
                         }
                         candidate_rows.push(MergeCandidateRow {
                             source_row_index: None,
@@ -1891,14 +1913,16 @@ async fn execute_merge(
                         }
                         candidate_rows[row_idx].values = new_row;
                         if !merge.returning.is_empty() {
-                            returning_rows.push(project_returning_row_with_qualifiers(
-                                &merge.returning,
-                                &table,
-                                &candidate_rows[row_idx].values,
-                                &target_qualifiers,
-                                params,
-                            )
-                            .await?);
+                            returning_rows.push(
+                                project_returning_row_with_qualifiers(
+                                    &merge.returning,
+                                    &table,
+                                    &candidate_rows[row_idx].values,
+                                    &target_qualifiers,
+                                    params,
+                                )
+                                .await?,
+                            );
                         }
                         changed += 1;
                         clause_applied = true;
@@ -1927,14 +1951,16 @@ async fn execute_merge(
                         }
                         let removed = candidate_rows.remove(row_idx);
                         if !merge.returning.is_empty() {
-                            returning_rows.push(project_returning_row_with_qualifiers(
-                                &merge.returning,
-                                &table,
-                                &removed.values,
-                                &target_qualifiers,
-                                params,
-                            )
-                            .await?);
+                            returning_rows.push(
+                                project_returning_row_with_qualifiers(
+                                    &merge.returning,
+                                    &table,
+                                    &removed.values,
+                                    &target_qualifiers,
+                                    params,
+                                )
+                                .await?,
+                            );
                         }
                         if removed.source_row_index.is_some() {
                             deleted_rows.push(removed.values);
@@ -2018,7 +2044,6 @@ async fn execute_merge(
         rows_affected: changed,
     })
 }
-
 
 fn resolve_insert_target_indexes(
     table: &crate::catalog::Table,
@@ -3019,7 +3044,6 @@ fn coerce_value_for_column(
         }),
     }
 }
-
 
 #[cfg(test)]
 #[path = "engine_tests.rs"]

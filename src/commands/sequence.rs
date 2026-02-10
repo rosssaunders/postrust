@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
-use crate::parser::ast::{AlterSequenceAction, AlterSequenceStatement, CreateSequenceStatement, DropSequenceStatement};
-use crate::catalog::{with_catalog_read, with_catalog_write};
-use crate::tcop::engine::{EngineError, QueryResult};
 use crate::catalog::dependency::plan_sequence_drop as plan_sequence_drop_in_catalog;
+use crate::catalog::{with_catalog_read, with_catalog_write};
 use crate::parser::ast::DropBehavior;
+use crate::parser::ast::{
+    AlterSequenceAction, AlterSequenceStatement, CreateSequenceStatement, DropSequenceStatement,
+};
+use crate::tcop::engine::{EngineError, QueryResult};
 
 #[derive(Debug, Clone)]
 pub struct SequenceState {
@@ -148,10 +150,12 @@ pub async fn execute_alter_sequence(
                     state.increment = *increment;
                 }
                 AlterSequenceAction::SetMinValue { min } => {
-                    state.min_value = min.unwrap_or_else(|| default_sequence_min_value(state.increment));
+                    state.min_value =
+                        min.unwrap_or_else(|| default_sequence_min_value(state.increment));
                 }
                 AlterSequenceAction::SetMaxValue { max } => {
-                    state.max_value = max.unwrap_or_else(|| default_sequence_max_value(state.increment));
+                    state.max_value =
+                        max.unwrap_or_else(|| default_sequence_max_value(state.increment));
                 }
                 AlterSequenceAction::SetCycle { cycle } => {
                     state.cycle = *cycle;
@@ -325,7 +329,10 @@ pub fn sequence_next_value(
         || state.increment < 0 && next < state.min_value
     {
         return Err(EngineError {
-            message: format!("nextval: sequence \"{}\" has reached its limit", sequence_name),
+            message: format!(
+                "nextval: sequence \"{}\" has reached its limit",
+                sequence_name
+            ),
         });
     }
     Ok(next)

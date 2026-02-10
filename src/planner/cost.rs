@@ -39,12 +39,20 @@ pub fn filter_cost(input: PlanCost, selectivity: f64) -> PlanCost {
 }
 
 pub fn project_cost(input: PlanCost) -> PlanCost {
-    PlanCost::new(input.rows, input.startup_cost, input.total_cost + input.rows * 0.01)
+    PlanCost::new(
+        input.rows,
+        input.startup_cost,
+        input.total_cost + input.rows * 0.01,
+    )
 }
 
 pub fn aggregate_cost(input: PlanCost, groups: f64) -> PlanCost {
     let rows = groups.max(1.0).min(input.rows);
-    PlanCost::new(rows, input.startup_cost, input.total_cost + input.rows * 0.5)
+    PlanCost::new(
+        rows,
+        input.startup_cost,
+        input.total_cost + input.rows * 0.5,
+    )
 }
 
 pub fn sort_cost(input: PlanCost) -> PlanCost {
@@ -53,7 +61,11 @@ pub fn sort_cost(input: PlanCost) -> PlanCost {
 }
 
 pub fn distinct_cost(input: PlanCost) -> PlanCost {
-    PlanCost::new(input.rows * 0.5, input.startup_cost, input.total_cost + input.rows * 0.2)
+    PlanCost::new(
+        input.rows * 0.5,
+        input.startup_cost,
+        input.total_cost + input.rows * 0.2,
+    )
 }
 
 pub fn window_cost(input: PlanCost) -> PlanCost {
@@ -83,7 +95,11 @@ where
 }
 
 pub fn set_op_cost(left: PlanCost, right: PlanCost) -> PlanCost {
-    PlanCost::new(left.rows + right.rows, left.startup_cost + right.startup_cost, left.total_cost + right.total_cost)
+    PlanCost::new(
+        left.rows + right.rows,
+        left.startup_cost + right.startup_cost,
+        left.total_cost + right.total_cost,
+    )
 }
 
 pub fn choose_join_strategy(left: PlanCost, right: PlanCost) -> JoinStrategy {
@@ -94,7 +110,12 @@ pub fn choose_join_strategy(left: PlanCost, right: PlanCost) -> JoinStrategy {
     }
 }
 
-pub fn join_cost(left: PlanCost, right: PlanCost, strategy: JoinStrategy, has_condition: bool) -> PlanCost {
+pub fn join_cost(
+    left: PlanCost,
+    right: PlanCost,
+    strategy: JoinStrategy,
+    has_condition: bool,
+) -> PlanCost {
     let selectivity = if has_condition {
         DEFAULT_JOIN_SELECTIVITY
     } else {
