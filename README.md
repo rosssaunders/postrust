@@ -5,11 +5,14 @@
 Postrust treats HTTP APIs, WebSockets, and remote data feeds as things you query, not things you preprocess. Write SQL that fetches, transforms, and joins live data in a single statement — no Python glue, no ETL pipelines, no waiting.
 
 ```sql
--- Fetch live market data and query it with SQL
-SELECT value->>'last' AS last_price,
-       value->>'volume' AS volume
-FROM json_each((SELECT http_get('https://api.exchange.com/ticker')))
-WHERE key LIKE 'BTC%';
+-- Fetch live BTC derivatives data from Deribit and query it with SQL
+SELECT result->>'last_price' AS last_price,
+       result->'stats'->>'volume' AS volume_24h,
+       result->'stats'->>'high' AS high_24h,
+       result->'stats'->>'low' AS low_24h
+FROM (SELECT http_json('https://www.deribit.com/api/v2/public/ticker?instrument_name=BTC-PERPETUAL')) t(response),
+     jsonb_each(response) AS kv(key, result)
+WHERE key = 'result';
 ```
 
 Runs natively on Linux/macOS **and in the browser via WASM**. [Try it live →](https://rosssaunders.github.io/postrust)
