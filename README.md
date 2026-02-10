@@ -54,6 +54,7 @@ This makes Postrust uniquely suited for **data analytics against live APIs** —
 | SET / SHOW / RESET | ✅ |
 | CREATE / DROP EXTENSION | ✅ |
 | CREATE FUNCTION (SQL body) | ✅ |
+| Transactions (BEGIN, COMMIT, ROLLBACK, SAVEPOINT) | ✅ |
 | PostgreSQL wire protocol (psql, DBeaver, any PG client) | ✅ |
 | LATERAL JOIN | 🔜 |
 | GROUPING SETS / ROLLUP / CUBE | 🔜 |
