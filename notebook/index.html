@@ -459,16 +459,32 @@
     const cell = document.getElementById(id);
     const editor = cell.querySelector('.cell-editor');
     const output = document.getElementById(`${id}-output`);
-    const query = editor.value.trim();
+    let query = editor.value.trim();
 
     if (!query) return;
+
+    // @table_name directive: save result as a table
+    let saveAs = null;
+    const atMatch = query.match(/^@(\w+)\s*\n/);
+    if (atMatch) {
+      saveAs = atMatch[1];
+      query = query.slice(atMatch[0].length).trim();
+    }
 
     output.classList.remove('empty');
     output.innerHTML = '<span class="info">Running...</span>';
 
     const t0 = performance.now();
     try {
-      const result = await sql(query);
+      // If saving as table, wrap in CREATE TABLE ... AS
+      if (saveAs) {
+        await sql(`DROP TABLE IF EXISTS "${saveAs}"`);
+        await sql(`CREATE TABLE "${saveAs}" AS ${query}`);
+        // Then select from it for display
+        var result = await sql(`SELECT * FROM "${saveAs}"`);
+      } else {
+        var result = await sql(query);
+      }
       const elapsed = ((performance.now() - t0)).toFixed(1);
 
       if (result.error) {
@@ -481,10 +497,14 @@
       const columns = result.columns || [];
 
       if (columns.length === 0) {
-        output.innerHTML = `<div class="info">${escapeHtml(result.command_tag || 'OK')}</div>
+        const msg = saveAs ? `Saved as "${saveAs}"` : (result.command_tag || 'OK');
+        output.innerHTML = `<div class="info">${escapeHtml(msg)}</div>
           <div class="timing">${elapsed}ms</div>`;
         return;
       }
+
+      // Store result for exports
+      cell._lastResult = { columns, rows };
 
       // Render table
       let html = renderTable(columns, rows);
@@ -498,8 +518,14 @@
       }
 
       html += `<div class="row-count">
-        <span>${rows.length} row${rows.length !== 1 ? 's' : ''}</span>
-        <span>${elapsed}ms</span>
+        <span>${rows.length} row${rows.length !== 1 ? 's' : ''}${saveAs ? ` → <b>${saveAs}</b>` : ''}</span>
+        <span>
+          <button class="cell-btn" onclick="exportResult('${id}','csv')" title="Download CSV">CSV</button>
+          <button class="cell-btn" onclick="exportResult('${id}','json')" title="Download JSON">JSON</button>
+          <button class="cell-btn" onclick="exportResult('${id}','md')" title="Copy as Markdown">MD</button>
+          <button class="cell-btn" onclick="exportResult('${id}','html')" title="Copy as HTML">HTML</button>
+          ${elapsed}ms
+        </span>
       </div>`;
       output.innerHTML = html;
 
@@ -777,6 +803,106 @@
     return false;
   }
 
+  // Export functions
+  window.exportResult = function(cellId, format) {
+    const cell = document.getElementById(cellId);
+    if (!cell || !cell._lastResult) return;
+    const { columns, rows } = cell._lastResult;
+
+    let content, filename, mime;
+
+    switch (format) {
+      case 'csv':
+        content = toCSV(columns, rows);
+        filename = 'result.csv';
+        mime = 'text/csv';
+        download(content, filename, mime);
+        break;
+      case 'json':
+        content = toJSON(columns, rows);
+        filename = 'result.json';
+        mime = 'application/json';
+        download(content, filename, mime);
+        break;
+      case 'md':
+        content = toMarkdown(columns, rows);
+        navigator.clipboard.writeText(content);
+        showToast('Markdown copied to clipboard');
+        break;
+      case 'html':
+        content = toHTML(columns, rows);
+        navigator.clipboard.writeText(content);
+        showToast('HTML copied to clipboard');
+        break;
+    }
+  };
+
+  function toCSV(columns, rows) {
+    const escape = v => {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? '"' + s.replace(/"/g, '""') + '"' : s;
+    };
+    return [columns.map(escape).join(','),
+      ...rows.map(r => r.map(escape).join(','))
+    ].join('\n');
+  }
+
+  function toJSON(columns, rows) {
+    const data = rows.map(row => {
+      const obj = {};
+      columns.forEach((col, i) => {
+        let v = row[i];
+        if (v !== null && !isNaN(v) && v !== '') v = parseFloat(v);
+        obj[col] = v;
+      });
+      return obj;
+    });
+    return JSON.stringify(data, null, 2);
+  }
+
+  function toMarkdown(columns, rows) {
+    const widths = columns.map((c, i) => {
+      const vals = [c, ...rows.map(r => String(r[i] ?? 'NULL'))];
+      return Math.max(...vals.map(v => v.length));
+    });
+    const pad = (s, w) => s + ' '.repeat(Math.max(0, w - s.length));
+    const header = '| ' + columns.map((c, i) => pad(c, widths[i])).join(' | ') + ' |';
+    const sep = '| ' + widths.map(w => '-'.repeat(w)).join(' | ') + ' |';
+    const body = rows.map(r =>
+      '| ' + r.map((v, i) => pad(String(v ?? 'NULL'), widths[i])).join(' | ') + ' |'
+    ).join('\n');
+    return [header, sep, body].join('\n');
+  }
+
+  function toHTML(columns, rows) {
+    let html = '<table>\n<thead>\n<tr>';
+    html += columns.map(c => `<th>${c}</th>`).join('');
+    html += '</tr>\n</thead>\n<tbody>\n';
+    for (const row of rows) {
+      html += '<tr>' + row.map(v => `<td>${v ?? ''}</td>`).join('') + '</tr>\n';
+    }
+    html += '</tbody>\n</table>';
+    return html;
+  }
+
+  function download(content, filename, mime) {
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function showToast(msg) {
+    const el = document.createElement('div');
+    el.textContent = msg;
+    el.style.cssText = 'position:fixed;bottom:20px;right:20px;background:var(--green);color:var(--bg);padding:8px 16px;border-radius:6px;font-size:13px;z-index:999;animation:fadeout 2s forwards;';
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 2000);
+  }
+
   function escapeHtml(s) {
     return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
@@ -787,10 +913,12 @@
 
     if (!loadFromHash()) {
       // Default starter cells
-      addCell("-- 🐘 Welcome to postrust SQL Notebook\n-- Ctrl+Enter to run a cell, Ctrl+Shift+Enter to run & add new cell\n-- Drop CSV/JSON files to import data\n\nSELECT 'Hello, SQL Notebook!' AS message, version() AS engine;");
-      addCell("-- Create some sample data\nCREATE TABLE demo (\n  name TEXT,\n  category TEXT,\n  revenue DOUBLE PRECISION\n);\n\nINSERT INTO demo VALUES\n  ('Alpha', 'Tech', 150000),\n  ('Beta', 'Finance', 98000),\n  ('Gamma', 'Tech', 220000),\n  ('Delta', 'Healthcare', 175000),\n  ('Epsilon', 'Finance', 130000),\n  ('Zeta', 'Tech', 310000),\n  ('Eta', 'Healthcare', 89000);");
-      addCell("-- Revenue by category (auto-charts when 2 columns!)\nSELECT category, SUM(revenue) AS total_revenue\nFROM demo\nGROUP BY category\nORDER BY total_revenue DESC;");
-      addCell("-- Window function: rank within category\nSELECT name, category, revenue,\n       RANK() OVER (PARTITION BY category ORDER BY revenue DESC) AS rank_in_category\nFROM demo\nORDER BY category, rank_in_category;");
+      addCell("-- 🐘 Welcome to postrust SQL Notebook\n-- Ctrl+Enter to run, Ctrl+Shift+Enter to run & add new cell\n-- Drop CSV/JSON files to import data\n-- Use @name to save a cell's result as a table\n\nSELECT 'Hello, SQL Notebook!' AS message, version() AS engine;");
+      addCell("-- Create sample data (or just drop a CSV!)\nCREATE TABLE sales (\n  name TEXT, category TEXT, region TEXT,\n  revenue DOUBLE PRECISION, quarter INT\n);\n\nINSERT INTO sales VALUES\n  ('Alpha', 'Tech', 'North', 150000, 1),\n  ('Beta', 'Finance', 'South', 98000, 1),\n  ('Gamma', 'Tech', 'East', 220000, 2),\n  ('Delta', 'Healthcare', 'North', 175000, 2),\n  ('Epsilon', 'Finance', 'West', 130000, 3),\n  ('Zeta', 'Tech', 'South', 310000, 3),\n  ('Eta', 'Healthcare', 'East', 89000, 4),\n  ('Theta', 'Tech', 'West', 195000, 4),\n  ('Iota', 'Finance', 'North', 142000, 4);");
+      addCell("-- Use @name to save results as a reusable table\n-- No CREATE TABLE boilerplate needed!\n@by_category\nSELECT category, SUM(revenue) AS total_revenue,\n       COUNT(*) AS deals,\n       ROUND(AVG(revenue)::numeric, 0) AS avg_deal\nFROM sales\nGROUP BY category\nORDER BY total_revenue DESC;");
+      addCell("-- Auto-charts when 2 columns! (label + number)\nSELECT category, total_revenue FROM by_category;");
+      addCell("-- Window functions: rank & running totals\nSELECT name, category, revenue,\n       RANK() OVER (PARTITION BY category ORDER BY revenue DESC) AS rank_in_cat,\n       SUM(revenue) OVER (ORDER BY revenue DESC) AS running_total\nFROM sales;");
+      addCell("-- Export buttons appear below results → CSV, JSON, Markdown, HTML\n-- Click them to download or copy!\n@quarterly\nSELECT quarter AS q, SUM(revenue) AS revenue FROM sales GROUP BY quarter ORDER BY q;");
     }
   }
 
