@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>postrust WASM Test</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }
+    h1 { color: #0078d4; }
+    #log { background: #f5f5f5; padding: 12px; border-radius: 4px; white-space: pre-wrap; font-family: monospace; font-size: 13px; min-height: 200px; }
+    .pass { color: #2e7d32; }
+    .fail { color: #d32f2f; }
+    .info { color: #666; }
+    textarea { width: 100%; height: 80px; font-family: monospace; padding: 8px; margin: 8px 0; }
+    button { background: #0078d4; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-size: 14px; }
+    button:hover { background: #106ebe; }
+    #results { margin-top: 12px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; }
+    th { background: #0078d4; color: white; padding: 6px 10px; text-align: left; }
+    td { padding: 6px 10px; border-bottom: 1px solid #e0e0e0; }
+    tr:nth-child(even) { background: #f9f9f9; }
+  </style>
+</head>
+<body>
+  <h1>🐘 postrust WASM Test</h1>
+  <div id="log"></div>
+  
+  <h2>Interactive Query</h2>
+  <textarea id="sql" placeholder="SELECT * FROM test_data">SELECT name, age, age * 2 AS double_age FROM test_data WHERE age > 25 ORDER BY age DESC</textarea>
+  <button onclick="runQuery()">▶ Run</button>
+  <div id="results"></div>
+
+  <script type="module">
+    import init, { execute_sql_json } from './pkg/postgrust.js';
+
+    const log = document.getElementById('log');
+    let passed = 0, failed = 0;
+
+    function write(msg, cls = 'info') {
+      log.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function assert(condition, msg) {
+      if (condition) { write(`✓ ${msg}`, 'pass'); passed++; }
+      else { write(`✗ ${msg}`, 'fail'); failed++; }
+    }
+
+    async function sql(query) {
+      const json = await execute_sql_json(query);
+      return JSON.parse(json);
+    }
+
+    window.runQuery = async function() {
+      const query = document.getElementById('sql').value;
+      try {
+        const result = await sql(query);
+        if (result.error) {
+          document.getElementById('results').innerHTML = `<p style="color:red">${result.error}</p>`;
+          return;
+        }
+        const cols = result.columns || [];
+        const rows = result.rows || [];
+        let html = `<p>${rows.length} rows</p><table><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
+        for (const row of rows) {
+          html += `<tr>${row.map(v => `<td>${v ?? 'NULL'}</td>`).join('')}</tr>`;
+        }
+        html += '</table>';
+        document.getElementById('results').innerHTML = html;
+      } catch (e) {
+        document.getElementById('results').innerHTML = `<p style="color:red">${e.message}</p>`;
+      }
+    };
+
+    async function runTests() {
+      write('Loading WASM engine...');
+      await init();
+      write('Engine loaded ✓\n', 'pass');
+
+      // Test 1: Basic SELECT
+      write('--- Test 1: Basic SELECT ---');
+      let r = await sql("SELECT 1 AS num, 'hello' AS greeting");
+      assert(!r.error, 'No error');
+      assert(r.rows.length === 1, '1 row returned');
+      assert(r.rows[0][0] === '1', 'num = 1');
+      assert(r.rows[0][1] === 'hello', 'greeting = hello');
+
+      // Test 2: CREATE TABLE + INSERT
+      write('\n--- Test 2: CREATE TABLE + INSERT ---');
+      await sql("CREATE TABLE test_data (id INT, name TEXT, age INT, salary DOUBLE PRECISION)");
+      await sql("INSERT INTO test_data VALUES (1, 'Alice', 30, 85000.50)");
+      await sql("INSERT INTO test_data VALUES (2, 'Bob', 25, 72000.00)");
+      await sql("INSERT INTO test_data VALUES (3, 'Charlie', 35, 95000.75)");
+      await sql("INSERT INTO test_data VALUES (4, 'Diana', 28, 68000.00)");
+      await sql("INSERT INTO test_data VALUES (5, 'Eve', 32, 91000.25)");
+      r = await sql("SELECT COUNT(*) AS cnt FROM test_data");
+      assert(r.rows[0][0] === '5', '5 rows inserted');
+
+      // Test 3: WHERE + ORDER BY
+      write('\n--- Test 3: WHERE + ORDER BY ---');
+      r = await sql("SELECT name, age FROM test_data WHERE age > 28 ORDER BY age DESC");
+      assert(r.rows.length === 3, '3 rows where age > 28');
+      assert(r.rows[0][0] === 'Charlie', 'Charlie is oldest');
+
+      // Test 4: Aggregates
+      write('\n--- Test 4: Aggregates ---');
+      r = await sql("SELECT AVG(salary) AS avg_sal, MIN(age) AS youngest, MAX(age) AS oldest FROM test_data");
+      assert(r.rows.length === 1, 'Aggregate returns 1 row');
+      assert(r.rows[0][2] === '35', 'Max age is 35');
+
+      // Test 5: GROUP BY
+      write('\n--- Test 5: GROUP BY ---');
+      r = await sql("SELECT CASE WHEN age >= 30 THEN 'senior' ELSE 'junior' END AS tier, COUNT(*) AS cnt FROM test_data GROUP BY 1 ORDER BY tier");
+      assert(r.rows.length === 2, '2 groups');
+
+      // Test 6: Window functions
+      write('\n--- Test 6: Window Functions ---');
+      r = await sql("SELECT name, salary, RANK() OVER (ORDER BY salary DESC) AS rank FROM test_data");
+      assert(r.rows.length === 5, '5 rows with rank');
+      assert(r.rows[0][0] === 'Charlie', 'Charlie has highest salary');
+
+      // Test 7: CTE
+      write('\n--- Test 7: CTE ---');
+      r = await sql("WITH high_earners AS (SELECT * FROM test_data WHERE salary > 80000) SELECT name FROM high_earners ORDER BY name");
+      assert(r.rows.length === 3, '3 high earners');
+
+      // Test 8: Subquery
+      write('\n--- Test 8: Subquery ---');
+      r = await sql("SELECT name FROM test_data WHERE salary > (SELECT AVG(salary) FROM test_data) ORDER BY name");
+      assert(r.rows.length >= 1, 'At least 1 above-average earner');
+
+      // Test 9: JOIN
+      write('\n--- Test 9: JOIN ---');
+      await sql("CREATE TABLE departments (id INT, name TEXT)");
+      await sql("INSERT INTO departments VALUES (1, 'Engineering'), (2, 'Marketing')");
+      await sql("CREATE TABLE employees (name TEXT, dept_id INT)");
+      await sql("INSERT INTO employees VALUES ('Alice', 1), ('Bob', 2), ('Charlie', 1)");
+      r = await sql("SELECT e.name, d.name AS dept FROM employees e JOIN departments d ON e.dept_id = d.id ORDER BY e.name");
+      assert(r.rows.length === 3, '3 joined rows');
+      assert(r.rows[0][1] === 'Engineering', 'Alice in Engineering');
+
+      // Test 10: JSON
+      write('\n--- Test 10: JSON ---');
+      r = await sql(`SELECT '{"name": "test", "value": 42}'::jsonb->>'name' AS jname`);
+      assert(r.rows[0][0] === 'test', 'JSON extraction works');
+
+      // Summary
+      write(`\n═══════════════════════════════════`);
+      write(`Results: ${passed} passed, ${failed} failed`, failed > 0 ? 'fail' : 'pass');
+      write(`═══════════════════════════════════`);
+
+      document.title = failed > 0 ? `FAIL (${failed})` : `PASS (${passed})`;
+    }
+
+    runTests().catch(e => write(`Fatal: ${e.message}`, 'fail'));
+  </script>
+</body>
+</html>
