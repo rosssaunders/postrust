@@ -16,7 +16,7 @@ Execution model:
 
 ## Status (audited 2026-02-10)
 
-All 365 tests pass. The codebase is ~40k lines of Rust across a PostgreSQL-style module layout.
+All 402 tests pass. The codebase is ~41k lines of Rust across a PostgreSQL-style module layout.
 
 ### Step 00 — Refactor to PG Layout: ✅ Done
 The monolithic `engine.rs` (was 21k lines) has been decomposed into:
@@ -95,10 +95,16 @@ The monolithic `engine.rs` (was 21k lines) has been decomposed into:
   - 100+ parser unit tests
 - **Not yet parsed:** Partitioning DDL, triggers, rules, PREPARE/EXECUTE/DEALLOCATE, COPY (parsed via string matching in postgres.rs), GRANT/REVOKE (parsed via string matching in postgres.rs), CREATE TYPE, CREATE DOMAIN, COMMENT ON, VACUUM/ANALYZE.
 
-### Step 08 — Parse Analysis and Type System: 🟡 Partially Done
+### Step 08 — Parse Analysis and Type System: ✅ Done
 - **Done:** Type coercion at DML boundaries (`coerce_value_for_column`), mixed-type numeric/comparison coercion, implicit cast rules for common types.
 - **Done:** Function/operator resolution is inline in executor (not a separate analyzer pass).
-- **Not done:** No separate `src/analyzer/` module. No distinct analyzed query representation (post-AST). Analysis is fused into executor. This works but doesn't match the plan's architecture.
+- **Done:** `src/analyzer/` module with semantic analysis pass wired into `plan_statement()`:
+  - `analyzer/mod.rs` — entry point, analyzes SELECT/INSERT/UPDATE/DELETE statements
+  - `analyzer/binding.rs` — name binding and scope resolution (table/column, CTE, aliases)
+  - `analyzer/types.rs` — type inference, implicit coercion rules (int→float, date→timestamp), boolean/numeric context validation
+  - `analyzer/functions.rs` — function resolution with arg count validation for 140+ built-in functions
+  - 33 new tests covering type coercion, function resolution, name binding, CTE handling
+- **Note:** Analyzer is currently a validation pass (does not transform AST). Table existence checks are still deferred to executor to maintain backward compatibility. Future work: migrate more checks from executor to analyzer.
 
 ### Step 09 — System Catalog and Dependencies: ✅ Done
 - `src/catalog/dependency.rs` (550 lines): full dependency graph with CASCADE/RESTRICT semantics.

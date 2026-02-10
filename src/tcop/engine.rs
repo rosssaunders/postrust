@@ -94,6 +94,10 @@ impl PlannedQuery {
 }
 
 pub fn plan_statement(statement: Statement) -> Result<PlannedQuery, EngineError> {
+    // Run semantic analysis before planning
+    let search_path = crate::catalog::SearchPath::default();
+    crate::analyzer::analyze(&statement, &search_path)?;
+
     let (columns, column_type_oids, returns_data, command_tag) = match &statement {
         Statement::Query(query) => {
             let output = derive_query_output_columns(query)?;

@@ -147,6 +147,11 @@ src/
 │   ├── ast.rs           # AST node types (74 types)
 │   ├── sql_parser.rs    # Recursive-descent parser
 │   └── scansup.rs       # Identifier handling (PG's scansup.c)
+├── analyzer/            # Semantic analysis (name binding, type checking, function resolution)
+│   ├── mod.rs           # Entry point — analyze() validation pass
+│   ├── binding.rs       # Name binding and scope resolution
+│   ├── types.rs         # Type inference and coercion rules
+│   └── functions.rs     # Function/operator resolution and arg validation
 ├── catalog/             # In-memory catalog (schemas, tables, OIDs)
 │   ├── mod.rs           # Core catalog API
 │   ├── schema.rs        # Schema management

@@ -1,4 +1,5 @@
 pub mod access;
+pub mod analyzer;
 pub mod browser;
 pub mod commands;
 pub mod catalog;
