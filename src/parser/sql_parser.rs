@@ -2487,14 +2487,56 @@ impl Parser {
         let mut out = Vec::new();
         loop {
             let expr = self.parse_expr()?;
-            let ascending = if self.consume_keyword(Keyword::Asc) {
-                Some(true)
+            
+            // Check for USING operator before ASC/DESC
+            let (using_operator, ascending) = if self.consume_keyword(Keyword::Using) {
+                // Parse the operator after USING
+                let operator = match self.current_kind() {
+                    TokenKind::Less => {
+                        self.advance();
+                        "<".to_string()
+                    }
+                    TokenKind::Greater => {
+                        self.advance();
+                        ">".to_string()
+                    }
+                    TokenKind::LessEquals => {
+                        self.advance();
+                        "<=".to_string()
+                    }
+                    TokenKind::GreaterEquals => {
+                        self.advance();
+                        ">=".to_string()
+                    }
+                    TokenKind::Operator(op) => {
+                        let op_str = op.clone();
+                        self.advance();
+                        op_str
+                    }
+                    _ => {
+                        return Err(self.error_at_current("expected operator after USING"));
+                    }
+                };
+                // Map common operators to ascending/descending
+                let asc = match operator.as_str() {
+                    "<" | "<=" => Some(true),   // USING < means ascending
+                    ">" | ">=" => Some(false),  // USING > means descending
+                    _ => None,                   // Other operators don't have clear mapping
+                };
+                (Some(operator), asc)
+            } else if self.consume_keyword(Keyword::Asc) {
+                (None, Some(true))
             } else if self.consume_keyword(Keyword::Desc) {
-                Some(false)
+                (None, Some(false))
             } else {
-                None
+                (None, None)
             };
-            out.push(OrderByExpr { expr, ascending });
+            
+            out.push(OrderByExpr {
+                expr,
+                ascending,
+                using_operator,
+            });
 
             if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                 break;
@@ -6379,5 +6421,41 @@ mod tests {
         } else {
             panic!("expected window function");
         }
+    }
+
+    #[test]
+    fn parses_order_by_using_operator() {
+        let stmt = parse_statement("SELECT * FROM users ORDER BY id USING <")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        assert_eq!(query.order_by.len(), 1);
+        assert_eq!(query.order_by[0].using_operator, Some("<".to_string()));
+        assert_eq!(query.order_by[0].ascending, Some(true));
+    }
+
+    #[test]
+    fn parses_order_by_using_greater_operator() {
+        let stmt = parse_statement("SELECT * FROM users ORDER BY id USING >")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        assert_eq!(query.order_by.len(), 1);
+        assert_eq!(query.order_by[0].using_operator, Some(">".to_string()));
+        assert_eq!(query.order_by[0].ascending, Some(false));
+    }
+
+    #[test]
+    fn parses_order_by_using_with_multiple_columns() {
+        let stmt = parse_statement("SELECT * FROM users ORDER BY name USING <, age USING >")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        assert_eq!(query.order_by.len(), 2);
+        assert_eq!(query.order_by[0].using_operator, Some("<".to_string()));
+        assert_eq!(query.order_by[1].using_operator, Some(">".to_string()));
     }
 }

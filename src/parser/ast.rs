@@ -709,6 +709,7 @@ pub enum JoinCondition {
 pub struct OrderByExpr {
     pub expr: Expr,
     pub ascending: Option<bool>,
+    pub using_operator: Option<String>, // PostgreSQL USING operator (e.g., "<", ">")
 }
 
 #[derive(Debug, Clone, PartialEq)]
