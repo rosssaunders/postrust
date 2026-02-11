@@ -378,6 +378,9 @@ pub(crate) fn eval_expr<'a>(
             Expr::Wildcard => Err(EngineError {
                 message: "wildcard expression requires FROM support".to_string(),
             }),
+            Expr::QualifiedWildcard(_) => Err(EngineError {
+                message: "qualified wildcard expression requires FROM support".to_string(),
+            }),
         }
     })
 }
@@ -649,6 +652,9 @@ pub(crate) fn eval_expr_with_window<'a>(
             }
             Expr::Wildcard => Err(EngineError {
                 message: "wildcard expression requires FROM support".to_string(),
+            }),
+            Expr::QualifiedWildcard(_) => Err(EngineError {
+                message: "qualified wildcard expression requires FROM support".to_string(),
             }),
         }
     })

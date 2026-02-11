@@ -761,6 +761,7 @@ pub enum Expr {
         type_name: String,
     },
     Wildcard,
+    QualifiedWildcard(Vec<String>), // e.g., table.* or schema.table.*
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

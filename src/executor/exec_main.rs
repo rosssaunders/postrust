@@ -214,7 +214,7 @@ async fn execute_select(
     let has_wildcard = select
         .targets
         .iter()
-        .any(|target| matches!(target.expr, Expr::Wildcard));
+        .any(|target| matches!(target.expr, Expr::Wildcard | Expr::QualifiedWildcard(_)));
     let wildcard_columns = if has_wildcard {
         Some(expand_from_columns(&select.from, &cte_columns)?)
     } else {
@@ -1714,6 +1714,24 @@ async fn project_select_row(
             }
             continue;
         }
+        if let Expr::QualifiedWildcard(qualifier) = &target.expr {
+            let Some(expanded) = wildcard_columns else {
+                return Err(EngineError {
+                    message: "qualified wildcard target requires FROM support".to_string(),
+                });
+            };
+            let qualifier_lower = qualifier.last()
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            for col in expanded {
+                // Match columns that have the qualifier in their lookup path
+                if col.lookup_parts.len() >= 2 
+                    && col.lookup_parts[0].to_ascii_lowercase() == qualifier_lower {
+                    row.push(scope.lookup_identifier(&col.lookup_parts)?);
+                }
+            }
+            continue;
+        }
         row.push(eval_expr(&target.expr, scope, params).await?);
     }
     Ok(row)
@@ -1737,6 +1755,24 @@ async fn project_select_row_with_window(
             };
             for col in expanded {
                 row.push(scope.lookup_identifier(&col.lookup_parts)?);
+            }
+            continue;
+        }
+        if let Expr::QualifiedWildcard(qualifier) = &target.expr {
+            let Some(expanded) = wildcard_columns else {
+                return Err(EngineError {
+                    message: "qualified wildcard target requires FROM support".to_string(),
+                });
+            };
+            let qualifier_lower = qualifier.last()
+                .map(|s| s.to_ascii_lowercase())
+                .unwrap_or_default();
+            for col in expanded {
+                // Match columns that have the qualifier in their lookup path
+                if col.lookup_parts.len() >= 2 
+                    && col.lookup_parts[0].to_ascii_lowercase() == qualifier_lower {
+                    row.push(scope.lookup_identifier(&col.lookup_parts)?);
+                }
             }
             continue;
         }

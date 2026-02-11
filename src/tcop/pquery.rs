@@ -248,7 +248,7 @@ fn infer_expr_type_oid(
             ..
         } => infer_function_return_oid(name, args, within_group, scope, ctes),
         Expr::Cast { type_name, .. } => cast_type_name_to_oid(type_name),
-        Expr::Wildcard => PG_TEXT_OID,
+        Expr::Wildcard | Expr::QualifiedWildcard(_) => PG_TEXT_OID,
         Expr::Unary { op, expr } => match op {
             UnaryOp::Not => PG_BOOL_OID,
             UnaryOp::Plus | UnaryOp::Minus => infer_expr_type_oid(expr, scope, ctes),

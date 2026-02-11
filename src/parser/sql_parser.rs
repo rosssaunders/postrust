@@ -2888,6 +2888,10 @@ impl Parser {
     fn parse_identifier_expr(&mut self) -> Result<Expr, ParseError> {
         let mut name = vec![self.parse_expr_identifier()?];
         while self.consume_if(|k| matches!(k, TokenKind::Dot)) {
+            // Check if this is a qualified wildcard (e.g., table.*)
+            if self.consume_if(|k| matches!(k, TokenKind::Star)) {
+                return Ok(Expr::QualifiedWildcard(name));
+            }
             name.push(self.parse_expr_identifier()?);
         }
 
@@ -6151,5 +6155,48 @@ mod tests {
             &select.targets[0].expr,
             Expr::Cast { type_name, .. } if type_name == "int8[][]"
         ));
+    }
+
+    #[test]
+    fn parses_qualified_wildcard() {
+        let stmt = parse_statement("SELECT t.* FROM users t").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.targets.len(), 1);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::QualifiedWildcard(parts) if parts == &vec!["t".to_string()]
+        ));
+    }
+
+    #[test]
+    fn parses_schema_qualified_wildcard() {
+        let stmt = parse_statement("SELECT public.users.* FROM public.users")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.targets.len(), 1);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::QualifiedWildcard(parts) if parts == &vec!["public".to_string(), "users".to_string()]
+        ));
+    }
+
+    #[test]
+    fn parses_multiple_wildcards() {
+        let stmt = parse_statement("SELECT t1.*, t2.*, * FROM t1, t2")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.targets.len(), 3);
+        assert!(matches!(&select.targets[0].expr, Expr::QualifiedWildcard(_)));
+        assert!(matches!(&select.targets[1].expr, Expr::QualifiedWildcard(_)));
+        assert!(matches!(&select.targets[2].expr, Expr::Wildcard));
     }
 }
