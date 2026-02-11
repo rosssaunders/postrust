@@ -1,168 +1,128 @@
 # PostgreSQL 18 Compatibility Assessment
 
-## Overview
+**Target:** PostgreSQL 18 (master branch)  
+**Method:** 39 regression test files run via wire protocol (psql → pg_server)  
+**Date:** 2026-02-11
 
-This document provides a comprehensive compatibility assessment of postrust against PostgreSQL 18 regression tests. The assessment was conducted by running 39 core regression test files containing approximately 12,329 SQL statements against postrust via the pg_server wire protocol.
+## Overall Score
 
-## Overall Compatibility Score
+**23% statement-level pass rate** (2,995 / 12,480 statements)
 
-**Estimated Compatibility: 98.7%** (12,169/12,329 statements)
+This is a raw score — many failures cascade (one unsupported `CREATE` causes all subsequent statements referencing that table to fail). The effective compatibility for supported features is higher, but this is the honest number against the real PostgreSQL regression suite.
 
-- **Total test files analyzed:** 39
-- **Files with errors:** 39 (100%)
-- **Total errors found:** 160
-- **Average errors per file:** 4.1
+## Per-File Results
 
-## Test Results by Category
+| File | Passed | Total | Rate |
+|------|--------|-------|------|
+| select_having.sql | 21 | 23 | **91%** |
+| numeric.sql | 790 | 1,059 | **74%** |
+| case.sql | 49 | 67 | **73%** |
+| select_distinct.sql | 66 | 113 | **58%** |
+| test_setup.sql | 36 | 70 | **51%** |
+| delete.sql | 5 | 10 | **50%** |
+| union.sql | 91 | 206 | **44%** |
+| explain.sql | 32 | 76 | **42%** |
+| select_implicit.sql | 18 | 44 | **40%** |
+| merge.sql | 230 | 642 | **35%** |
+| aggregates.sql | 215 | 619 | **34%** |
+| matview.sql | 64 | 187 | **34%** |
+| strings.sql | 185 | 551 | **33%** |
+| sequence.sql | 84 | 261 | **32%** |
+| select.sql | 32 | 106 | **30%** |
+| boolean.sql | 28 | 98 | **28%** |
+| create_view.sql | 90 | 311 | **28%** |
+| float4.sql | 27 | 101 | **26%** |
+| subselect.sql | 87 | 366 | **23%** |
+| create_index.sql | 155 | 684 | **22%** |
+| text.sql | 14 | 73 | **19%** |
+| insert_conflict.sql | 48 | 269 | **17%** |
+| int8.sql | 29 | 174 | **16%** |
+| arrays.sql | 84 | 529 | **15%** |
+| int4.sql | 14 | 94 | **14%** |
+| float8.sql | 24 | 186 | **12%** |
+| update.sql | 38 | 302 | **12%** |
+| date.sql | 32 | 272 | **11%** |
+| interval.sql | 48 | 450 | **10%** |
+| groupingsets.sql | 16 | 219 | **7%** |
+| insert.sql | 22 | 392 | **5%** |
+| window.sql | 10 | 429 | **2%** |
+| with.sql | 8 | 312 | **2%** |
+| json.sql | 6 | 469 | **1%** |
+| jsonb.sql | 5 | 1,100 | **0%** |
+| timestamp.sql | 2 | 178 | **1%** |
+| create_table.sql | 0 | 329 | **0%** |
+| int2.sql | 0 | 76 | **0%** |
+| time.sql | 0 | 44 | **0%** |
 
-### Best Performing Areas (>99% estimated compatibility)
-- **JSON/JSONB operations** - Strong support for JSON types and operations
-- **Basic SQL queries** - SELECT, INSERT, UPDATE, DELETE work well
-- **Window functions** - Good support for window operations  
-- **CTEs (WITH clauses)** - Common Table Expressions mostly work
-- **Numeric operations** - Good support for various numeric types
-- **Aggregations** - Standard aggregate functions work well
+## Error Analysis (Top 15 by frequency)
 
-### Areas Needing Improvement (>5 errors per file)
-1. **select_implicit.sql** - 7 errors (84.1% pass) - Column resolution in ORDER BY
-2. **int2.sql** - 7 errors (90.8% pass) - Parser issues with type casting
-3. **int4.sql** - 7 errors (92.6% pass) - Similar type casting issues
-4. **float4.sql** - 7 errors (93.0% pass) - Floating point syntax gaps
-5. **time.sql** - 6 errors (86.4% pass) - Time type parsing
+| Count | Error Category | Impact |
+|-------|---------------|--------|
+| 1,779 | `current transaction is aborted` | **Cascade** — caused by earlier errors in same transaction |
+| 1,403 | `unexpected token after end of statement` | **Parser** — syntax not recognised |
+| 1,353 | `relation "X" does not exist` | **Cascade** — table wasn't created due to earlier error |
+| 1,274 | `unsupported cast type name` | **Parser** — `::type` cast for custom/domain types |
+| 846 | `expected query term (SELECT, VALUES...)` | **Parser** — can't parse certain statement structures |
+| 477 | `expected identifier` | **Parser** — `table.*`, qualified names, etc. |
+| 432 | `expected ')' after function arguments` | **Parser** — complex function call syntax |
+| 369 | `expected TABLE, SCHEMA... after CREATE` | **Parser** — CREATE TYPE, CREATE DOMAIN, CREATE TEMP TABLE |
+| 271 | `expected '(' after CREATE TABLE name` | **Parser** — CREATE TABLE variants |
+| 144 | `relation already exists` | **Engine** — IF NOT EXISTS handling |
+| 123 | `expected AS in CTE` | **Parser** — CTE syntax variants |
+| 89 | `expected expression` | **Parser** — expression parsing gaps |
+| 78 | `unknown column` | **Engine** — column resolution |
+| 77 | `expected '(' after OVER` | **Parser** — window function syntax |
+| 74 | `unsupported function: pg_get_viewdef` | **Missing function** |
 
-## Critical Gaps Analysis
+## Prioritised Fix Plan
 
-### 1. Parser Syntax Gaps (44% of all errors - 71 instances)
+### Phase 1: Cascade Breakers (highest ROI)
 
-**Highest Impact Issues:**
-- **`USING` operator syntax** (13 test files affected)
-  - `ORDER BY column USING >` not supported
-  - Affects sorting with custom operators
-- **CREATE statement variations** (6 test files affected)
-  - `CREATE TEMP TABLE` syntax gaps
-  - Missing support for some CREATE variants
-- **Expression parsing** (5 test files affected)
-  - Complex nested expressions
-  - Function call parsing in certain contexts
+These fixes would unblock hundreds of cascading failures:
 
-**Example Errors:**
-```sql
--- This fails:
-ORDER BY unique1 USING >;
+1. **`CREATE TEMP TABLE` / `CREATE TEMPORARY TABLE`** — 369+ errors. Many test files create temp tables for setup. Without this, everything downstream fails.
 
--- This fails:
-CREATE TEMP TABLE onerow();
+2. **`CREATE TYPE` / `CREATE DOMAIN`** — Needed by case.sql, json.sql, many others. Blocks custom type tests.
 
--- This fails:  
-SELECT (SELECT ARRAY[1,2,3])[1];
-```
+3. **Transaction error recovery** — 1,779 "transaction aborted" errors are cascades from earlier failures. Better error handling (auto-rollback or implicit transactions per statement) would let tests continue past failures.
 
-### 2. Missing Test Fixtures (9% of errors - 15 instances)
+### Phase 2: Parser Gaps (medium ROI)
 
-Several tests fail because the standard PostgreSQL test tables (`onek`, `tenk1`, etc.) aren't properly created. This affects:
-- `select.sql`, `select_distinct.sql` - Basic SELECT tests
-- `aggregates.sql` - Aggregate function tests  
-- `join.sql` - JOIN operation tests
+4. **`table.*` column expansion** — `SELECT t.*` syntax. 477 "expected identifier" errors, many from this.
 
-**Impact:** These failures cascade - one missing table causes multiple statement failures.
+5. **`ORDER BY ... USING >` operator syntax** — PG-specific but appears in 13+ test files.
 
-### 3. Type System Gaps (2% of errors - 3 instances)
+6. **Complex `::type` casts** — Custom types, domains, arrays with casts. 1,274 errors.
 
-- **Geometric types:** `point` type not supported
-- **Range types:** Limited support for custom range types
-- **Domain types:** Some domain operations missing
+7. **Window function `OVER` clause variants** — Named windows, complex frame specs. 77+ errors blocking window.sql (2% pass rate).
 
-## Recommended Fix Priority
+8. **CTE syntax variants** — Materialized/not materialized CTEs, recursive variants. 123 errors blocking with.sql (2% pass rate).
 
-### Phase 1: High Impact Parser Fixes (Would unlock ~30-40 additional passing statements)
+### Phase 3: Missing Functions & Features
 
-1. **`USING` operator syntax in ORDER BY**
-   - Files affected: 13
-   - Example: `ORDER BY col USING >`
-   - Implementation: Extend ORDER BY parser to support USING clause
+9. **`format()` function** — 40 errors
+10. **`pg_get_viewdef()`** — 74 errors (needed for view tests)
+11. **`pg_input_is_valid()`** — 35 errors
+12. **`generate_series` via wire protocol** — Works in WASM, broken over wire
 
-2. **CREATE TEMP TABLE syntax**
-   - Files affected: 6  
-   - Example: `CREATE TEMP TABLE name()`
-   - Implementation: Add TEMP/TEMPORARY keyword support in CREATE TABLE
+### Phase 4: Type System
 
-3. **Array indexing syntax**
-   - Files affected: Multiple
-   - Example: `(SELECT ARRAY[1,2,3])[1]`
-   - Implementation: Support postfix array subscript operations
+13. **Time/timestamp types via wire protocol** — time.sql: 0%, timestamp.sql: 1%
+14. **Integer overflow handling** — int2.sql: 0%
+15. **Array indexing and operations** — arrays.sql: 15%
 
-### Phase 2: Test Infrastructure (Would unlock ~15-20 additional passing statements)
+## Estimated Impact
 
-1. **Fix test setup data loading**
-   - Implement proper COPY FROM file support
-   - Ensure all fixture tables (onek, tenk1, etc.) load correctly
-   - This alone would fix cascading failures in multiple tests
+| Phase | Effort | Errors Fixed | New Score (est.) |
+|-------|--------|-------------|-----------------|
+| Phase 1 | 1-2 weeks | ~3,000 cascade | ~45-50% |
+| Phase 2 | 2-3 weeks | ~2,500 parser | ~65-70% |
+| Phase 3 | 1 week | ~200 functions | ~72% |
+| Phase 4 | 2 weeks | ~500 types | ~75-80% |
 
-2. **Improve column resolution**
-   - Fix ambiguous column reference handling
-   - Better table alias resolution
+## Notes
 
-### Phase 3: Advanced Features (Would unlock ~10-15 additional passing statements)
-
-1. **Geometric types**
-   - Add `point`, `line`, `polygon` basic support
-   - Required for spatial tests
-
-2. **Advanced CREATE statement variants**
-   - INHERITS clause in CREATE TABLE
-   - Custom operators and operator classes
-
-3. **Enhanced expression parsing**
-   - Complex nested subqueries
-   - Advanced CASE expressions
-
-## Test Infrastructure Issues
-
-### Current Problems
-
-1. **Data Loading:** Test setup fails to load fixture data files properly
-   - `COPY FROM 'filename'` requires full file system integration
-   - Current implementation expects STDIN only
-
-2. **Session State:** Some tests expect persistent objects across statements
-   - Temporary tables need session persistence
-   - Custom functions need to be defined and callable
-
-3. **Error Handling:** Some tests expect specific error behaviors
-   - Division by zero handling
-   - Type coercion error messages
-
-### Recommendations
-
-1. **Implement file-based COPY FROM**
-   - Allow COPY from file paths for test data loading
-   - Essential for running standard PostgreSQL regression tests
-
-2. **Improve session management**
-   - Persistent temporary objects within session
-   - Better cross-statement state management
-
-## Methodology Notes
-
-This assessment was generated by:
-1. Running pg_server against PostgreSQL 18 master regression tests
-2. Analyzing psql error output to categorize failures
-3. Estimating pass rates based on error counts vs. total statements
-
-**Limitations:**
-- Statement counting is approximate (based on semicolon detection)
-- Some errors may cascade (one parser failure causing multiple error reports)
-- Missing test fixtures artificially inflate error counts
-- Actual compatibility may be higher due to comment/setup statements
-
-## Conclusion
-
-Postrust shows strong compatibility with PostgreSQL 18, achieving an estimated **98.7% compatibility** on core regression tests. The main gaps are:
-
-1. **Parser syntax** - Specific SQL syntax variants not yet implemented
-2. **Test infrastructure** - Standard test fixture loading issues
-3. **Advanced types** - Some PostgreSQL-specific types missing
-
-The high compatibility score demonstrates that postrust successfully implements the core PostgreSQL SQL functionality. The remaining 1.3% of failures are primarily edge cases and advanced features that don't affect typical application usage.
-
-**Next Steps:** Focus on Phase 1 parser fixes would provide the highest return on investment, potentially bringing compatibility above 99%.
+- The 23% raw score understates actual capability because of cascading failures — one missing `CREATE TEMP TABLE` can cause 50+ subsequent errors in a single file
+- The WASM engine likely scores higher because the internal API bypasses wire protocol parsing
+- Many features work individually but fail in the regression tests due to missing prerequisite objects
+- The test fixture tables (onek, tenk1) don't load because `COPY FROM` file paths don't resolve — fixing this alone would unlock many select/join/aggregate tests
