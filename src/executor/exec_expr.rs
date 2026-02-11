@@ -1112,16 +1112,15 @@ async fn window_frame_rows(
             )
             .await?;
             let mut out = Vec::new();
-            for idx in start..=end {
-                let row_idx = partition[idx];
+            for (idx, &row_idx) in partition.iter().enumerate().take(end + 1).skip(start) {
                 // Skip current row if exclusion applies
-                if idx == current_pos {
-                    if matches!(
+                if idx == current_pos
+                    && matches!(
                         frame.exclusion,
                         Some(WindowFrameExclusion::CurrentRow) | Some(WindowFrameExclusion::Group)
-                    ) {
-                        continue;
-                    }
+                    )
+                {
+                    continue;
                 }
                 out.push(row_idx);
             }
@@ -1332,6 +1331,12 @@ pub(crate) fn eval_cast_scalar(
         "timestamp" => {
             let dt = parse_datetime_scalar(&value)?;
             Ok(ScalarValue::Text(format_timestamp(dt)))
+        }
+        "json" | "jsonb" => {
+            // For JSON/JSONB casts, validate that the input is valid JSON
+            let text = value.render();
+            parse_json_document_arg(&ScalarValue::Text(text.clone()), type_name, 1)?;
+            Ok(ScalarValue::Text(text))
         }
         other => Err(EngineError {
             message: format!("unsupported cast type {}", other),

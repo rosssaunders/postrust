@@ -300,12 +300,13 @@ impl Parser {
             return Err(self.error_at_current("expected VIEW after CREATE MATERIALIZED"));
         }
         
-        // Parse optional TEMP/TEMPORARY before TABLE
+        // Parse optional TEMP/TEMPORARY or UNLOGGED before TABLE
         let temporary = self.consume_keyword(Keyword::Temporary) || self.consume_keyword(Keyword::Temp);
+        let unlogged = self.consume_ident("unlogged");
         
         if self.consume_ident("role") {
-            if temporary {
-                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE ROLE"));
+            if temporary || unlogged {
+                return Err(self.error_at_current("unexpected modifier before CREATE ROLE"));
             }
             let name =
                 self.parse_role_identifier_with_message("CREATE ROLE requires a role name")?;
@@ -313,8 +314,8 @@ impl Parser {
             return Ok(Statement::CreateRole(CreateRoleStatement { name, options }));
         }
         if self.consume_keyword(Keyword::Schema) {
-            if temporary {
-                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE SCHEMA"));
+            if temporary || unlogged {
+                return Err(self.error_at_current("unexpected modifier before CREATE SCHEMA"));
             }
             let if_not_exists = if self.consume_keyword(Keyword::If) {
                 self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE SCHEMA")?;
@@ -333,8 +334,8 @@ impl Parser {
             }));
         }
         if self.consume_keyword(Keyword::Sequence) {
-            if temporary {
-                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE SEQUENCE"));
+            if temporary || unlogged {
+                return Err(self.error_at_current("unexpected modifier before CREATE SEQUENCE"));
             }
             let name = self.parse_qualified_name()?;
             let (start, increment, min_value, max_value, cycle, cache) =
@@ -350,8 +351,8 @@ impl Parser {
             }));
         }
         if self.consume_keyword(Keyword::Type) {
-            if temporary {
-                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE TYPE"));
+            if temporary || unlogged {
+                return Err(self.error_at_current("unexpected modifier before CREATE TYPE"));
             }
             let name = self.parse_qualified_name()?;
             self.expect_keyword(Keyword::As, "expected AS after CREATE TYPE name")?;
@@ -395,8 +396,8 @@ impl Parser {
             }));
         }
         if self.consume_keyword(Keyword::Domain) {
-            if temporary {
-                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE DOMAIN"));
+            if temporary || unlogged {
+                return Err(self.error_at_current("unexpected modifier before CREATE DOMAIN"));
             }
             let name = self.parse_qualified_name()?;
             self.expect_keyword(Keyword::As, "expected AS after CREATE DOMAIN name")?;
@@ -469,6 +470,7 @@ impl Parser {
             constraints,
             if_not_exists,
             temporary,
+            unlogged,
         }))
     }
 
@@ -2979,7 +2981,40 @@ impl Parser {
                     .map(|part| part.to_ascii_lowercase())
                     .unwrap_or_default();
                 let args_start = self.idx;
-                if fn_name == "position" {
+                if fn_name == "extract" {
+                    // EXTRACT(field FROM source) or extract('field', source)
+                    let field = self.parse_expr_bp(6)?;
+                    if self.peek_keyword(Keyword::From) {
+                        self.expect_keyword(Keyword::From, "expected FROM in EXTRACT")?;
+                        let source = self.parse_expr_bp(6)?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after EXTRACT arguments",
+                        )?;
+                        args = vec![field, source];
+                    } else {
+                        // Comma-separated form: extract('year', ts)
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::Comma),
+                            "expected ',' or FROM in EXTRACT",
+                        )?;
+                        let source = self.parse_expr_bp(6)?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after EXTRACT arguments",
+                        )?;
+                        args = vec![field, source];
+                    }
+                    return Ok(Expr::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                        order_by,
+                        within_group: Vec::new(),
+                        filter: None,
+                        over: None,
+                    });
+                } else if fn_name == "position" {
                     let left = self.parse_expr_bp(6)?;
                     if self.consume_keyword(Keyword::In) {
                         let right = self.parse_expr_bp(6)?;
@@ -2988,6 +3023,89 @@ impl Parser {
                             "expected ')' after position arguments",
                         )?;
                         args = vec![left, right];
+                        return Ok(Expr::FunctionCall {
+                            name,
+                            args,
+                            distinct,
+                            order_by,
+                            within_group: Vec::new(),
+                            filter: None,
+                            over: None,
+                        });
+                    }
+                    self.idx = args_start;
+                } else if fn_name == "substring" {
+                    // SUBSTRING(string FROM start [FOR length])
+                    let string = self.parse_expr_bp(6)?;
+                    if self.consume_keyword(Keyword::From) {
+                        let start = self.parse_expr_bp(6)?;
+                        let length = if self.consume_keyword(Keyword::For) {
+                            Some(self.parse_expr_bp(6)?)
+                        } else {
+                            None
+                        };
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after SUBSTRING arguments",
+                        )?;
+                        args = vec![string, start];
+                        if let Some(length) = length {
+                            args.push(length);
+                        }
+                        return Ok(Expr::FunctionCall {
+                            name,
+                            args,
+                            distinct,
+                            order_by,
+                            within_group: Vec::new(),
+                            filter: None,
+                            over: None,
+                        });
+                    }
+                    self.idx = args_start;
+                } else if fn_name == "trim" {
+                    // TRIM([LEADING | TRAILING | BOTH] [characters] FROM string)
+                    // Check for LEADING/TRAILING/BOTH
+                    let trim_mode = match self.current_kind() {
+                        TokenKind::Identifier(s) if s.eq_ignore_ascii_case("leading") => {
+                            self.advance();
+                            Some(Expr::Identifier(vec!["leading".to_string()]))
+                        }
+                        TokenKind::Identifier(s) if s.eq_ignore_ascii_case("trailing") => {
+                            self.advance();
+                            Some(Expr::Identifier(vec!["trailing".to_string()]))
+                        }
+                        TokenKind::Identifier(s) if s.eq_ignore_ascii_case("both") => {
+                            self.advance();
+                            Some(Expr::Identifier(vec!["both".to_string()]))
+                        }
+                        _ => None,
+                    };
+                    
+                    // Check if there's a characters expression before FROM
+                    let chars_expr = if !self.peek_keyword(Keyword::From) {
+                        Some(self.parse_expr_bp(6)?)
+                    } else {
+                        None
+                    };
+                    
+                    if self.consume_keyword(Keyword::From) {
+                        let string = self.parse_expr_bp(6)?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after TRIM arguments",
+                        )?;
+                        
+                        // Build args: [mode, chars, string] or subsets
+                        args = Vec::new();
+                        if let Some(mode) = trim_mode {
+                            args.push(mode);
+                        }
+                        if let Some(chars) = chars_expr {
+                            args.push(chars);
+                        }
+                        args.push(string);
+                        
                         return Ok(Expr::FunctionCall {
                             name,
                             args,
@@ -6006,7 +6124,20 @@ mod tests {
         let result = parse_statement("CREATE TEMP SCHEMA foo");
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(err.message.contains("unexpected TEMP"));
+        assert!(err.message.contains("unexpected"));
+    }
+
+    #[test]
+    fn parses_create_unlogged_table() {
+        let stmt = parse_statement("CREATE UNLOGGED TABLE logs (id INT, message TEXT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.unlogged);
+        assert!(!create.temporary);
+        assert_eq!(create.name, vec!["logs".to_string()]);
+        assert_eq!(create.columns.len(), 2);
     }
 
     #[test]
@@ -6457,5 +6588,56 @@ mod tests {
         assert_eq!(query.order_by.len(), 2);
         assert_eq!(query.order_by[0].using_operator, Some("<".to_string()));
         assert_eq!(query.order_by[1].using_operator, Some(">".to_string()));
+    }
+
+    #[test]
+    fn parses_extract_function() {
+        let stmt = parse_statement("SELECT EXTRACT(year FROM '2023-01-01'::timestamp)")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let QueryExpr::Select(select) = &query.body else {
+            panic!("expected select");
+        };
+        let Expr::FunctionCall { name, args, .. } = &select.targets[0].expr else {
+            panic!("expected function call");
+        };
+        assert_eq!(name, &vec!["extract".to_string()]);
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn parses_substring_function() {
+        let stmt = parse_statement("SELECT SUBSTRING('hello' FROM 2 FOR 3)")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let QueryExpr::Select(select) = &query.body else {
+            panic!("expected select");
+        };
+        let Expr::FunctionCall { name, args, .. } = &select.targets[0].expr else {
+            panic!("expected function call");
+        };
+        assert_eq!(name, &vec!["substring".to_string()]);
+        assert_eq!(args.len(), 3);
+    }
+
+    #[test]
+    fn parses_trim_function() {
+        let stmt = parse_statement("SELECT TRIM(BOTH 'x' FROM 'xxxhelloxxx')")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let QueryExpr::Select(select) = &query.body else {
+            panic!("expected select");
+        };
+        let Expr::FunctionCall { name, args, .. } = &select.targets[0].expr else {
+            panic!("expected function call");
+        };
+        assert_eq!(name, &vec!["trim".to_string()]);
+        assert_eq!(args.len(), 3); // mode, chars, string
     }
 }
