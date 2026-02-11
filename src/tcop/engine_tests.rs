@@ -4901,3 +4901,157 @@ fn rejects_invalid_json_cast() {
         assert!(err.message.contains("not valid JSON"));
     });
 }
+
+#[test]
+fn create_table_as_select_simple() {
+    let results = run_batch(&[
+        "CREATE TABLE t1 (id int, name text)",
+        "INSERT INTO t1 VALUES (1, 'Alice'), (2, 'Bob')",
+        "CREATE TABLE t2 AS SELECT * FROM t1",
+        "SELECT * FROM t2 ORDER BY id",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].rows_affected, 2);
+    assert!(results[2].command_tag.starts_with("SELECT"));  // "SELECT 2"
+    assert_eq!(results[3].rows.len(), 2);
+    assert_eq!(results[3].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[3].rows[0][1], ScalarValue::Text("Alice".to_string()));
+    assert_eq!(results[3].rows[1][0], ScalarValue::Int(2));
+    assert_eq!(results[3].rows[1][1], ScalarValue::Text("Bob".to_string()));
+}
+
+#[test]
+fn create_table_as_select_with_projection() {
+    let results = run_batch(&[
+        "CREATE TABLE tbl (x int, y int, z text)",
+        "INSERT INTO tbl VALUES (1, 2, 'a'), (3, 4, 'b')",
+        "CREATE TABLE dest AS SELECT x, z FROM tbl",
+        "SELECT * FROM dest ORDER BY x",
+    ]);
+    assert!(results[2].command_tag.starts_with("SELECT"));
+    assert_eq!(results[3].rows.len(), 2);
+    assert_eq!(results[3].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[3].rows[0][1], ScalarValue::Text("a".to_string()));
+}
+
+#[test]
+fn create_temp_table_as_select() {
+    let results = run_batch(&[
+        "CREATE TEMP TABLE t AS SELECT 1 AS x, 'hello' AS y",
+        "SELECT * FROM t",
+    ]);
+    assert!(results[0].command_tag.starts_with("SELECT"));
+    assert_eq!(results[1].rows.len(), 1);
+    assert_eq!(results[1].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[1].rows[0][1], ScalarValue::Text("hello".to_string()));
+}
+
+#[test]
+fn create_index_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE TABLE t (id int, name text)",
+        "CREATE INDEX IF NOT EXISTS idx_id ON t(id)",
+        "CREATE INDEX IF NOT EXISTS idx_id ON t(id)",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].command_tag, "CREATE INDEX");
+    assert_eq!(results[2].command_tag, "CREATE INDEX"); // Should succeed silently
+}
+
+#[test]
+fn create_view_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE TABLE t (x int)",
+        "INSERT INTO t VALUES (1), (2)",
+        "CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t",
+        "CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t",
+        "SELECT * FROM v ORDER BY x",
+    ]);
+    assert_eq!(results[2].command_tag, "CREATE VIEW");
+    assert_eq!(results[3].command_tag, "CREATE VIEW"); // Should succeed silently
+    assert_eq!(results[4].rows.len(), 2);
+}
+
+#[test]
+fn create_sequence_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE SEQUENCE IF NOT EXISTS seq",
+        "CREATE SEQUENCE IF NOT EXISTS seq",
+        "SELECT nextval('seq')",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE SEQUENCE");
+    assert_eq!(results[1].command_tag, "CREATE SEQUENCE"); // Should succeed silently
+    assert_eq!(results[2].rows[0][0], ScalarValue::Int(1));
+}
+
+#[test]
+fn create_unlogged_table() {
+    let results = run_batch(&[
+        "CREATE UNLOGGED TABLE unlog_test (id int, note text)",
+        "INSERT INTO unlog_test VALUES (1, 'abc')",
+        "SELECT * FROM unlog_test",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].rows_affected, 1);
+    assert_eq!(results[2].rows.len(), 1);
+    assert_eq!(results[2].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[2].rows[0][1], ScalarValue::Text("abc".to_string()));
+}
+
+#[test]
+fn drop_table_if_exists() {
+    let results = run_batch(&[
+        "DROP TABLE IF EXISTS nonexistent",
+        "CREATE TABLE t1 (id int)",
+        "DROP TABLE IF EXISTS t1",
+        "DROP TABLE IF EXISTS t1",  // Should succeed silently
+    ]);
+    assert_eq!(results[0].command_tag, "DROP TABLE");
+    assert_eq!(results[1].command_tag, "CREATE TABLE");
+    assert_eq!(results[2].command_tag, "DROP TABLE");
+    assert_eq!(results[3].command_tag, "DROP TABLE");
+}
+
+#[test]
+fn drop_view_if_exists() {
+    let results = run_batch(&[
+        "DROP VIEW IF EXISTS nonexistent",
+        "CREATE TABLE t (x int)",
+        "CREATE VIEW v AS SELECT * FROM t",
+        "DROP VIEW IF EXISTS v",
+        "DROP VIEW IF EXISTS v",  // Should succeed silently
+    ]);
+    assert_eq!(results[0].command_tag, "DROP VIEW");
+    assert_eq!(results[2].command_tag, "CREATE VIEW");
+    assert_eq!(results[3].command_tag, "DROP VIEW");
+    assert_eq!(results[4].command_tag, "DROP VIEW");
+}
+
+#[test]
+fn drop_index_if_exists() {
+    let results = run_batch(&[
+        "DROP INDEX IF EXISTS nonexistent",
+        "CREATE TABLE t (id int)",
+        "CREATE INDEX idx ON t(id)",
+        "DROP INDEX IF EXISTS idx",
+        "DROP INDEX IF EXISTS idx",  // Should succeed silently
+    ]);
+    assert_eq!(results[0].command_tag, "DROP INDEX");
+    assert_eq!(results[2].command_tag, "CREATE INDEX");
+    assert_eq!(results[3].command_tag, "DROP INDEX");
+    assert_eq!(results[4].command_tag, "DROP INDEX");
+}
+
+#[test]
+fn drop_sequence_if_exists() {
+    let results = run_batch(&[
+        "DROP SEQUENCE IF EXISTS nonexistent",
+        "CREATE SEQUENCE seq",
+        "DROP SEQUENCE IF EXISTS seq",
+        "DROP SEQUENCE IF EXISTS seq",  // Should succeed silently
+    ]);
+    assert_eq!(results[0].command_tag, "DROP SEQUENCE");
+    assert_eq!(results[1].command_tag, "CREATE SEQUENCE");
+    assert_eq!(results[2].command_tag, "DROP SEQUENCE");
+    assert_eq!(results[3].command_tag, "DROP SEQUENCE");
+}

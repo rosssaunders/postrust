@@ -106,6 +106,14 @@ pub async fn execute_create_sequence(
         true
     });
     if !inserted {
+        if create.if_not_exists {
+            return Ok(QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                command_tag: "CREATE SEQUENCE".to_string(),
+                rows_affected: 0,
+            });
+        }
         return Err(EngineError {
             message: format!("sequence \"{}\" already exists", create.name.join(".")),
         });

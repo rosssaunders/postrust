@@ -241,6 +241,13 @@ impl Parser {
             if materialized {
                 return Err(self.error_at_current("unexpected MATERIALIZED before CREATE INDEX"));
             }
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE INDEX")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE INDEX")?;
+                true
+            } else {
+                false
+            };
             let name = self.parse_identifier()?;
             self.expect_keyword(Keyword::On, "expected ON after CREATE INDEX name")?;
             let table_name = self.parse_qualified_name()?;
@@ -261,12 +268,20 @@ impl Parser {
                 table_name,
                 columns,
                 unique,
+                if_not_exists,
             }));
         }
         if unique {
             return Err(self.error_at_current("expected INDEX after CREATE UNIQUE"));
         }
         if self.consume_keyword(Keyword::View) {
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE VIEW")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE VIEW")?;
+                true
+            } else {
+                false
+            };
             let name = self.parse_qualified_name()?;
             self.expect_keyword(Keyword::As, "expected AS in CREATE VIEW statement")?;
             let query = self.parse_query()?;
@@ -291,6 +306,7 @@ impl Parser {
                 materialized,
                 with_data,
                 query,
+                if_not_exists,
             }));
         }
         if or_replace {
@@ -337,6 +353,13 @@ impl Parser {
             if temporary || unlogged {
                 return Err(self.error_at_current("unexpected modifier before CREATE SEQUENCE"));
             }
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE SEQUENCE")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE SEQUENCE")?;
+                true
+            } else {
+                false
+            };
             let name = self.parse_qualified_name()?;
             let (start, increment, min_value, max_value, cycle, cache) =
                 self.parse_create_sequence_options()?;
@@ -348,6 +371,7 @@ impl Parser {
                 max_value,
                 cycle,
                 cache,
+                if_not_exists,
             }));
         }
         if self.consume_keyword(Keyword::Type) {
@@ -437,9 +461,24 @@ impl Parser {
         };
         
         let name = self.parse_qualified_name()?;
+        
+        // Check for CREATE TABLE AS SELECT (CTAS)
+        if self.consume_keyword(Keyword::As) {
+            let query = self.parse_query()?;
+            return Ok(Statement::CreateTable(CreateTableStatement {
+                name,
+                columns: Vec::new(),
+                constraints: Vec::new(),
+                if_not_exists,
+                temporary,
+                unlogged,
+                as_select: Some(Box::new(query)),
+            }));
+        }
+        
         self.expect_token(
             |k| matches!(k, TokenKind::LParen),
-            "expected '(' after CREATE TABLE name",
+            "expected '(' or AS after CREATE TABLE name",
         )?;
 
         let mut columns = Vec::new();
@@ -471,6 +510,7 @@ impl Parser {
             if_not_exists,
             temporary,
             unlogged,
+            as_select: None,
         }))
     }
 
@@ -720,34 +760,32 @@ impl Parser {
                             "expected UPDATE, DELETE, or DO NOTHING for WHEN NOT MATCHED BY SOURCE",
                         ));
                     }
-                } else {
-                    if self.consume_keyword(Keyword::Insert) {
-                        let columns = if matches!(self.current_kind(), TokenKind::LParen) {
-                            self.parse_identifier_list_in_parens()?
-                        } else {
-                            Vec::new()
-                        };
-                        self.expect_keyword(
-                            Keyword::Values,
-                            "expected VALUES in MERGE INSERT clause",
-                        )?;
-                        let values = self.parse_insert_values_row()?;
-                        when_clauses.push(MergeWhenClause::NotMatchedInsert {
-                            condition,
-                            columns,
-                            values,
-                        });
-                    } else if self.consume_keyword(Keyword::Do) {
-                        self.expect_keyword(
-                            Keyword::Nothing,
-                            "expected NOTHING after DO in MERGE clause",
-                        )?;
-                        when_clauses.push(MergeWhenClause::NotMatchedDoNothing { condition });
+                } else if self.consume_keyword(Keyword::Insert) {
+                    let columns = if matches!(self.current_kind(), TokenKind::LParen) {
+                        self.parse_identifier_list_in_parens()?
                     } else {
-                        return Err(self.error_at_current(
-                            "expected INSERT or DO NOTHING for WHEN NOT MATCHED",
-                        ));
-                    }
+                        Vec::new()
+                    };
+                    self.expect_keyword(
+                        Keyword::Values,
+                        "expected VALUES in MERGE INSERT clause",
+                    )?;
+                    let values = self.parse_insert_values_row()?;
+                    when_clauses.push(MergeWhenClause::NotMatchedInsert {
+                        condition,
+                        columns,
+                        values,
+                    });
+                } else if self.consume_keyword(Keyword::Do) {
+                    self.expect_keyword(
+                        Keyword::Nothing,
+                        "expected NOTHING after DO in MERGE clause",
+                    )?;
+                    when_clauses.push(MergeWhenClause::NotMatchedDoNothing { condition });
+                } else {
+                    return Err(self.error_at_current(
+                        "expected INSERT or DO NOTHING for WHEN NOT MATCHED",
+                    ));
                 }
                 continue;
             }
