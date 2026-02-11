@@ -223,6 +223,8 @@ fn test_analyze_cte_reference() {
                 recursive: false,
                 ctes: vec![CommonTableExpr {
                     name: "my_cte".to_string(),
+                    column_names: vec![],
+                    materialized: None,
                     query: Query {
                         with: None,
                         body: QueryExpr::Select(SelectStatement {

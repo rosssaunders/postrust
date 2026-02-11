@@ -587,6 +587,8 @@ pub struct WithClause {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommonTableExpr {
     pub name: String,
+    pub column_names: Vec<String>, // Optional column list: WITH cte(a, b) AS (...)
+    pub materialized: Option<bool>, // None = default, Some(true) = MATERIALIZED, Some(false) = NOT MATERIALIZED
     pub query: Query,
 }
 

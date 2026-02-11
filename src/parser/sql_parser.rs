@@ -2011,7 +2011,34 @@ impl Parser {
             let mut ctes = Vec::new();
             loop {
                 let name = self.parse_identifier()?;
+                
+                // Optional column list: WITH cte(a, b) AS (...)
+                let column_names = if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
+                    let mut cols = vec![self.parse_identifier()?];
+                    while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                        cols.push(self.parse_identifier()?);
+                    }
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after CTE column list",
+                    )?;
+                    cols
+                } else {
+                    Vec::new()
+                };
+                
                 self.expect_keyword(Keyword::As, "expected AS in common table expression")?;
+                
+                // Optional MATERIALIZED / NOT MATERIALIZED hint
+                let materialized = if self.consume_keyword(Keyword::Materialized) {
+                    Some(true)
+                } else if self.consume_keyword(Keyword::Not) {
+                    self.expect_keyword(Keyword::Materialized, "expected MATERIALIZED after NOT")?;
+                    Some(false)
+                } else {
+                    None
+                };
+                
                 self.expect_token(
                     |k| matches!(k, TokenKind::LParen),
                     "expected '(' to open common table expression",
@@ -2021,7 +2048,12 @@ impl Parser {
                     |k| matches!(k, TokenKind::RParen),
                     "expected ')' to close common table expression",
                 )?;
-                ctes.push(CommonTableExpr { name, query });
+                ctes.push(CommonTableExpr {
+                    name,
+                    column_names,
+                    materialized,
+                    query,
+                });
                 if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                     break;
                 }
@@ -4123,6 +4155,63 @@ mod tests {
         let with = query.with.as_ref().expect("with clause should exist");
         assert!(with.recursive);
         assert_eq!(with.ctes.len(), 1);
+    }
+
+    #[test]
+    fn parses_with_cte_column_list() {
+        let stmt = parse_statement("WITH t(a, b) AS (SELECT 1, 2) SELECT a, b FROM t")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].column_names, vec!["a", "b"]);
+        assert_eq!(with.ctes[0].materialized, None);
+    }
+
+    #[test]
+    fn parses_with_cte_materialized() {
+        let stmt = parse_statement("WITH t AS MATERIALIZED (SELECT 1 AS id) SELECT id FROM t")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].materialized, Some(true));
+    }
+
+    #[test]
+    fn parses_with_cte_not_materialized() {
+        let stmt =
+            parse_statement("WITH t AS NOT MATERIALIZED (SELECT 1 AS id) SELECT id FROM t")
+                .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].materialized, Some(false));
+    }
+
+    #[test]
+    fn parses_with_cte_column_list_and_materialized() {
+        let stmt = parse_statement(
+            "WITH t(x, y) AS MATERIALIZED (SELECT 1, 2) SELECT x, y FROM t",
+        )
+        .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].column_names, vec!["x", "y"]);
+        assert_eq!(with.ctes[0].materialized, Some(true));
     }
 
     #[test]
