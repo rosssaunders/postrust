@@ -20,7 +20,7 @@ use crate::parser::ast::{
     Statement, SubqueryRef, SubscriptionOptions, TableConstraint, TableExpression,
     TableFunctionRef, TablePrivilegeKind, TableRef, TransactionStatement, TruncateStatement,
     TypeName, UnaryOp, UnlistenStatement, UpdateStatement, WindowFrame, WindowFrameBound,
-    WindowFrameUnits, WindowSpec, WithClause,
+    WindowFrameExclusion, WindowFrameUnits, WindowSpec, WithClause,
 };
 use crate::parser::lexer::{Keyword, LexError, Token, TokenKind, lex_sql};
 
@@ -2011,7 +2011,34 @@ impl Parser {
             let mut ctes = Vec::new();
             loop {
                 let name = self.parse_identifier()?;
+                
+                // Optional column list: WITH cte(a, b) AS (...)
+                let column_names = if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
+                    let mut cols = vec![self.parse_identifier()?];
+                    while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                        cols.push(self.parse_identifier()?);
+                    }
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after CTE column list",
+                    )?;
+                    cols
+                } else {
+                    Vec::new()
+                };
+                
                 self.expect_keyword(Keyword::As, "expected AS in common table expression")?;
+                
+                // Optional MATERIALIZED / NOT MATERIALIZED hint
+                let materialized = if self.consume_keyword(Keyword::Materialized) {
+                    Some(true)
+                } else if self.consume_keyword(Keyword::Not) {
+                    self.expect_keyword(Keyword::Materialized, "expected MATERIALIZED after NOT")?;
+                    Some(false)
+                } else {
+                    None
+                };
+                
                 self.expect_token(
                     |k| matches!(k, TokenKind::LParen),
                     "expected '(' to open common table expression",
@@ -2021,7 +2048,12 @@ impl Parser {
                     |k| matches!(k, TokenKind::RParen),
                     "expected ')' to close common table expression",
                 )?;
-                ctes.push(CommonTableExpr { name, query });
+                ctes.push(CommonTableExpr {
+                    name,
+                    column_names,
+                    materialized,
+                    query,
+                });
                 if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                     break;
                 }
@@ -2455,14 +2487,56 @@ impl Parser {
         let mut out = Vec::new();
         loop {
             let expr = self.parse_expr()?;
-            let ascending = if self.consume_keyword(Keyword::Asc) {
-                Some(true)
+            
+            // Check for USING operator before ASC/DESC
+            let (using_operator, ascending) = if self.consume_keyword(Keyword::Using) {
+                // Parse the operator after USING
+                let operator = match self.current_kind() {
+                    TokenKind::Less => {
+                        self.advance();
+                        "<".to_string()
+                    }
+                    TokenKind::Greater => {
+                        self.advance();
+                        ">".to_string()
+                    }
+                    TokenKind::LessEquals => {
+                        self.advance();
+                        "<=".to_string()
+                    }
+                    TokenKind::GreaterEquals => {
+                        self.advance();
+                        ">=".to_string()
+                    }
+                    TokenKind::Operator(op) => {
+                        let op_str = op.clone();
+                        self.advance();
+                        op_str
+                    }
+                    _ => {
+                        return Err(self.error_at_current("expected operator after USING"));
+                    }
+                };
+                // Map common operators to ascending/descending
+                let asc = match operator.as_str() {
+                    "<" | "<=" => Some(true),   // USING < means ascending
+                    ">" | ">=" => Some(false),  // USING > means descending
+                    _ => None,                   // Other operators don't have clear mapping
+                };
+                (Some(operator), asc)
+            } else if self.consume_keyword(Keyword::Asc) {
+                (None, Some(true))
             } else if self.consume_keyword(Keyword::Desc) {
-                Some(false)
+                (None, Some(false))
             } else {
-                None
+                (None, None)
             };
-            out.push(OrderByExpr { expr, ascending });
+            
+            out.push(OrderByExpr {
+                expr,
+                ascending,
+                using_operator,
+            });
 
             if !self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                 break;
@@ -2888,6 +2962,10 @@ impl Parser {
     fn parse_identifier_expr(&mut self) -> Result<Expr, ParseError> {
         let mut name = vec![self.parse_expr_identifier()?];
         while self.consume_if(|k| matches!(k, TokenKind::Dot)) {
+            // Check if this is a qualified wildcard (e.g., table.*)
+            if self.consume_if(|k| matches!(k, TokenKind::Star)) {
+                return Ok(Expr::QualifiedWildcard(name));
+            }
             name.push(self.parse_expr_identifier()?);
         }
 
@@ -3039,7 +3117,10 @@ impl Parser {
             order_by = self.parse_order_by_list()?;
         }
 
-        if self.peek_keyword(Keyword::Rows) || self.peek_keyword(Keyword::Range) {
+        if self.peek_keyword(Keyword::Rows)
+            || self.peek_keyword(Keyword::Range)
+            || self.peek_keyword(Keyword::Groups)
+        {
             frame = Some(self.parse_window_frame()?);
         }
 
@@ -3058,12 +3139,14 @@ impl Parser {
     fn parse_window_frame(&mut self) -> Result<WindowFrame, ParseError> {
         let units = if self.consume_keyword(Keyword::Rows) {
             WindowFrameUnits::Rows
-        } else {
-            self.expect_keyword(
-                Keyword::Range,
-                "expected ROWS or RANGE in window frame clause",
-            )?;
+        } else if self.consume_keyword(Keyword::Range) {
             WindowFrameUnits::Range
+        } else if self.consume_keyword(Keyword::Groups) {
+            WindowFrameUnits::Groups
+        } else {
+            return Err(self.error_at_current(
+                "expected ROWS, RANGE, or GROUPS in window frame clause",
+            ));
         };
 
         self.expect_keyword(Keyword::Between, "expected BETWEEN in window frame clause")?;
@@ -3071,7 +3154,38 @@ impl Parser {
         self.expect_keyword(Keyword::And, "expected AND in window frame clause")?;
         let end = self.parse_window_frame_bound()?;
 
-        Ok(WindowFrame { units, start, end })
+        // Optional EXCLUDE clause
+        let exclusion = if self.consume_keyword(Keyword::Exclude) {
+            if self.consume_keyword(Keyword::Current) {
+                self.expect_window_row_keyword("expected ROW after EXCLUDE CURRENT")?;
+                Some(WindowFrameExclusion::CurrentRow)
+            } else if self.consume_keyword(Keyword::Group) {
+                Some(WindowFrameExclusion::Group)
+            } else if matches!(self.current_kind(), TokenKind::Identifier(id) if id.eq_ignore_ascii_case("ties"))
+            {
+                self.advance();
+                Some(WindowFrameExclusion::Ties)
+            } else if self.consume_keyword(Keyword::No) {
+                if matches!(self.current_kind(), TokenKind::Identifier(id) if id.eq_ignore_ascii_case("others"))
+                {
+                    self.advance();
+                }
+                Some(WindowFrameExclusion::NoOthers)
+            } else {
+                return Err(self.error_at_current(
+                    "expected CURRENT ROW, GROUP, TIES, or NO OTHERS after EXCLUDE",
+                ));
+            }
+        } else {
+            None
+        };
+
+        Ok(WindowFrame {
+            units,
+            start,
+            end,
+            exclusion,
+        })
     }
 
     fn parse_window_frame_bound(&mut self) -> Result<WindowFrameBound, ParseError> {
@@ -3156,8 +3270,14 @@ impl Parser {
         let base = self.parse_expr_type_word()?.to_ascii_lowercase();
         let normalized = match base.as_str() {
             "bool" | "boolean" => "boolean".to_string(),
-            "int" | "integer" | "int8" | "bigint" | "int4" | "smallint" => "int8".to_string(),
-            "float" | "float8" | "real" | "numeric" | "decimal" => "float8".to_string(),
+            // Integer types - normalize to appropriate internal type
+            "int2" | "smallint" => "int8".to_string(),
+            "int" | "integer" | "int4" => "int8".to_string(),
+            "int8" | "bigint" => "int8".to_string(),
+            // Float types - normalize to float8
+            "float4" | "real" => "float8".to_string(),
+            "float" | "float8" => "float8".to_string(),
+            "numeric" | "decimal" => "float8".to_string(),
             "double" => {
                 if matches!(self.current_kind(), TokenKind::Identifier(next) if next.eq_ignore_ascii_case("precision"))
                 {
@@ -3165,6 +3285,7 @@ impl Parser {
                 }
                 "float8".to_string()
             }
+            // String types
             "text" | "varchar" | "char" => "text".to_string(),
             "character" => {
                 if matches!(self.current_kind(), TokenKind::Identifier(next) if next.eq_ignore_ascii_case("varying"))
@@ -3173,7 +3294,10 @@ impl Parser {
                 }
                 "text".to_string()
             }
+            // Date/time types
             "date" => "date".to_string(),
+            "time" => "time".to_string(),
+            "interval" => "interval".to_string(),
             "timestamp" | "timestamptz" => {
                 if self.consume_keyword(Keyword::With) {
                     if matches!(self.current_kind(), TokenKind::Identifier(next) if next.eq_ignore_ascii_case("time"))
@@ -3198,6 +3322,15 @@ impl Parser {
                 }
                 "timestamp".to_string()
             }
+            // Binary and special types
+            "bytea" => "bytea".to_string(),
+            "uuid" => "uuid".to_string(),
+            // JSON types
+            "json" => "json".to_string(),
+            "jsonb" => "jsonb".to_string(),
+            // System types
+            "regclass" => "regclass".to_string(),
+            "oid" => "oid".to_string(),
             other => {
                 return Err(
                     self.error_at_current(&format!("unsupported cast type name \"{other}\""))
@@ -3225,7 +3358,17 @@ impl Parser {
             }
         }
 
-        Ok(normalized)
+        // Handle array types like int[], text[]
+        let mut final_type = normalized;
+        while self.consume_if(|k| matches!(k, TokenKind::LBracket)) {
+            self.expect_token(
+                |k| matches!(k, TokenKind::RBracket),
+                "expected ']' after '[' in array type",
+            )?;
+            final_type = format!("{}[]", final_type);
+        }
+
+        Ok(final_type)
     }
 
     fn parse_expr_type_word(&mut self) -> Result<String, ParseError> {
@@ -4054,6 +4197,63 @@ mod tests {
         let with = query.with.as_ref().expect("with clause should exist");
         assert!(with.recursive);
         assert_eq!(with.ctes.len(), 1);
+    }
+
+    #[test]
+    fn parses_with_cte_column_list() {
+        let stmt = parse_statement("WITH t(a, b) AS (SELECT 1, 2) SELECT a, b FROM t")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].column_names, vec!["a", "b"]);
+        assert_eq!(with.ctes[0].materialized, None);
+    }
+
+    #[test]
+    fn parses_with_cte_materialized() {
+        let stmt = parse_statement("WITH t AS MATERIALIZED (SELECT 1 AS id) SELECT id FROM t")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].materialized, Some(true));
+    }
+
+    #[test]
+    fn parses_with_cte_not_materialized() {
+        let stmt =
+            parse_statement("WITH t AS NOT MATERIALIZED (SELECT 1 AS id) SELECT id FROM t")
+                .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].materialized, Some(false));
+    }
+
+    #[test]
+    fn parses_with_cte_column_list_and_materialized() {
+        let stmt = parse_statement(
+            "WITH t(x, y) AS MATERIALIZED (SELECT 1, 2) SELECT x, y FROM t",
+        )
+        .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let with = query.with.as_ref().expect("with clause should exist");
+        assert_eq!(with.ctes.len(), 1);
+        assert_eq!(with.ctes[0].name, "t");
+        assert_eq!(with.ctes[0].column_names, vec!["x", "y"]);
+        assert_eq!(with.ctes[0].materialized, Some(true));
     }
 
     #[test]
@@ -5894,5 +6094,368 @@ mod tests {
             panic!("expected drop domain statement");
         };
         assert!(drop.if_exists);
+    }
+
+    #[test]
+    fn parses_cast_to_integer_types() {
+        // int2 / smallint
+        let stmt = parse_statement("SELECT 1::int2").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8"
+        ));
+
+        let stmt = parse_statement("SELECT 1::smallint").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8"
+        ));
+
+        // int4 / integer
+        let stmt = parse_statement("SELECT 1::int4").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8"
+        ));
+
+        let stmt = parse_statement("SELECT 1::integer").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8"
+        ));
+
+        // int8 / bigint
+        let stmt = parse_statement("SELECT 1::bigint").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8"
+        ));
+    }
+
+    #[test]
+    fn parses_cast_to_float_types() {
+        // float4 / real
+        let stmt = parse_statement("SELECT 1.5::float4").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "float8"
+        ));
+
+        let stmt = parse_statement("SELECT 1.5::real").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "float8"
+        ));
+
+        // numeric / decimal
+        let stmt = parse_statement("SELECT 1.5::numeric").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "float8"
+        ));
+
+        let stmt = parse_statement("SELECT 1.5::decimal").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "float8"
+        ));
+    }
+
+    #[test]
+    fn parses_cast_to_time_types() {
+        let stmt = parse_statement("SELECT '12:00:00'::time").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "time"
+        ));
+
+        let stmt = parse_statement("SELECT '1 day'::interval").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "interval"
+        ));
+    }
+
+    #[test]
+    fn parses_cast_to_binary_and_special_types() {
+        let stmt = parse_statement("SELECT 'abc'::bytea").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "bytea"
+        ));
+
+        let stmt = parse_statement("SELECT '550e8400-e29b-41d4-a716-446655440000'::uuid")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "uuid"
+        ));
+    }
+
+    #[test]
+    fn parses_cast_to_json_types() {
+        let stmt = parse_statement("SELECT '{}'::json").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "json"
+        ));
+
+        let stmt = parse_statement("SELECT '{}'::jsonb").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "jsonb"
+        ));
+    }
+
+    #[test]
+    fn parses_cast_to_system_types() {
+        let stmt = parse_statement("SELECT 'users'::regclass").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "regclass"
+        ));
+
+        let stmt = parse_statement("SELECT 123::oid").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "oid"
+        ));
+    }
+
+    #[test]
+    fn parses_cast_to_array_types() {
+        let stmt = parse_statement("SELECT ARRAY[1,2,3]::int[]").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8[]"
+        ));
+
+        let stmt = parse_statement("SELECT ARRAY['a','b']::text[]").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "text[]"
+        ));
+
+        // Multi-dimensional arrays
+        let stmt = parse_statement("SELECT '{}'::int[][]").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::Cast { type_name, .. } if type_name == "int8[][]"
+        ));
+    }
+
+    #[test]
+    fn parses_qualified_wildcard() {
+        let stmt = parse_statement("SELECT t.* FROM users t").expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.targets.len(), 1);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::QualifiedWildcard(parts) if parts == &vec!["t".to_string()]
+        ));
+    }
+
+    #[test]
+    fn parses_schema_qualified_wildcard() {
+        let stmt = parse_statement("SELECT public.users.* FROM public.users")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.targets.len(), 1);
+        assert!(matches!(
+            &select.targets[0].expr,
+            Expr::QualifiedWildcard(parts) if parts == &vec!["public".to_string(), "users".to_string()]
+        ));
+    }
+
+    #[test]
+    fn parses_multiple_wildcards() {
+        let stmt = parse_statement("SELECT t1.*, t2.*, * FROM t1, t2")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        assert_eq!(select.targets.len(), 3);
+        assert!(matches!(&select.targets[0].expr, Expr::QualifiedWildcard(_)));
+        assert!(matches!(&select.targets[1].expr, Expr::QualifiedWildcard(_)));
+        assert!(matches!(&select.targets[2].expr, Expr::Wildcard));
+    }
+
+    #[test]
+    fn parses_window_frame_with_groups() {
+        let stmt = parse_statement(
+            "SELECT id, sum(amount) OVER (ORDER BY date GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM sales"
+        ).expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        if let Expr::FunctionCall { over: Some(window), .. } = &select.targets[1].expr {
+            let frame = window.frame.as_ref().expect("should have frame");
+            assert!(matches!(frame.units, WindowFrameUnits::Groups));
+        } else {
+            panic!("expected window function");
+        }
+    }
+
+    #[test]
+    fn parses_window_frame_with_exclude() {
+        let stmt = parse_statement(
+            "SELECT id, sum(amount) OVER (ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM sales"
+        ).expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        if let Expr::FunctionCall { over: Some(window), .. } = &select.targets[1].expr {
+            let frame = window.frame.as_ref().expect("should have frame");
+            assert!(matches!(frame.units, WindowFrameUnits::Rows));
+            assert!(matches!(
+                frame.exclusion,
+                Some(WindowFrameExclusion::CurrentRow)
+            ));
+        } else {
+            panic!("expected window function");
+        }
+    }
+
+    #[test]
+    fn parses_window_frame_with_exclude_group() {
+        let stmt = parse_statement(
+            "SELECT id, rank() OVER (ORDER BY date RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE GROUP) FROM sales"
+        ).expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let select = as_select(&query);
+        if let Expr::FunctionCall { over: Some(window), .. } = &select.targets[1].expr {
+            let frame = window.frame.as_ref().expect("should have frame");
+            assert!(matches!(frame.units, WindowFrameUnits::Range));
+            assert!(matches!(frame.exclusion, Some(WindowFrameExclusion::Group)));
+        } else {
+            panic!("expected window function");
+        }
+    }
+
+    #[test]
+    fn parses_order_by_using_operator() {
+        let stmt = parse_statement("SELECT * FROM users ORDER BY id USING <")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        assert_eq!(query.order_by.len(), 1);
+        assert_eq!(query.order_by[0].using_operator, Some("<".to_string()));
+        assert_eq!(query.order_by[0].ascending, Some(true));
+    }
+
+    #[test]
+    fn parses_order_by_using_greater_operator() {
+        let stmt = parse_statement("SELECT * FROM users ORDER BY id USING >")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        assert_eq!(query.order_by.len(), 1);
+        assert_eq!(query.order_by[0].using_operator, Some(">".to_string()));
+        assert_eq!(query.order_by[0].ascending, Some(false));
+    }
+
+    #[test]
+    fn parses_order_by_using_with_multiple_columns() {
+        let stmt = parse_statement("SELECT * FROM users ORDER BY name USING <, age USING >")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        assert_eq!(query.order_by.len(), 2);
+        assert_eq!(query.order_by[0].using_operator, Some("<".to_string()));
+        assert_eq!(query.order_by[1].using_operator, Some(">".to_string()));
     }
 }

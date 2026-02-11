@@ -2,6 +2,7 @@ use super::*;
 use crate::catalog::{reset_global_catalog_for_tests, with_global_state_lock};
 use crate::executor::exec_expr::ws_simulate_message;
 use crate::parser::sql_parser::parse_statement;
+use crate::storage::tuple::ScalarValue;
 use serde_json::{Number as JsonNumber, Value as JsonValue};
 use std::collections::HashMap;
 use std::future::Future;
@@ -4847,4 +4848,35 @@ fn drops_domain_if_exists() {
         "DROP DOMAIN IF EXISTS nonexistent_domain",
     ]);
     assert_eq!(results[0].command_tag, "DROP DOMAIN");
+}
+
+#[test]
+fn selects_qualified_wildcard() {
+    let results = run_batch(&[
+        "CREATE TABLE users (id INT, name TEXT)",
+        "INSERT INTO users VALUES (1, 'Alice')",
+        "INSERT INTO users VALUES (2, 'Bob')",
+        "SELECT u.* FROM users u",
+    ]);
+    assert_eq!(results[3].rows.len(), 2);
+    assert_eq!(results[3].rows[0].len(), 2);
+    assert_eq!(results[3].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[3].rows[0][1], ScalarValue::Text("Alice".to_string()));
+}
+
+#[test]
+fn selects_multiple_qualified_wildcards() {
+    let results = run_batch(&[
+        "CREATE TABLE t1 (a INT, b TEXT)",
+        "CREATE TABLE t2 (c INT, d TEXT)",
+        "INSERT INTO t1 VALUES (1, 'foo')",
+        "INSERT INTO t2 VALUES (2, 'bar')",
+        "SELECT t1.*, t2.* FROM t1, t2",
+    ]);
+    assert_eq!(results[4].rows.len(), 1);
+    assert_eq!(results[4].rows[0].len(), 4);
+    assert_eq!(results[4].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[4].rows[0][1], ScalarValue::Text("foo".to_string()));
+    assert_eq!(results[4].rows[0][2], ScalarValue::Int(2));
+    assert_eq!(results[4].rows[0][3], ScalarValue::Text("bar".to_string()));
 }

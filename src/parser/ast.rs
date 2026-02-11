@@ -587,6 +587,8 @@ pub struct WithClause {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommonTableExpr {
     pub name: String,
+    pub column_names: Vec<String>, // Optional column list: WITH cte(a, b) AS (...)
+    pub materialized: Option<bool>, // None = default, Some(true) = MATERIALIZED, Some(false) = NOT MATERIALIZED
     pub query: Query,
 }
 
@@ -707,6 +709,7 @@ pub enum JoinCondition {
 pub struct OrderByExpr {
     pub expr: Expr,
     pub ascending: Option<bool>,
+    pub using_operator: Option<String>, // PostgreSQL USING operator (e.g., "<", ">")
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -716,17 +719,11 @@ pub struct WindowSpec {
     pub frame: Option<WindowFrame>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct WindowFrame {
-    pub units: WindowFrameUnits,
-    pub start: WindowFrameBound,
-    pub end: WindowFrameBound,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowFrameUnits {
     Rows,
     Range,
+    Groups,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -736,6 +733,22 @@ pub enum WindowFrameBound {
     CurrentRow,
     OffsetFollowing(Expr),
     UnboundedFollowing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowFrameExclusion {
+    CurrentRow,
+    Group,
+    Ties,
+    NoOthers,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowFrame {
+    pub units: WindowFrameUnits,
+    pub start: WindowFrameBound,
+    pub end: WindowFrameBound,
+    pub exclusion: Option<WindowFrameExclusion>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -761,6 +774,7 @@ pub enum Expr {
         type_name: String,
     },
     Wildcard,
+    QualifiedWildcard(Vec<String>), // e.g., table.* or schema.table.*
     Unary {
         op: UnaryOp,
         expr: Box<Expr>,

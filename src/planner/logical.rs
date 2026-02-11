@@ -437,7 +437,8 @@ fn collect_window_exprs(expr: &Expr, out: &mut Vec<Expr>) {
         | Expr::Boolean(_)
         | Expr::Null
         | Expr::Parameter(_)
-        | Expr::Wildcard => {}
+        | Expr::Wildcard
+        | Expr::QualifiedWildcard(_) => {}
     }
 }
 
