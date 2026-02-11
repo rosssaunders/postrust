@@ -241,6 +241,13 @@ impl Parser {
             if materialized {
                 return Err(self.error_at_current("unexpected MATERIALIZED before CREATE INDEX"));
             }
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE INDEX")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE INDEX")?;
+                true
+            } else {
+                false
+            };
             let name = self.parse_identifier()?;
             self.expect_keyword(Keyword::On, "expected ON after CREATE INDEX name")?;
             let table_name = self.parse_qualified_name()?;
@@ -261,12 +268,20 @@ impl Parser {
                 table_name,
                 columns,
                 unique,
+                if_not_exists,
             }));
         }
         if unique {
             return Err(self.error_at_current("expected INDEX after CREATE UNIQUE"));
         }
         if self.consume_keyword(Keyword::View) {
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE VIEW")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE VIEW")?;
+                true
+            } else {
+                false
+            };
             let name = self.parse_qualified_name()?;
             self.expect_keyword(Keyword::As, "expected AS in CREATE VIEW statement")?;
             let query = self.parse_query()?;
@@ -291,6 +306,7 @@ impl Parser {
                 materialized,
                 with_data,
                 query,
+                if_not_exists,
             }));
         }
         if or_replace {
@@ -337,6 +353,13 @@ impl Parser {
             if temporary || unlogged {
                 return Err(self.error_at_current("unexpected modifier before CREATE SEQUENCE"));
             }
+            let if_not_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE SEQUENCE")?;
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE SEQUENCE")?;
+                true
+            } else {
+                false
+            };
             let name = self.parse_qualified_name()?;
             let (start, increment, min_value, max_value, cycle, cache) =
                 self.parse_create_sequence_options()?;
@@ -348,6 +371,7 @@ impl Parser {
                 max_value,
                 cycle,
                 cache,
+                if_not_exists,
             }));
         }
         if self.consume_keyword(Keyword::Type) {

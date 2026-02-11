@@ -445,6 +445,7 @@ pub struct CreateViewStatement {
     pub materialized: bool,
     pub with_data: bool,
     pub query: Query,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,6 +511,7 @@ pub struct CreateIndexStatement {
     pub table_name: Vec<String>,
     pub columns: Vec<String>,
     pub unique: bool,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -521,6 +523,7 @@ pub struct CreateSequenceStatement {
     pub max_value: Option<Option<i64>>,
     pub cycle: Option<bool>,
     pub cache: Option<i64>,
+    pub if_not_exists: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -4945,3 +4945,41 @@ fn create_temp_table_as_select() {
     assert_eq!(results[1].rows[0][0], ScalarValue::Int(1));
     assert_eq!(results[1].rows[0][1], ScalarValue::Text("hello".to_string()));
 }
+
+#[test]
+fn create_index_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE TABLE t (id int, name text)",
+        "CREATE INDEX IF NOT EXISTS idx_id ON t(id)",
+        "CREATE INDEX IF NOT EXISTS idx_id ON t(id)",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].command_tag, "CREATE INDEX");
+    assert_eq!(results[2].command_tag, "CREATE INDEX"); // Should succeed silently
+}
+
+#[test]
+fn create_view_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE TABLE t (x int)",
+        "INSERT INTO t VALUES (1), (2)",
+        "CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t",
+        "CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t",
+        "SELECT * FROM v ORDER BY x",
+    ]);
+    assert_eq!(results[2].command_tag, "CREATE VIEW");
+    assert_eq!(results[3].command_tag, "CREATE VIEW"); // Should succeed silently
+    assert_eq!(results[4].rows.len(), 2);
+}
+
+#[test]
+fn create_sequence_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE SEQUENCE IF NOT EXISTS seq",
+        "CREATE SEQUENCE IF NOT EXISTS seq",
+        "SELECT nextval('seq')",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE SEQUENCE");
+    assert_eq!(results[1].command_tag, "CREATE SEQUENCE"); // Should succeed silently
+    assert_eq!(results[2].rows[0][0], ScalarValue::Int(1));
+}

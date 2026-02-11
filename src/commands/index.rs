@@ -67,7 +67,7 @@ pub async fn execute_create_index(
         });
         validate_table_constraints(&preview, &rows).await?;
 
-        with_catalog_write(|catalog| {
+        let result = with_catalog_write(|catalog| {
             catalog.add_key_constraint(table.schema_name(), table.name(), key_spec)?;
             let index = IndexSpec {
                 name: index_name.clone(),
@@ -79,20 +79,46 @@ pub async fn execute_create_index(
                 return Err(err);
             }
             Ok(())
-        })
-        .map_err(|err| EngineError {
-            message: err.message,
-        })?;
+        });
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                if create.if_not_exists && err.message.contains("already exists") {
+                    return Ok(QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        command_tag: "CREATE INDEX".to_string(),
+                        rows_affected: 0,
+                    });
+                }
+                return Err(EngineError {
+                    message: err.message,
+                });
+            }
+        }
     } else {
         let index = IndexSpec {
             name: index_name,
             columns: index_columns,
             unique: false,
         };
-        with_catalog_write(|catalog| catalog.add_index(table.schema_name(), table.name(), index))
-            .map_err(|err| EngineError {
-            message: err.message,
-        })?;
+        let result = with_catalog_write(|catalog| catalog.add_index(table.schema_name(), table.name(), index));
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                if create.if_not_exists && err.message.contains("already exists") {
+                    return Ok(QueryResult {
+                        columns: Vec::new(),
+                        rows: Vec::new(),
+                        command_tag: "CREATE INDEX".to_string(),
+                        rows_affected: 0,
+                    });
+                }
+                return Err(EngineError {
+                    message: err.message,
+                });
+            }
+        }
     }
 
     Ok(QueryResult {
