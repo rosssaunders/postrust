@@ -168,7 +168,9 @@
       </div>
       <div class="examples">
         <span style="color: var(--muted); font-size: 0.8rem; align-self: center;">Examples:</span>
-        <button id="ex-deribit" class="active" type="button">Deribit HTTP</button>
+        <button id="ex-deribit" class="active" type="button">Currencies</button>
+        <button id="ex-orderbook" type="button">Order Book</button>
+        <button id="ex-volsurface" type="button">Vol Surface</button>
         <button id="ex-websocket" type="button">WebSocket</button>
         <button id="ex-window" type="button">Window Functions</button>
       </div>
@@ -587,6 +589,66 @@
           "FROM currencies",
           "ORDER BY currency;",
         ].join("\n"),
+        "ex-orderbook": [
+          "-- Live Order Book from Deribit",
+          "-- Fetches the BTC-PERPETUAL order book and displays bids/asks",
+          "CREATE EXTENSION IF NOT EXISTS http;",
+          "",
+          "WITH raw AS (",
+          "  SELECT http_get('https://test.deribit.com/api/v2/public/get_order_book?instrument_name=BTC-PERPETUAL&depth=10') AS body",
+          "), book AS (",
+          "  SELECT json_extract_path(body, 'result') AS r FROM raw",
+          "), bids AS (",
+          "  SELECT",
+          "    'BID' AS side,",
+          "    json_extract_path_text(item, '0') AS price,",
+          "    json_extract_path_text(item, '1') AS amount",
+          "  FROM book, json_array_elements(json_extract_path(r, 'bids')) AS src(item)",
+          "), asks AS (",
+          "  SELECT",
+          "    'ASK' AS side,",
+          "    json_extract_path_text(item, '0') AS price,",
+          "    json_extract_path_text(item, '1') AS amount",
+          "  FROM book, json_array_elements(json_extract_path(r, 'asks')) AS src(item)",
+          ")",
+          "SELECT * FROM bids",
+          "UNION ALL",
+          "SELECT * FROM asks;",
+        ].join("\n"),
+        "ex-volsurface": [
+          "-- BTC Options Volatility Surface",
+          "-- Fetches all BTC options and displays implied vol by strike & expiry",
+          "CREATE EXTENSION IF NOT EXISTS http;",
+          "",
+          "WITH raw AS (",
+          "  SELECT http_get('https://test.deribit.com/api/v2/public/get_book_summary_by_currency?currency=BTC&kind=option') AS body",
+          "), options AS (",
+          "  SELECT item FROM raw,",
+          "    json_array_elements(json_extract_path(body, 'result')) AS src(item)",
+          "), parsed AS (",
+          "  SELECT",
+          "    json_extract_path_text(item, 'instrument_name') AS instrument,",
+          "    json_extract_path_text(item, 'mark_iv') AS mark_iv,",
+          "    json_extract_path_text(item, 'mark_price') AS mark_price,",
+          "    json_extract_path_text(item, 'underlying_price') AS underlying,",
+          "    json_extract_path_text(item, 'open_interest') AS open_interest,",
+          "    json_extract_path_text(item, 'volume') AS volume,",
+          "    json_extract_path_text(item, 'bid_price') AS bid,",
+          "    json_extract_path_text(item, 'ask_price') AS ask",
+          "  FROM options",
+          ")",
+          "SELECT",
+          "  instrument,",
+          "  mark_iv AS implied_vol,",
+          "  mark_price,",
+          "  underlying,",
+          "  open_interest,",
+          "  volume",
+          "FROM parsed",
+          "WHERE CAST(mark_iv AS DOUBLE PRECISION) > 0",
+          "ORDER BY CAST(mark_iv AS DOUBLE PRECISION) DESC",
+          "LIMIT 50;",
+        ].join("\n"),
         "ex-websocket": [
           "-- WebSocket Extension Demo",
           "-- Connect to live market data streams from SQL!",
@@ -682,6 +744,8 @@
         importBtn.addEventListener("click", importSnapshot);
         resetBtn.addEventListener("click", resetState);
         document.getElementById("ex-deribit").addEventListener("click", function () { setExample("ex-deribit"); });
+        document.getElementById("ex-orderbook").addEventListener("click", function () { setExample("ex-orderbook"); });
+        document.getElementById("ex-volsurface").addEventListener("click", function () { setExample("ex-volsurface"); });
         document.getElementById("ex-websocket").addEventListener("click", function () { setExample("ex-websocket"); });
         document.getElementById("ex-window").addEventListener("click", function () { setExample("ex-window"); });
       });
