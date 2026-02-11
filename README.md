@@ -244,6 +244,20 @@ tests/                   # Regression + differential test suites (365 tests)
 implementation-plan/     # Staged PostgreSQL parity roadmap
 ```
 
+## Architecture: query engine, not database server
+
+Postrust is a **query engine**, not a general-purpose database. It doesn't implement MVCC, WAL, row-level locking, or durable storage — your data lives in APIs, files, and streams. Postrust just lets you query it.
+
+This is a deliberate design choice:
+
+- **No process-per-connection model.** PostgreSQL spawns a heavyweight OS process for each client connection and uses shared memory for IPC. Postrust uses an async runtime — a single thread can serve many concurrent queries, yielding on network I/O instead of blocking.
+- **No MVCC or locking.** There are no concurrent writers contending for the same rows. Tables are ephemeral scratch space for intermediate results, not the source of truth. This eliminates an entire class of complexity (tuple versioning, vacuum, snapshot isolation, deadlock detection).
+- **No WAL or durability.** If the process exits, the data is gone — and that's fine, because the data came from an API and can be re-fetched. The source of truth is the external system, not Postrust.
+
+This matters for the async story: in traditional PostgreSQL, an `http_get()` call (via `pgsql-http`) blocks the entire backend process. Postrust's async execution means a query waiting on a slow API doesn't block anything — other queries continue executing on the same thread. When your "tables" are API endpoints with 200ms latency, this is the difference between usable and unusable.
+
+**In short:** PostgreSQL is a storage engine with a query engine on top. Postrust is a query engine with the network as its storage.
+
 ## The vision
 
 SQL is the best language for data analysis. But getting data *into* SQL is the hard part — you end up writing Python scripts to fetch from APIs, parse JSON, clean it up, load it into a database, and *then* query it.
