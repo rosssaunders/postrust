@@ -401,7 +401,8 @@ async fn execute_create_table_as_select(
     Ok(QueryResult {
         columns: Vec::new(),
         rows: Vec::new(),
-        command_tag: format!("SELECT {}", row_count),  // PostgreSQL returns "SELECT n" for CTAS
+        // PostgreSQL returns "SELECT n" for CTAS, where n is the number of rows inserted
+        command_tag: format!("SELECT {}", row_count),
         rows_affected: row_count,
     })
 }
