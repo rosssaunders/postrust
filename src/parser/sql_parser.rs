@@ -437,9 +437,24 @@ impl Parser {
         };
         
         let name = self.parse_qualified_name()?;
+        
+        // Check for CREATE TABLE AS SELECT (CTAS)
+        if self.consume_keyword(Keyword::As) {
+            let query = self.parse_query()?;
+            return Ok(Statement::CreateTable(CreateTableStatement {
+                name,
+                columns: Vec::new(),
+                constraints: Vec::new(),
+                if_not_exists,
+                temporary,
+                unlogged,
+                as_select: Some(Box::new(query)),
+            }));
+        }
+        
         self.expect_token(
             |k| matches!(k, TokenKind::LParen),
-            "expected '(' after CREATE TABLE name",
+            "expected '(' or AS after CREATE TABLE name",
         )?;
 
         let mut columns = Vec::new();
@@ -471,6 +486,7 @@ impl Parser {
             if_not_exists,
             temporary,
             unlogged,
+            as_select: None,
         }))
     }
 

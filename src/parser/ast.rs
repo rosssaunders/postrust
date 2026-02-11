@@ -269,6 +269,7 @@ pub struct CreateTableStatement {
     pub if_not_exists: bool,
     pub temporary: bool,
     pub unlogged: bool,
+    pub as_select: Option<Box<Query>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

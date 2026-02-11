@@ -4901,3 +4901,47 @@ fn rejects_invalid_json_cast() {
         assert!(err.message.contains("not valid JSON"));
     });
 }
+
+#[test]
+fn create_table_as_select_simple() {
+    let results = run_batch(&[
+        "CREATE TABLE t1 (id int, name text)",
+        "INSERT INTO t1 VALUES (1, 'Alice'), (2, 'Bob')",
+        "CREATE TABLE t2 AS SELECT * FROM t1",
+        "SELECT * FROM t2 ORDER BY id",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].rows_affected, 2);
+    assert!(results[2].command_tag.starts_with("SELECT"));  // "SELECT 2"
+    assert_eq!(results[3].rows.len(), 2);
+    assert_eq!(results[3].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[3].rows[0][1], ScalarValue::Text("Alice".to_string()));
+    assert_eq!(results[3].rows[1][0], ScalarValue::Int(2));
+    assert_eq!(results[3].rows[1][1], ScalarValue::Text("Bob".to_string()));
+}
+
+#[test]
+fn create_table_as_select_with_projection() {
+    let results = run_batch(&[
+        "CREATE TABLE tbl (x int, y int, z text)",
+        "INSERT INTO tbl VALUES (1, 2, 'a'), (3, 4, 'b')",
+        "CREATE TABLE dest AS SELECT x, z FROM tbl",
+        "SELECT * FROM dest ORDER BY x",
+    ]);
+    assert!(results[2].command_tag.starts_with("SELECT"));
+    assert_eq!(results[3].rows.len(), 2);
+    assert_eq!(results[3].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[3].rows[0][1], ScalarValue::Text("a".to_string()));
+}
+
+#[test]
+fn create_temp_table_as_select() {
+    let results = run_batch(&[
+        "CREATE TEMP TABLE t AS SELECT 1 AS x, 'hello' AS y",
+        "SELECT * FROM t",
+    ]);
+    assert!(results[0].command_tag.starts_with("SELECT"));
+    assert_eq!(results[1].rows.len(), 1);
+    assert_eq!(results[1].rows[0][0], ScalarValue::Int(1));
+    assert_eq!(results[1].rows[0][1], ScalarValue::Text("hello".to_string()));
+}
