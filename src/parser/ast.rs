@@ -839,6 +839,19 @@ pub enum Expr {
         when_then: Vec<(Expr, Expr)>,
         else_expr: Option<Box<Expr>>,
     },
+    ArraySubscript {
+        expr: Box<Expr>,
+        index: Box<Expr>,
+    },
+    ArraySlice {
+        expr: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+    },
+    TypedLiteral {
+        type_name: String,
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

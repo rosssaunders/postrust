@@ -151,6 +151,11 @@ pub enum Keyword {
     Type,
     Enum,
     Domain,
+    Date,
+    Time,
+    Timestamp,
+    Interval,
+    Escape,
 }
 
 impl Keyword {
@@ -303,6 +308,11 @@ impl Keyword {
             "type" => Some(Self::Type),
             "enum" => Some(Self::Enum),
             "domain" => Some(Self::Domain),
+            "date" => Some(Self::Date),
+            "time" => Some(Self::Time),
+            "timestamp" => Some(Self::Timestamp),
+            "interval" => Some(Self::Interval),
+            "escape" => Some(Self::Escape),
             _ => None,
         }
     }

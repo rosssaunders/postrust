@@ -2700,6 +2700,62 @@ impl Parser {
                 };
                 continue;
             }
+            // Array subscript: arr[1] or arr[1:3]
+            if self
+                .peek_nth_kind(0)
+                .is_some_and(|k| matches!(k, TokenKind::LBracket))
+            {
+                let l_bp = 12; // Same precedence as typecast
+                if l_bp < min_bp {
+                    break;
+                }
+                self.advance(); // consume '['
+                
+                // Parse first expression
+                let first_expr = self.parse_expr()?;
+                
+                // Check for slice syntax ':'
+                if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::Colon)) {
+                    self.advance(); // consume ':'
+                    
+                    // Check for end expression
+                    if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::RBracket)) {
+                        // arr[start:]
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RBracket),
+                            "expected ']' after array slice",
+                        )?;
+                        lhs = Expr::ArraySlice {
+                            expr: Box::new(lhs),
+                            start: Some(Box::new(first_expr)),
+                            end: None,
+                        };
+                    } else {
+                        // arr[start:end]
+                        let end_expr = self.parse_expr()?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RBracket),
+                            "expected ']' after array slice",
+                        )?;
+                        lhs = Expr::ArraySlice {
+                            expr: Box::new(lhs),
+                            start: Some(Box::new(first_expr)),
+                            end: Some(Box::new(end_expr)),
+                        };
+                    }
+                } else {
+                    // Simple subscript: arr[index]
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RBracket),
+                        "expected ']' after array subscript",
+                    )?;
+                    lhs = Expr::ArraySubscript {
+                        expr: Box::new(lhs),
+                        index: Box::new(first_expr),
+                    };
+                }
+                continue;
+            }
             if self.peek_keyword(Keyword::Not) && self.peek_nth_keyword(1, Keyword::In) {
                 let l_bp = 5;
                 if l_bp < min_bp {
@@ -2877,6 +2933,39 @@ impl Parser {
                 return Ok(Expr::ArraySubquery(Box::new(query)));
             }
             return Err(self.error_at_current("expected ARRAY[ or ARRAY("));
+        }
+        // Typed literals: DATE 'literal', TIME 'literal', TIMESTAMP 'literal', INTERVAL 'literal'
+        if self.peek_keyword(Keyword::Date)
+            || self.peek_keyword(Keyword::Time)
+            || self.peek_keyword(Keyword::Timestamp)
+            || self.peek_keyword(Keyword::Interval)
+        {
+            let type_name = if self.consume_keyword(Keyword::Date) {
+                "date"
+            } else if self.consume_keyword(Keyword::Time) {
+                "time"
+            } else if self.consume_keyword(Keyword::Timestamp) {
+                "timestamp"
+            } else if self.consume_keyword(Keyword::Interval) {
+                "interval"
+            } else {
+                unreachable!()
+            };
+            
+            // Expect a string literal
+            if let Some(TokenKind::String(value)) = self.peek_nth_kind(0) {
+                let value_str = value.clone();
+                self.advance();
+                return Ok(Expr::TypedLiteral {
+                    type_name: type_name.to_string(),
+                    value: value_str,
+                });
+            } else {
+                return Err(self.error_at_current(&format!(
+                    "expected string literal after {} keyword",
+                    type_name
+                )));
+            }
         }
         if self.consume_keyword(Keyword::Cast) {
             self.expect_token(
