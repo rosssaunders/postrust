@@ -6,10 +6,11 @@ use crate::parser::ast::{
     ColumnDefinition, CommonTableExpr, ComparisonQuantifier, ConflictTarget, CopyDirection,
     CopyFormat, CopyOptions, CopyStatement, CreateExtensionStatement, CreateFunctionStatement,
     CreateIndexStatement, CreateRoleStatement, CreateSchemaStatement, CreateSequenceStatement,
-    CreateSubscriptionStatement, CreateTableStatement, CreateViewStatement, DeleteStatement,
+    CreateSubscriptionStatement, CreateTableStatement, CreateViewStatement, CreateTypeStatement,
+    CreateDomainStatement, DeleteStatement,
     DiscardStatement, DoStatement, DropBehavior, DropExtensionStatement, DropIndexStatement,
     DropRoleStatement, DropSchemaStatement, DropSequenceStatement, DropSubscriptionStatement,
-    DropTableStatement, DropViewStatement, ExplainStatement, Expr, ForeignKeyAction,
+    DropTableStatement, DropViewStatement, DropTypeStatement, DropDomainStatement, ExplainStatement, Expr, ForeignKeyAction,
     ForeignKeyReference, FunctionParam, FunctionReturnType, GrantRoleStatement, GrantStatement,
     GrantTablePrivilegesStatement, GroupByExpr, InsertSource, InsertStatement, JoinCondition,
     JoinExpr, JoinType, ListenStatement, MergeStatement, MergeWhenClause, NotifyStatement,
@@ -298,13 +299,23 @@ impl Parser {
         if materialized {
             return Err(self.error_at_current("expected VIEW after CREATE MATERIALIZED"));
         }
+        
+        // Parse optional TEMP/TEMPORARY before TABLE
+        let temporary = self.consume_keyword(Keyword::Temporary) || self.consume_keyword(Keyword::Temp);
+        
         if self.consume_ident("role") {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE ROLE"));
+            }
             let name =
                 self.parse_role_identifier_with_message("CREATE ROLE requires a role name")?;
             let options = self.parse_role_options("CREATE ROLE")?;
             return Ok(Statement::CreateRole(CreateRoleStatement { name, options }));
         }
         if self.consume_keyword(Keyword::Schema) {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE SCHEMA"));
+            }
             let if_not_exists = if self.consume_keyword(Keyword::If) {
                 self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE SCHEMA")?;
                 self.expect_keyword(
@@ -322,6 +333,9 @@ impl Parser {
             }));
         }
         if self.consume_keyword(Keyword::Sequence) {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE SEQUENCE"));
+            }
             let name = self.parse_qualified_name()?;
             let (start, increment, min_value, max_value, cycle, cache) =
                 self.parse_create_sequence_options()?;
@@ -335,10 +349,92 @@ impl Parser {
                 cache,
             }));
         }
+        if self.consume_keyword(Keyword::Type) {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE TYPE"));
+            }
+            let name = self.parse_qualified_name()?;
+            self.expect_keyword(Keyword::As, "expected AS after CREATE TYPE name")?;
+            self.expect_keyword(Keyword::Enum, "expected ENUM after CREATE TYPE ... AS")?;
+            self.expect_token(
+                |k| matches!(k, TokenKind::LParen),
+                "expected '(' after CREATE TYPE ... AS ENUM",
+            )?;
+            
+            // Parse first enum value
+            let first_value = match self.current_kind() {
+                TokenKind::String(value) => {
+                    let out = value.clone();
+                    self.advance();
+                    out
+                }
+                _ => return Err(self.error_at_current("expected string literal for enum value")),
+            };
+            let mut enum_values = vec![first_value];
+            
+            // Parse remaining enum values
+            while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                let value = match self.current_kind() {
+                    TokenKind::String(value) => {
+                        let out = value.clone();
+                        self.advance();
+                        out
+                    }
+                    _ => return Err(self.error_at_current("expected string literal for enum value")),
+                };
+                enum_values.push(value);
+            }
+            
+            self.expect_token(
+                |k| matches!(k, TokenKind::RParen),
+                "expected ')' after enum values",
+            )?;
+            return Ok(Statement::CreateType(CreateTypeStatement {
+                name,
+                as_enum: enum_values,
+            }));
+        }
+        if self.consume_keyword(Keyword::Domain) {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE DOMAIN"));
+            }
+            let name = self.parse_qualified_name()?;
+            self.expect_keyword(Keyword::As, "expected AS after CREATE DOMAIN name")?;
+            let base_type = self.parse_type_name()?;
+            let check_constraint = if self.consume_keyword(Keyword::Check) {
+                self.expect_token(
+                    |k| matches!(k, TokenKind::LParen),
+                    "expected '(' after CHECK",
+                )?;
+                let constraint = self.parse_expr()?;
+                self.expect_token(
+                    |k| matches!(k, TokenKind::RParen),
+                    "expected ')' after CHECK constraint",
+                )?;
+                Some(constraint)
+            } else {
+                None
+            };
+            return Ok(Statement::CreateDomain(CreateDomainStatement {
+                name,
+                base_type,
+                check_constraint,
+            }));
+        }
         self.expect_keyword(
             Keyword::Table,
-            "expected TABLE, SCHEMA, INDEX, SEQUENCE, VIEW, or SUBSCRIPTION after CREATE",
+            "expected TABLE, SCHEMA, INDEX, SEQUENCE, VIEW, TYPE, DOMAIN, or SUBSCRIPTION after CREATE",
         )?;
+        
+        // Parse optional IF NOT EXISTS clause
+        let if_not_exists = if self.consume_keyword(Keyword::If) {
+            self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE TABLE")?;
+            self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE TABLE")?;
+            true
+        } else {
+            false
+        };
+        
         let name = self.parse_qualified_name()?;
         self.expect_token(
             |k| matches!(k, TokenKind::LParen),
@@ -371,6 +467,8 @@ impl Parser {
             name,
             columns,
             constraints,
+            if_not_exists,
+            temporary,
         }))
     }
 
@@ -841,6 +939,36 @@ impl Parser {
             let name = self.parse_qualified_name()?;
             let behavior = self.parse_drop_behavior()?;
             return Ok(Statement::DropSequence(DropSequenceStatement {
+                name,
+                if_exists,
+                behavior,
+            }));
+        }
+        if self.consume_keyword(Keyword::Type) {
+            let if_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF in DROP TYPE")?;
+                true
+            } else {
+                false
+            };
+            let name = self.parse_qualified_name()?;
+            let behavior = self.parse_drop_behavior()?;
+            return Ok(Statement::DropType(DropTypeStatement {
+                name,
+                if_exists,
+                behavior,
+            }));
+        }
+        if self.consume_keyword(Keyword::Domain) {
+            let if_exists = if self.consume_keyword(Keyword::If) {
+                self.expect_keyword(Keyword::Exists, "expected EXISTS after IF in DROP DOMAIN")?;
+                true
+            } else {
+                false
+            };
+            let name = self.parse_qualified_name()?;
+            let behavior = self.parse_drop_behavior()?;
+            return Ok(Statement::DropDomain(DropDomainStatement {
                 name,
                 if_exists,
                 behavior,
@@ -5621,5 +5749,150 @@ mod tests {
         };
         assert!(drop.if_exists);
         assert_eq!(drop.name, "sub1");
+    }
+
+    #[test]
+    fn parses_create_temp_table() {
+        let stmt = parse_statement("CREATE TEMP TABLE foo (id INT, name TEXT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.temporary);
+        assert!(!create.if_not_exists);
+        assert_eq!(create.name, vec!["foo".to_string()]);
+        assert_eq!(create.columns.len(), 2);
+    }
+
+    #[test]
+    fn parses_create_temporary_table() {
+        let stmt = parse_statement("CREATE TEMPORARY TABLE bar (id INT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.temporary);
+        assert!(!create.if_not_exists);
+        assert_eq!(create.name, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn parses_create_table_if_not_exists() {
+        let stmt = parse_statement("CREATE TABLE IF NOT EXISTS baz (id INT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(!create.temporary);
+        assert!(create.if_not_exists);
+        assert_eq!(create.name, vec!["baz".to_string()]);
+    }
+
+    #[test]
+    fn parses_create_temp_table_if_not_exists() {
+        let stmt = parse_statement("CREATE TEMP TABLE IF NOT EXISTS qux (id INT, value NUMERIC)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.temporary);
+        assert!(create.if_not_exists);
+        assert_eq!(create.name, vec!["qux".to_string()]);
+        assert_eq!(create.columns.len(), 2);
+    }
+
+    #[test]
+    fn rejects_create_temp_schema() {
+        let result = parse_statement("CREATE TEMP SCHEMA foo");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("unexpected TEMP"));
+    }
+
+    #[test]
+    fn parses_create_type_as_enum() {
+        let stmt = parse_statement("CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral')")
+            .expect("parse should succeed");
+        let Statement::CreateType(create) = stmt else {
+            panic!("expected create type statement");
+        };
+        assert_eq!(create.name, vec!["mood".to_string()]);
+        assert_eq!(create.as_enum, vec!["happy".to_string(), "sad".to_string(), "neutral".to_string()]);
+    }
+
+    #[test]
+    fn parses_create_type_qualified_name() {
+        let stmt = parse_statement("CREATE TYPE public.status AS ENUM ('active', 'inactive')")
+            .expect("parse should succeed");
+        let Statement::CreateType(create) = stmt else {
+            panic!("expected create type statement");
+        };
+        assert_eq!(create.name, vec!["public".to_string(), "status".to_string()]);
+        assert_eq!(create.as_enum.len(), 2);
+    }
+
+    #[test]
+    fn parses_create_domain() {
+        let stmt = parse_statement("CREATE DOMAIN posint AS INT")
+            .expect("parse should succeed");
+        let Statement::CreateDomain(create) = stmt else {
+            panic!("expected create domain statement");
+        };
+        assert_eq!(create.name, vec!["posint".to_string()]);
+        assert!(create.check_constraint.is_none());
+    }
+
+    #[test]
+    fn parses_create_domain_with_check() {
+        let stmt = parse_statement("CREATE DOMAIN posint AS INT CHECK (VALUE > 0)")
+            .expect("parse should succeed");
+        let Statement::CreateDomain(create) = stmt else {
+            panic!("expected create domain statement");
+        };
+        assert_eq!(create.name, vec!["posint".to_string()]);
+        assert!(create.check_constraint.is_some());
+    }
+
+    #[test]
+    fn parses_drop_type() {
+        let stmt = parse_statement("DROP TYPE mood")
+            .expect("parse should succeed");
+        let Statement::DropType(drop) = stmt else {
+            panic!("expected drop type statement");
+        };
+        assert_eq!(drop.name, vec!["mood".to_string()]);
+        assert!(!drop.if_exists);
+    }
+
+    #[test]
+    fn parses_drop_type_if_exists_cascade() {
+        let stmt = parse_statement("DROP TYPE IF EXISTS mood CASCADE")
+            .expect("parse should succeed");
+        let Statement::DropType(drop) = stmt else {
+            panic!("expected drop type statement");
+        };
+        assert_eq!(drop.name, vec!["mood".to_string()]);
+        assert!(drop.if_exists);
+    }
+
+    #[test]
+    fn parses_drop_domain() {
+        let stmt = parse_statement("DROP DOMAIN posint")
+            .expect("parse should succeed");
+        let Statement::DropDomain(drop) = stmt else {
+            panic!("expected drop domain statement");
+        };
+        assert_eq!(drop.name, vec!["posint".to_string()]);
+        assert!(!drop.if_exists);
+    }
+
+    #[test]
+    fn parses_drop_domain_if_exists() {
+        let stmt = parse_statement("DROP DOMAIN IF EXISTS posint")
+            .expect("parse should succeed");
+        let Statement::DropDomain(drop) = stmt else {
+            panic!("expected drop domain statement");
+        };
+        assert!(drop.if_exists);
     }
 }

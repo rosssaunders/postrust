@@ -4747,3 +4747,104 @@ fn evaluates_timezone_function() {
         vec![vec![ScalarValue::Text("2024-01-01 12:00:00".to_string())]]
     );
 }
+
+#[test]
+fn creates_temporary_table() {
+    let results = run_batch(&[
+        "CREATE TEMP TABLE temp_test (id INT, name TEXT)",
+        "INSERT INTO temp_test VALUES (1, 'test')",
+        "SELECT * FROM temp_test",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].rows_affected, 1);
+    assert_eq!(results[2].rows.len(), 1);
+}
+
+#[test]
+fn creates_table_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE TABLE IF NOT EXISTS ine_test (id INT)",
+        "CREATE TABLE IF NOT EXISTS ine_test (id INT)",
+        "INSERT INTO ine_test VALUES (1)",
+        "SELECT * FROM ine_test",
+    ]);
+    // Both CREATE TABLE statements should succeed
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].command_tag, "CREATE TABLE");
+    assert_eq!(results[2].rows_affected, 1);
+    assert_eq!(results[3].rows.len(), 1);
+}
+
+#[test]
+fn creates_temp_table_if_not_exists() {
+    let results = run_batch(&[
+        "CREATE TEMP TABLE IF NOT EXISTS temp_ine (id INT, value TEXT)",
+        "CREATE TEMPORARY TABLE IF NOT EXISTS temp_ine (id INT, value TEXT)",
+        "INSERT INTO temp_ine VALUES (42, 'hello')",
+        "SELECT * FROM temp_ine",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TABLE");
+    assert_eq!(results[1].command_tag, "CREATE TABLE");
+    assert_eq!(results[2].rows_affected, 1);
+    assert_eq!(results[3].rows.len(), 1);
+}
+
+#[test]
+fn creates_type_as_enum() {
+    let results = run_batch(&[
+        "CREATE TYPE mood AS ENUM ('happy', 'sad', 'neutral')",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TYPE");
+}
+
+#[test]
+fn creates_and_drops_type() {
+    let results = run_batch(&[
+        "CREATE TYPE status AS ENUM ('active', 'inactive')",
+        "DROP TYPE status",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE TYPE");
+    assert_eq!(results[1].command_tag, "DROP TYPE");
+}
+
+#[test]
+fn creates_domain() {
+    let results = run_batch(&[
+        "CREATE DOMAIN posint AS INT",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE DOMAIN");
+}
+
+#[test]
+fn creates_domain_with_check() {
+    let results = run_batch(&[
+        "CREATE DOMAIN posint AS INT CHECK (VALUE > 0)",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE DOMAIN");
+}
+
+#[test]
+fn creates_and_drops_domain() {
+    let results = run_batch(&[
+        "CREATE DOMAIN posint AS INT",
+        "DROP DOMAIN posint",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE DOMAIN");
+    assert_eq!(results[1].command_tag, "DROP DOMAIN");
+}
+
+#[test]
+fn drops_type_if_exists() {
+    let results = run_batch(&[
+        "DROP TYPE IF EXISTS nonexistent_type",
+    ]);
+    assert_eq!(results[0].command_tag, "DROP TYPE");
+}
+
+#[test]
+fn drops_domain_if_exists() {
+    let results = run_batch(&[
+        "DROP DOMAIN IF EXISTS nonexistent_domain",
+    ]);
+    assert_eq!(results[0].command_tag, "DROP DOMAIN");
+}
