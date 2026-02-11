@@ -2982,15 +2982,29 @@ impl Parser {
                     .unwrap_or_default();
                 let args_start = self.idx;
                 if fn_name == "extract" {
-                    // EXTRACT(field FROM source)
+                    // EXTRACT(field FROM source) or extract('field', source)
                     let field = self.parse_expr_bp(6)?;
-                    self.expect_keyword(Keyword::From, "expected FROM in EXTRACT")?;
-                    let source = self.parse_expr_bp(6)?;
-                    self.expect_token(
-                        |k| matches!(k, TokenKind::RParen),
-                        "expected ')' after EXTRACT arguments",
-                    )?;
-                    args = vec![field, source];
+                    if self.peek_keyword(Keyword::From) {
+                        self.expect_keyword(Keyword::From, "expected FROM in EXTRACT")?;
+                        let source = self.parse_expr_bp(6)?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after EXTRACT arguments",
+                        )?;
+                        args = vec![field, source];
+                    } else {
+                        // Comma-separated form: extract('year', ts)
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::Comma),
+                            "expected ',' or FROM in EXTRACT",
+                        )?;
+                        let source = self.parse_expr_bp(6)?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after EXTRACT arguments",
+                        )?;
+                        args = vec![field, source];
+                    }
                     return Ok(Expr::FunctionCall {
                         name,
                         args,
