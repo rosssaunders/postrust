@@ -2981,7 +2981,26 @@ impl Parser {
                     .map(|part| part.to_ascii_lowercase())
                     .unwrap_or_default();
                 let args_start = self.idx;
-                if fn_name == "position" {
+                if fn_name == "extract" {
+                    // EXTRACT(field FROM source)
+                    let field = self.parse_expr_bp(6)?;
+                    self.expect_keyword(Keyword::From, "expected FROM in EXTRACT")?;
+                    let source = self.parse_expr_bp(6)?;
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after EXTRACT arguments",
+                    )?;
+                    args = vec![field, source];
+                    return Ok(Expr::FunctionCall {
+                        name,
+                        args,
+                        distinct,
+                        order_by,
+                        within_group: Vec::new(),
+                        filter: None,
+                        over: None,
+                    });
+                } else if fn_name == "position" {
                     let left = self.parse_expr_bp(6)?;
                     if self.consume_keyword(Keyword::In) {
                         let right = self.parse_expr_bp(6)?;
@@ -2990,6 +3009,89 @@ impl Parser {
                             "expected ')' after position arguments",
                         )?;
                         args = vec![left, right];
+                        return Ok(Expr::FunctionCall {
+                            name,
+                            args,
+                            distinct,
+                            order_by,
+                            within_group: Vec::new(),
+                            filter: None,
+                            over: None,
+                        });
+                    }
+                    self.idx = args_start;
+                } else if fn_name == "substring" {
+                    // SUBSTRING(string FROM start [FOR length])
+                    let string = self.parse_expr_bp(6)?;
+                    if self.consume_keyword(Keyword::From) {
+                        let start = self.parse_expr_bp(6)?;
+                        let length = if self.consume_keyword(Keyword::For) {
+                            Some(self.parse_expr_bp(6)?)
+                        } else {
+                            None
+                        };
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after SUBSTRING arguments",
+                        )?;
+                        args = vec![string, start];
+                        if let Some(length) = length {
+                            args.push(length);
+                        }
+                        return Ok(Expr::FunctionCall {
+                            name,
+                            args,
+                            distinct,
+                            order_by,
+                            within_group: Vec::new(),
+                            filter: None,
+                            over: None,
+                        });
+                    }
+                    self.idx = args_start;
+                } else if fn_name == "trim" {
+                    // TRIM([LEADING | TRAILING | BOTH] [characters] FROM string)
+                    // Check for LEADING/TRAILING/BOTH
+                    let trim_mode = match self.current_kind() {
+                        TokenKind::Identifier(s) if s.eq_ignore_ascii_case("leading") => {
+                            self.advance();
+                            Some(Expr::Identifier(vec!["leading".to_string()]))
+                        }
+                        TokenKind::Identifier(s) if s.eq_ignore_ascii_case("trailing") => {
+                            self.advance();
+                            Some(Expr::Identifier(vec!["trailing".to_string()]))
+                        }
+                        TokenKind::Identifier(s) if s.eq_ignore_ascii_case("both") => {
+                            self.advance();
+                            Some(Expr::Identifier(vec!["both".to_string()]))
+                        }
+                        _ => None,
+                    };
+                    
+                    // Check if there's a characters expression before FROM
+                    let chars_expr = if !self.peek_keyword(Keyword::From) {
+                        Some(self.parse_expr_bp(6)?)
+                    } else {
+                        None
+                    };
+                    
+                    if self.consume_keyword(Keyword::From) {
+                        let string = self.parse_expr_bp(6)?;
+                        self.expect_token(
+                            |k| matches!(k, TokenKind::RParen),
+                            "expected ')' after TRIM arguments",
+                        )?;
+                        
+                        // Build args: [mode, chars, string] or subsets
+                        args = Vec::new();
+                        if let Some(mode) = trim_mode {
+                            args.push(mode);
+                        }
+                        if let Some(chars) = chars_expr {
+                            args.push(chars);
+                        }
+                        args.push(string);
+                        
                         return Ok(Expr::FunctionCall {
                             name,
                             args,
@@ -6472,5 +6574,56 @@ mod tests {
         assert_eq!(query.order_by.len(), 2);
         assert_eq!(query.order_by[0].using_operator, Some("<".to_string()));
         assert_eq!(query.order_by[1].using_operator, Some(">".to_string()));
+    }
+
+    #[test]
+    fn parses_extract_function() {
+        let stmt = parse_statement("SELECT EXTRACT(year FROM '2023-01-01'::timestamp)")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let QueryExpr::Select(select) = &query.body else {
+            panic!("expected select");
+        };
+        let Expr::FunctionCall { name, args, .. } = &select.targets[0].expr else {
+            panic!("expected function call");
+        };
+        assert_eq!(name, &vec!["extract".to_string()]);
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn parses_substring_function() {
+        let stmt = parse_statement("SELECT SUBSTRING('hello' FROM 2 FOR 3)")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let QueryExpr::Select(select) = &query.body else {
+            panic!("expected select");
+        };
+        let Expr::FunctionCall { name, args, .. } = &select.targets[0].expr else {
+            panic!("expected function call");
+        };
+        assert_eq!(name, &vec!["substring".to_string()]);
+        assert_eq!(args.len(), 3);
+    }
+
+    #[test]
+    fn parses_trim_function() {
+        let stmt = parse_statement("SELECT TRIM(BOTH 'x' FROM 'xxxhelloxxx')")
+            .expect("parse should succeed");
+        let Statement::Query(query) = stmt else {
+            panic!("expected query statement");
+        };
+        let QueryExpr::Select(select) = &query.body else {
+            panic!("expected select");
+        };
+        let Expr::FunctionCall { name, args, .. } = &select.targets[0].expr else {
+            panic!("expected function call");
+        };
+        assert_eq!(name, &vec!["trim".to_string()]);
+        assert_eq!(args.len(), 3); // mode, chars, string
     }
 }
