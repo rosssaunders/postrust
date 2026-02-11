@@ -298,13 +298,23 @@ impl Parser {
         if materialized {
             return Err(self.error_at_current("expected VIEW after CREATE MATERIALIZED"));
         }
+        
+        // Parse optional TEMP/TEMPORARY before TABLE
+        let temporary = self.consume_keyword(Keyword::Temporary) || self.consume_keyword(Keyword::Temp);
+        
         if self.consume_ident("role") {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE ROLE"));
+            }
             let name =
                 self.parse_role_identifier_with_message("CREATE ROLE requires a role name")?;
             let options = self.parse_role_options("CREATE ROLE")?;
             return Ok(Statement::CreateRole(CreateRoleStatement { name, options }));
         }
         if self.consume_keyword(Keyword::Schema) {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE SCHEMA"));
+            }
             let if_not_exists = if self.consume_keyword(Keyword::If) {
                 self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE SCHEMA")?;
                 self.expect_keyword(
@@ -322,6 +332,9 @@ impl Parser {
             }));
         }
         if self.consume_keyword(Keyword::Sequence) {
+            if temporary {
+                return Err(self.error_at_current("unexpected TEMP/TEMPORARY before CREATE SEQUENCE"));
+            }
             let name = self.parse_qualified_name()?;
             let (start, increment, min_value, max_value, cycle, cache) =
                 self.parse_create_sequence_options()?;
@@ -339,6 +352,16 @@ impl Parser {
             Keyword::Table,
             "expected TABLE, SCHEMA, INDEX, SEQUENCE, VIEW, or SUBSCRIPTION after CREATE",
         )?;
+        
+        // Parse optional IF NOT EXISTS clause
+        let if_not_exists = if self.consume_keyword(Keyword::If) {
+            self.expect_keyword(Keyword::Not, "expected NOT after IF in CREATE TABLE")?;
+            self.expect_keyword(Keyword::Exists, "expected EXISTS after IF NOT in CREATE TABLE")?;
+            true
+        } else {
+            false
+        };
+        
         let name = self.parse_qualified_name()?;
         self.expect_token(
             |k| matches!(k, TokenKind::LParen),
@@ -371,6 +394,8 @@ impl Parser {
             name,
             columns,
             constraints,
+            if_not_exists,
+            temporary,
         }))
     }
 
@@ -5621,5 +5646,63 @@ mod tests {
         };
         assert!(drop.if_exists);
         assert_eq!(drop.name, "sub1");
+    }
+
+    #[test]
+    fn parses_create_temp_table() {
+        let stmt = parse_statement("CREATE TEMP TABLE foo (id INT, name TEXT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.temporary);
+        assert!(!create.if_not_exists);
+        assert_eq!(create.name, vec!["foo".to_string()]);
+        assert_eq!(create.columns.len(), 2);
+    }
+
+    #[test]
+    fn parses_create_temporary_table() {
+        let stmt = parse_statement("CREATE TEMPORARY TABLE bar (id INT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.temporary);
+        assert!(!create.if_not_exists);
+        assert_eq!(create.name, vec!["bar".to_string()]);
+    }
+
+    #[test]
+    fn parses_create_table_if_not_exists() {
+        let stmt = parse_statement("CREATE TABLE IF NOT EXISTS baz (id INT)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(!create.temporary);
+        assert!(create.if_not_exists);
+        assert_eq!(create.name, vec!["baz".to_string()]);
+    }
+
+    #[test]
+    fn parses_create_temp_table_if_not_exists() {
+        let stmt = parse_statement("CREATE TEMP TABLE IF NOT EXISTS qux (id INT, value NUMERIC)")
+            .expect("parse should succeed");
+        let Statement::CreateTable(create) = stmt else {
+            panic!("expected create table statement");
+        };
+        assert!(create.temporary);
+        assert!(create.if_not_exists);
+        assert_eq!(create.name, vec!["qux".to_string()]);
+        assert_eq!(create.columns.len(), 2);
+    }
+
+    #[test]
+    fn rejects_create_temp_schema() {
+        let result = parse_statement("CREATE TEMP SCHEMA foo");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("unexpected TEMP"));
     }
 }

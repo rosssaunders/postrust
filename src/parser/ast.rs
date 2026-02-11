@@ -262,6 +262,8 @@ pub struct CreateTableStatement {
     pub name: Vec<String>,
     pub columns: Vec<ColumnDefinition>,
     pub constraints: Vec<TableConstraint>,
+    pub if_not_exists: bool,
+    pub temporary: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

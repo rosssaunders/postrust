@@ -67,19 +67,42 @@ pub async fn execute_create_table(
     let key_specs = key_constraint_specs_from_ast(&create.constraints)?;
     let foreign_key_specs = foreign_key_constraint_specs_from_ast(&create.constraints)?;
 
+    // Determine the table kind based on temporary flag
+    let table_kind = if create.temporary {
+        TableKind::Heap  // For now, temporary tables work like regular heap tables in memory
+    } else {
+        TableKind::Heap
+    };
+
     let table_oid = with_catalog_write(|catalog| {
         catalog.create_table(
             &schema_name,
             &table_name,
-            TableKind::Heap,
+            table_kind,
             column_specs,
             key_specs,
             foreign_key_specs,
         )
-    })
-    .map_err(|err| EngineError {
-        message: err.message,
-    })?;
+    });
+    
+    // Handle IF NOT EXISTS
+    let table_oid = match table_oid {
+        Ok(oid) => oid,
+        Err(err) => {
+            // If the table already exists and IF NOT EXISTS was specified, return success silently
+            if create.if_not_exists && err.message.contains("already exists") {
+                return Ok(QueryResult {
+                    columns: Vec::new(),
+                    rows: Vec::new(),
+                    command_tag: "CREATE TABLE".to_string(),
+                    rows_affected: 0,
+                });
+            }
+            return Err(EngineError {
+                message: err.message,
+            });
+        }
+    };
 
     with_storage_write(|storage| {
         storage.rows_by_table.entry(table_oid).or_default();

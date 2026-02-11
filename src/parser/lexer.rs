@@ -144,6 +144,11 @@ pub enum Keyword {
     Function,
     Returns,
     Language,
+    Temporary,
+    Temp,
+    Type,
+    Enum,
+    Domain,
 }
 
 impl Keyword {
@@ -289,6 +294,11 @@ impl Keyword {
             "function" => Some(Self::Function),
             "returns" => Some(Self::Returns),
             "language" => Some(Self::Language),
+            "temporary" => Some(Self::Temporary),
+            "temp" => Some(Self::Temp),
+            "type" => Some(Self::Type),
+            "enum" => Some(Self::Enum),
+            "domain" => Some(Self::Domain),
             _ => None,
         }
     }
