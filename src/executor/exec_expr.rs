@@ -2193,7 +2193,7 @@ fn eval_array_subscript(
     // Convert 1-indexed to 0-indexed
     if idx == 0 {
         return Err(EngineError {
-            message: "array subscript out of bounds (arrays are 1-indexed)".to_string(),
+            message: "array index 0 is invalid (PostgreSQL arrays are 1-indexed)".to_string(),
         });
     }
     let zero_idx = if idx > 0 {

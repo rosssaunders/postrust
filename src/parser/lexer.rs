@@ -155,7 +155,6 @@ pub enum Keyword {
     Time,
     Timestamp,
     Interval,
-    Escape,
 }
 
 impl Keyword {
@@ -312,7 +311,6 @@ impl Keyword {
             "time" => Some(Self::Time),
             "timestamp" => Some(Self::Timestamp),
             "interval" => Some(Self::Interval),
-            "escape" => Some(Self::Escape),
             _ => None,
         }
     }

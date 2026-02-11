@@ -346,11 +346,9 @@ fn infer_expr_type_oid(
         }
         Expr::ArrayConstructor(_) | Expr::ArraySubquery(_) => PG_TEXT_OID,
         Expr::ArraySubscript { expr, .. } => {
-            // Return the element type - for now, assume text
-            // In a more complete implementation, would infer element type from array type
-            let array_oid = infer_expr_type_oid(expr, scope, ctes);
-            // For simplicity, return text type for now
-            _ = array_oid;
+            // Return the element type - for simplicity, return text type for now
+            // A more complete implementation would infer element type from array type
+            infer_expr_type_oid(expr, scope, ctes);
             PG_TEXT_OID
         }
         Expr::ArraySlice { expr, .. } => {
