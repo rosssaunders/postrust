@@ -1361,11 +1361,25 @@ pub(crate) fn eval_cast_scalar(
             &value,
             "cannot cast value to boolean",
         )?)),
-        "int8" => Ok(ScalarValue::Int(parse_i64_scalar(
+        "int2" | "smallint" => {
+            let val = parse_i64_scalar(&value, "cannot cast value to smallint")?;
+            crate::utils::adt::int_arithmetic::validate_int2(val)?;
+            Ok(ScalarValue::Int(val))
+        }
+        "int4" | "integer" | "int" => {
+            let val = parse_i64_scalar(&value, "cannot cast value to integer")?;
+            crate::utils::adt::int_arithmetic::validate_int4(val)?;
+            Ok(ScalarValue::Int(val))
+        }
+        "int8" | "bigint" => Ok(ScalarValue::Int(parse_i64_scalar(
             &value,
             "cannot cast value to bigint",
         )?)),
-        "float8" => Ok(ScalarValue::Float(parse_f64_scalar(
+        "float4" | "real" => Ok(ScalarValue::Float(parse_f64_scalar(
+            &value,
+            "cannot cast value to real",
+        )?)),
+        "float8" | "double precision" => Ok(ScalarValue::Float(parse_f64_scalar(
             &value,
             "cannot cast value to double precision",
         )?)),
@@ -1524,7 +1538,12 @@ pub(crate) fn eval_binary(
         }),
         Add => eval_add(left, right),
         Sub => eval_sub(left, right),
-        Mul => numeric_bin(left, right, |a, b| a * b, |a, b| a * b),
+        Mul => numeric_bin(
+            left,
+            right,
+            crate::utils::adt::int_arithmetic::int4_mul,
+            |a, b| a * b,
+        ),
         Div => numeric_div(left, right),
         Mod => numeric_mod(left, right),
         JsonGet => eval_json_get_operator(left, right, false),
@@ -1550,7 +1569,12 @@ fn eval_add(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, Engine
     }
 
     if parse_numeric_operand(&left).is_ok() && parse_numeric_operand(&right).is_ok() {
-        return numeric_bin(left, right, |a, b| a + b, |a, b| a + b);
+        return numeric_bin(
+            left,
+            right,
+            crate::utils::adt::int_arithmetic::int4_add,
+            |a, b| a + b,
+        );
     }
 
     if let Some(lhs) = parse_temporal_operand(&left) {
@@ -1573,7 +1597,12 @@ fn eval_sub(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, Engine
     }
 
     if parse_numeric_operand(&left).is_ok() && parse_numeric_operand(&right).is_ok() {
-        return numeric_bin(left, right, |a, b| a - b, |a, b| a - b);
+        return numeric_bin(
+            left,
+            right,
+            crate::utils::adt::int_arithmetic::int4_sub,
+            |a, b| a - b,
+        );
     }
 
     if let Some(lhs) = parse_temporal_operand(&left) {
@@ -1730,7 +1759,7 @@ pub(crate) fn eval_any_all(
 fn numeric_bin(
     left: ScalarValue,
     right: ScalarValue,
-    int_op: impl Fn(i64, i64) -> i64,
+    int_op: impl Fn(i64, i64) -> Result<i64, EngineError>,
     float_op: impl Fn(f64, f64) -> f64,
 ) -> Result<ScalarValue, EngineError> {
     if matches!(left, ScalarValue::Null) || matches!(right, ScalarValue::Null) {
@@ -1739,7 +1768,7 @@ fn numeric_bin(
     let left_num = parse_numeric_operand(&left)?;
     let right_num = parse_numeric_operand(&right)?;
     match (left_num, right_num) {
-        (NumericOperand::Int(a), NumericOperand::Int(b)) => Ok(ScalarValue::Int(int_op(a, b))),
+        (NumericOperand::Int(a), NumericOperand::Int(b)) => Ok(ScalarValue::Int(int_op(a, b)?)),
         (NumericOperand::Int(a), NumericOperand::Float(b)) => {
             Ok(ScalarValue::Float(float_op(a as f64, b)))
         }
@@ -1765,7 +1794,9 @@ fn numeric_div(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, Eng
         | (NumericOperand::Float(_), NumericOperand::Float(0.0)) => Err(EngineError {
             message: "division by zero".to_string(),
         }),
-        (NumericOperand::Int(a), NumericOperand::Int(b)) => Ok(ScalarValue::Int(a / b)),
+        (NumericOperand::Int(a), NumericOperand::Int(b)) => {
+            Ok(ScalarValue::Int(crate::utils::adt::int_arithmetic::int4_div(a, b)?))
+        }
         (NumericOperand::Int(a), NumericOperand::Float(b)) => {
             Ok(ScalarValue::Float((a as f64) / b))
         }

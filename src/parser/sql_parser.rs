@@ -3474,9 +3474,9 @@ impl Parser {
         let base = self.parse_expr_type_word()?.to_ascii_lowercase();
         let normalized = match base.as_str() {
             "bool" | "boolean" => "boolean".to_string(),
-            // Integer types - normalize to appropriate internal type
-            "int2" | "smallint" => "int8".to_string(),
-            "int" | "integer" | "int4" => "int8".to_string(),
+            // Integer types - preserve specific types for overflow checking
+            "int2" | "smallint" => "int2".to_string(),
+            "int" | "integer" | "int4" => "int4".to_string(),
             "int8" | "bigint" => "int8".to_string(),
             // Float types - normalize to float8
             "float4" | "real" => "float8".to_string(),
