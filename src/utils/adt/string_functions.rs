@@ -381,3 +381,155 @@ pub(crate) fn sha256_hex(input: &str) -> String {
     let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
     format!("\\x{}", hex)
 }
+
+/// Implements PostgreSQL's format() function.
+/// Formats a string similar to sprintf, supporting:
+/// - %s - string (any type coerced to text)
+/// - %I - SQL identifier (quoted with double quotes if needed)
+/// - %L - SQL literal (quoted with single quotes if needed)
+/// - %% - literal %
+/// - Positional specifiers like %1$s, %2$I
+pub(crate) fn eval_format(
+    format_str: &str,
+    args: &[crate::storage::tuple::ScalarValue],
+) -> Result<String, crate::tcop::engine::EngineError> {
+    use crate::storage::tuple::ScalarValue;
+    use crate::tcop::engine::EngineError;
+
+    let mut result = String::new();
+    let mut chars = format_str.chars().peekable();
+    let mut arg_index = 0;
+
+    while let Some(ch) = chars.next() {
+        if ch != '%' {
+            result.push(ch);
+            continue;
+        }
+
+        // Check for %%
+        if chars.peek() == Some(&'%') {
+            chars.next();
+            result.push('%');
+            continue;
+        }
+
+        // Parse optional positional argument like %1$
+        let mut position: Option<usize> = None;
+        let mut digits = String::new();
+        while let Some(&next_ch) = chars.peek() {
+            if next_ch.is_ascii_digit() {
+                digits.push(next_ch);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+
+        if !digits.is_empty() {
+            if chars.peek() == Some(&'$') {
+                chars.next();
+                position = Some(
+                    digits
+                        .parse::<usize>()
+                        .map_err(|_| EngineError {
+                            message: format!("invalid format specifier: position too large"),
+                        })?
+                        .checked_sub(1)
+                        .ok_or_else(|| EngineError {
+                            message: format!("format specifier position must be >= 1"),
+                        })?,
+                );
+            } else {
+                return Err(EngineError {
+                    message: format!("format specifier must be followed by a conversion character"),
+                });
+            }
+        }
+
+        // Get the format type character
+        let format_type = chars.next().ok_or_else(|| EngineError {
+            message: "unterminated format specifier".to_string(),
+        })?;
+
+        // Determine which argument to use
+        let idx = position.unwrap_or_else(|| {
+            let i = arg_index;
+            arg_index += 1;
+            i
+        });
+
+        if idx >= args.len() {
+            return Err(EngineError {
+                message: format!("not enough arguments for format string"),
+            });
+        }
+
+        let arg = &args[idx];
+
+        // Handle NULL
+        if matches!(arg, ScalarValue::Null) {
+            continue; // NULL arguments produce empty string
+        }
+
+        match format_type {
+            's' => {
+                // %s - string
+                result.push_str(&arg.render());
+            }
+            'I' => {
+                // %I - quoted identifier
+                let ident = arg.render();
+                result.push_str(&quote_identifier(&ident));
+            }
+            'L' => {
+                // %L - quoted literal
+                let literal = arg.render();
+                result.push_str(&quote_literal_str(&literal));
+            }
+            _ => {
+                return Err(EngineError {
+                    message: format!("unrecognized format type: {}", format_type),
+                });
+            }
+        }
+    }
+
+    Ok(result)
+}
+
+/// Quote an identifier for use in SQL (double quote if necessary)
+fn quote_identifier(ident: &str) -> String {
+    // Check if identifier needs quoting
+    let needs_quoting = ident.is_empty()
+        || !ident
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_lowercase() || c == '_')
+            .unwrap_or(false)
+        || ident
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        || is_keyword(ident);
+
+    if needs_quoting {
+        format!("\"{}\"", ident.replace('"', "\"\""))
+    } else {
+        ident.to_string()
+    }
+}
+
+/// Quote a literal string for use in SQL (single quote with escaping)
+fn quote_literal_str(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// Simple keyword check (basic set of SQL keywords)
+fn is_keyword(s: &str) -> bool {
+    matches!(
+        s.to_uppercase().as_str(),
+        "SELECT" | "FROM" | "WHERE" | "AND" | "OR" | "NOT" | "NULL" | "TRUE" | "FALSE"
+            | "TABLE" | "CREATE" | "INSERT" | "UPDATE" | "DELETE" | "DROP" | "ALTER"
+            | "INDEX" | "VIEW" | "JOIN" | "LEFT" | "RIGHT" | "INNER" | "OUTER" | "ON"
+            | "AS" | "ORDER" | "BY" | "GROUP" | "HAVING" | "LIMIT" | "OFFSET"
+    )
+}

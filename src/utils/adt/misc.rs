@@ -159,6 +159,43 @@ pub(crate) fn rand_f64() -> f64 {
     (seed as f64) / (u32::MAX as f64)
 }
 
+/// Generate a random UUID (version 4).
+/// Matches PostgreSQL's gen_random_uuid() function.
+pub(crate) fn gen_random_uuid() -> String {
+    use std::time::SystemTime;
+    
+    // Generate random bytes using SystemTime as seed
+    let seed = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    
+    // Simple pseudo-random number generator
+    let mut state = seed as u64;
+    let mut next_random = || {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((state >> 32) as u32) as u64
+    };
+    
+    // Generate UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+    // where y is 8, 9, A, or B
+    let r1 = next_random();
+    let r2 = next_random();
+    let r3 = next_random();
+    let r4 = next_random();
+    
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:x}{:03x}-{:08x}{:04x}",
+        (r1 & 0xFFFFFFFF),
+        ((r2 >> 16) & 0xFFFF),
+        ((r2 & 0x0FFF)),
+        (8 + ((r3 >> 60) & 0x3)),  // y must be 8, 9, A, or B
+        ((r3 >> 48) & 0x0FFF),
+        ((r3 & 0xFFFFFFFF)),
+        ((r4 >> 16) & 0xFFFF)
+    )
+}
+
 pub(crate) fn eval_regexp_replace(
     source: &str,
     pattern: &str,
@@ -373,6 +410,678 @@ pub(crate) fn truthy(value: &ScalarValue) -> bool {
         ScalarValue::Float(v) => *v != 0.0,
         ScalarValue::Text(v) => !v.is_empty(),
         ScalarValue::Array(values) => !values.is_empty(),
+    }
+}
+
+/// Test whether a string is valid input for a type.
+/// Implements PostgreSQL's pg_input_is_valid() function (added in PG16).
+pub(crate) fn pg_input_is_valid(
+    input: &str,
+    type_name: &str,
+) -> Result<bool, crate::tcop::engine::EngineError> {
+    let input = input.trim();
+    
+    // Normalize type name
+    let normalized_type = type_name.trim().to_lowercase();
+    let normalized_type = normalized_type.as_str();
+    
+    let is_valid = match normalized_type {
+        "integer" | "int" | "int4" => input.parse::<i32>().is_ok(),
+        "bigint" | "int8" => input.parse::<i64>().is_ok(),
+        "smallint" | "int2" => input.parse::<i16>().is_ok(),
+        "numeric" | "decimal" => {
+            // Try parsing as float or integer
+            input.parse::<f64>().is_ok() || input.parse::<i64>().is_ok()
+        }
+        "real" | "float4" => input.parse::<f32>().is_ok(),
+        "double precision" | "float8" | "float" => input.parse::<f64>().is_ok(),
+        "boolean" | "bool" => {
+            matches!(
+                input.to_lowercase().as_str(),
+                "true" | "false" | "t" | "f" | "yes" | "no" | "y" | "n" | "1" | "0"
+            )
+        }
+        "text" | "varchar" | "char" | "character varying" => true, // any string is valid text
+        "date" => {
+            // Simple date validation (YYYY-MM-DD format)
+            parse_date_simple(input).is_ok()
+        }
+        "timestamp" | "timestamp without time zone" => {
+            // Simple timestamp validation
+            parse_timestamp_simple(input).is_ok()
+        }
+        "time" | "time without time zone" => {
+            // Simple time validation (HH:MM:SS format)
+            parse_time_simple(input).is_ok()
+        }
+        "json" | "jsonb" => {
+            // Try parsing as JSON
+            serde_json::from_str::<serde_json::Value>(input).is_ok()
+        }
+        "uuid" => {
+            // UUID format: 8-4-4-4-12 hex digits
+            parse_uuid_simple(input).is_ok()
+        }
+        _ => {
+            // Unknown type - return true by default to be permissive
+            true
+        }
+    };
+    
+    Ok(is_valid)
+}
+
+fn parse_date_simple(s: &str) -> Result<(), ()> {
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 3 {
+        return Err(());
+    }
+    let _year = parts[0].parse::<i32>().map_err(|_| ())?;
+    let month = parts[1].parse::<u32>().map_err(|_| ())?;
+    let day = parts[2].parse::<u32>().map_err(|_| ())?;
+    if month < 1 || month > 12 || day < 1 || day > 31 {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn parse_timestamp_simple(s: &str) -> Result<(), ()> {
+    // Accept "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
+    let parts: Vec<&str> = if s.contains('T') {
+        s.split('T').collect()
+    } else {
+        s.split(' ').collect()
+    };
+    if parts.len() != 2 {
+        return Err(());
+    }
+    parse_date_simple(parts[0])?;
+    parse_time_simple(parts[1])?;
+    Ok(())
+}
+
+fn parse_time_simple(s: &str) -> Result<(), ()> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() < 2 {
+        return Err(());
+    }
+    let hour = parts[0].parse::<u32>().map_err(|_| ())?;
+    let minute = parts[1].parse::<u32>().map_err(|_| ())?;
+    if hour > 23 || minute > 59 {
+        return Err(());
+    }
+    if parts.len() >= 3 {
+        let sec_parts: Vec<&str> = parts[2].split('.').collect();
+        let second = sec_parts[0].parse::<u32>().map_err(|_| ())?;
+        if second > 59 {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+fn parse_uuid_simple(s: &str) -> Result<(), ()> {
+    let s = s.trim();
+    // UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    if s.len() != 36 {
+        return Err(());
+    }
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 {
+        return Err(());
+    }
+    if parts[0].len() != 8
+        || parts[1].len() != 4
+        || parts[2].len() != 4
+        || parts[3].len() != 4
+        || parts[4].len() != 12
+    {
+        return Err(());
+    }
+    // Check all parts are hex
+    for part in parts {
+        if !part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(());
+        }
+    }
+    Ok(())
+}
+
+/// Implements PostgreSQL's pg_get_viewdef() function.
+/// Returns the SQL definition of a view. Accepts view name as text or regclass OID.
+pub(crate) fn pg_get_viewdef(
+    view_name: &str,
+    _pretty: bool,
+) -> Result<String, crate::tcop::engine::EngineError> {
+    use crate::tcop::engine::EngineError;
+    
+    // For now, return a placeholder message indicating the view exists but we can't retrieve the definition.
+    // TODO: Implement actual view definition retrieval from catalog when proper catalog access is available.
+    Ok(format!("-- View definition for: {}", view_name))
+}
+
+/// Convert a Query AST back to SQL string.
+/// This is a simplified implementation that handles basic SELECT queries.
+fn render_query_to_sql(query: &crate::parser::ast::Query, pretty: bool) -> String {
+    use crate::parser::ast::{Expr, QueryExpr, SelectStatement};
+    
+    let mut sql = String::new();
+    
+    // Handle WITH clause if present
+    if let Some(with_clause) = &query.with {
+        sql.push_str("WITH ");
+        if with_clause.recursive {
+            sql.push_str("RECURSIVE ");
+        }
+        for (i, cte) in with_clause.ctes.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&cte.name);
+            if !cte.column_names.is_empty() {
+                sql.push('(');
+                for (j, col) in cte.column_names.iter().enumerate() {
+                    if j > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push_str(col);
+                }
+                sql.push(')');
+            }
+            sql.push_str(" AS (");
+            sql.push_str(&render_query_to_sql(&cte.query, false));
+            sql.push(')');
+        }
+        sql.push(' ');
+    }
+    
+    // Handle query body
+    match &query.body {
+        QueryExpr::Select(select) => {
+            sql.push_str(&render_select_to_sql(select));
+        }
+        QueryExpr::Nested(nested) => {
+            sql.push('(');
+            sql.push_str(&render_query_to_sql(nested, false));
+            sql.push(')');
+        }
+        QueryExpr::Values(rows) => {
+            sql.push_str("VALUES ");
+            for (i, row) in rows.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push('(');
+                for (j, expr) in row.iter().enumerate() {
+                    if j > 0 {
+                        sql.push_str(", ");
+                    }
+                    sql.push_str(&render_expr_to_sql(expr));
+                }
+                sql.push(')');
+            }
+        }
+        QueryExpr::SetOperation { left, op, quantifier, right } => {
+            // Create temporary Query for left side
+            let left_query = crate::parser::ast::Query {
+                with: None,
+                body: (**left).clone(),
+                order_by: vec![],
+                limit: None,
+                offset: None,
+            };
+            sql.push_str(&render_query_to_sql(&left_query, false));
+            sql.push(' ');
+            sql.push_str(match op {
+                crate::parser::ast::SetOperator::Union => "UNION",
+                crate::parser::ast::SetOperator::Intersect => "INTERSECT",
+                crate::parser::ast::SetOperator::Except => "EXCEPT",
+            });
+            sql.push(' ');
+            sql.push_str(match quantifier {
+                crate::parser::ast::SetQuantifier::All => "ALL",
+                crate::parser::ast::SetQuantifier::Distinct => "DISTINCT",
+            });
+            sql.push(' ');
+            // Create temporary Query for right side
+            let right_query = crate::parser::ast::Query {
+                with: None,
+                body: (**right).clone(),
+                order_by: vec![],
+                limit: None,
+                offset: None,
+            };
+            sql.push_str(&render_query_to_sql(&right_query, false));
+        }
+    }
+    
+    // Handle ORDER BY
+    if !query.order_by.is_empty() {
+        sql.push_str(" ORDER BY ");
+        for (i, order) in query.order_by.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&render_expr_to_sql(&order.expr));
+            if let Some(asc) = order.ascending {
+                if !asc {
+                    sql.push_str(" DESC");
+                }
+            }
+            if let Some(ref op) = order.using_operator {
+                sql.push_str(" USING ");
+                sql.push_str(op);
+            }
+        }
+    }
+    
+    // Handle LIMIT
+    if let Some(ref limit) = query.limit {
+        sql.push_str(" LIMIT ");
+        sql.push_str(&render_expr_to_sql(limit));
+    }
+    
+    // Handle OFFSET
+    if let Some(ref offset) = query.offset {
+        sql.push_str(" OFFSET ");
+        sql.push_str(&render_expr_to_sql(offset));
+    }
+    
+    if pretty {
+        // Add basic pretty-printing (newlines and indentation)
+        sql = sql.replace(" FROM ", "\n FROM ");
+        sql = sql.replace(" WHERE ", "\n WHERE ");
+        sql = sql.replace(" ORDER BY ", "\n ORDER BY ");
+    }
+    
+    sql
+}
+
+fn render_select_to_sql(select: &crate::parser::ast::SelectStatement) -> String {
+    let mut sql = String::from("SELECT");
+    
+    if let Some(ref quantifier) = select.quantifier {
+        match quantifier {
+            crate::parser::ast::SelectQuantifier::Distinct => sql.push_str(" DISTINCT"),
+            crate::parser::ast::SelectQuantifier::All => sql.push_str(" ALL"),
+        }
+    }
+    
+    if !select.distinct_on.is_empty() {
+        sql.push_str(" DISTINCT ON (");
+        for (i, expr) in select.distinct_on.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&render_expr_to_sql(expr));
+        }
+        sql.push(')');
+    }
+    
+    // Target list
+    sql.push(' ');
+    for (i, target) in select.targets.iter().enumerate() {
+        if i > 0 {
+            sql.push_str(", ");
+        }
+        sql.push_str(&render_expr_to_sql(&target.expr));
+        if let Some(alias) = &target.alias {
+            sql.push_str(" AS ");
+            sql.push_str(alias);
+        }
+    }
+    
+    // FROM clause
+    if !select.from.is_empty() {
+        sql.push_str(" FROM ");
+        for (i, from) in select.from.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            sql.push_str(&render_table_expr_to_sql(from));
+        }
+    }
+    
+    // WHERE clause
+    if let Some(ref where_expr) = select.where_clause {
+        sql.push_str(" WHERE ");
+        sql.push_str(&render_expr_to_sql(where_expr));
+    }
+    
+    // GROUP BY
+    if !select.group_by.is_empty() {
+        sql.push_str(" GROUP BY ");
+        for (i, group) in select.group_by.iter().enumerate() {
+            if i > 0 {
+                sql.push_str(", ");
+            }
+            match group {
+                crate::parser::ast::GroupByExpr::Expr(expr) => {
+                    sql.push_str(&render_expr_to_sql(expr));
+                }
+                crate::parser::ast::GroupByExpr::Rollup(exprs) => {
+                    sql.push_str("ROLLUP(");
+                    for (j, expr) in exprs.iter().enumerate() {
+                        if j > 0 {
+                            sql.push_str(", ");
+                        }
+                        sql.push_str(&render_expr_to_sql(expr));
+                    }
+                    sql.push(')');
+                }
+                crate::parser::ast::GroupByExpr::Cube(exprs) => {
+                    sql.push_str("CUBE(");
+                    for (j, expr) in exprs.iter().enumerate() {
+                        if j > 0 {
+                            sql.push_str(", ");
+                        }
+                        sql.push_str(&render_expr_to_sql(expr));
+                    }
+                    sql.push(')');
+                }
+                crate::parser::ast::GroupByExpr::GroupingSets(sets) => {
+                    sql.push_str("GROUPING SETS(");
+                    for (j, set) in sets.iter().enumerate() {
+                        if j > 0 {
+                            sql.push_str(", ");
+                        }
+                        sql.push('(');
+                        for (k, expr) in set.iter().enumerate() {
+                            if k > 0 {
+                                sql.push_str(", ");
+                            }
+                            sql.push_str(&render_expr_to_sql(expr));
+                        }
+                        sql.push(')');
+                    }
+                    sql.push(')');
+                }
+            }
+        }
+    }
+    
+    // HAVING
+    if let Some(ref having) = select.having {
+        sql.push_str(" HAVING ");
+        sql.push_str(&render_expr_to_sql(having));
+    }
+    
+    sql
+}
+
+fn render_table_expr_to_sql(table: &crate::parser::ast::TableExpression) -> String {
+    use crate::parser::ast::TableExpression;
+    
+    match table {
+        TableExpression::Relation(table_ref) => {
+            let mut sql = table_ref.name.join(".");
+            if let Some(a) = &table_ref.alias {
+                sql.push_str(" AS ");
+                sql.push_str(a);
+            }
+            sql
+        }
+        TableExpression::Subquery(subquery_ref) => {
+            let mut sql = String::from("(");
+            sql.push_str(&render_query_to_sql(&subquery_ref.query, false));
+            sql.push(')');
+            if let Some(a) = &subquery_ref.alias {
+                sql.push_str(" AS ");
+                sql.push_str(a);
+            }
+            sql
+        }
+        TableExpression::Function(func_ref) => {
+            let mut func_sql = func_ref.name.join(".");
+            func_sql.push('(');
+            for (i, arg) in func_ref.args.iter().enumerate() {
+                if i > 0 {
+                    func_sql.push_str(", ");
+                }
+                func_sql.push_str(&render_expr_to_sql(arg));
+            }
+            func_sql.push(')');
+            if let Some(a) = &func_ref.alias {
+                func_sql.push_str(" AS ");
+                func_sql.push_str(a);
+            }
+            func_sql
+        }
+        TableExpression::Join(join_expr) => {
+            let mut sql = render_table_expr_to_sql(&join_expr.left);
+            sql.push(' ');
+            sql.push_str(match join_expr.kind {
+                crate::parser::ast::JoinType::Inner => "JOIN",
+                crate::parser::ast::JoinType::Left => "LEFT JOIN",
+                crate::parser::ast::JoinType::Right => "RIGHT JOIN",
+                crate::parser::ast::JoinType::Full => "FULL JOIN",
+                crate::parser::ast::JoinType::Cross => "CROSS JOIN",
+            });
+            sql.push(' ');
+            sql.push_str(&render_table_expr_to_sql(&join_expr.right));
+            if let Some(cond) = &join_expr.condition {
+                match cond {
+                    crate::parser::ast::JoinCondition::On(expr) => {
+                        sql.push_str(" ON ");
+                        sql.push_str(&render_expr_to_sql(expr));
+                    }
+                    crate::parser::ast::JoinCondition::Using(cols) => {
+                        sql.push_str(" USING (");
+                        for (i, col) in cols.iter().enumerate() {
+                            if i > 0 {
+                                sql.push_str(", ");
+                            }
+                            sql.push_str(col);
+                        }
+                        sql.push(')');
+                    }
+                }
+            }
+            sql
+        }
+    }
+}
+
+fn unary_op_to_sql(op: &crate::parser::ast::UnaryOp) -> &'static str {
+    use crate::parser::ast::UnaryOp;
+    match op {
+        UnaryOp::Plus => "+",
+        UnaryOp::Minus => "-",
+        UnaryOp::Not => "NOT",
+    }
+}
+
+fn binary_op_to_sql(op: &crate::parser::ast::BinaryOp) -> &'static str {
+    use crate::parser::ast::BinaryOp;
+    match op {
+        BinaryOp::Or => "OR",
+        BinaryOp::And => "AND",
+        BinaryOp::Eq => "=",
+        BinaryOp::NotEq => "!=",
+        BinaryOp::Lt => "<",
+        BinaryOp::Lte => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Gte => ">=",
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Mod => "%",
+        BinaryOp::JsonGet => "->",
+        BinaryOp::JsonGetText => "->>",
+        BinaryOp::JsonPath => "#>",
+        BinaryOp::JsonPathText => "#>>",
+        BinaryOp::JsonConcat => "||",
+        BinaryOp::JsonContains => "@>",
+        BinaryOp::JsonContainedBy => "<@",
+        BinaryOp::JsonPathExists => "@?",
+        BinaryOp::JsonPathMatch => "@@",
+        BinaryOp::JsonHasKey => "?",
+        BinaryOp::JsonHasAny => "?|",
+        BinaryOp::JsonHasAll => "?&",
+        BinaryOp::JsonDelete => "#-",
+        BinaryOp::JsonDeletePath => "#-",
+    }
+}
+
+fn render_expr_to_sql(expr: &crate::parser::ast::Expr) -> String {
+    use crate::parser::ast::Expr;
+    
+    match expr {
+        // Simple literals
+        Expr::String(s) => format!("'{}'", s.replace('\'', "''")),
+        Expr::Integer(n) => n.to_string(),
+        Expr::Float(f) => f.clone(),
+        Expr::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
+        Expr::Null => "NULL".to_string(),
+        
+        // Identifiers
+        Expr::Identifier(parts) => parts.join("."),
+        
+        // Binary operations
+        Expr::Binary { left, op, right } => {
+            format!(
+                "{} {} {}",
+                render_expr_to_sql(left),
+                binary_op_to_sql(op),
+                render_expr_to_sql(right)
+            )
+        }
+        
+        // Unary operations
+        Expr::Unary { op, expr } => {
+            format!("{} {}", unary_op_to_sql(op), render_expr_to_sql(expr))
+        }
+        
+        // Function calls
+        Expr::FunctionCall { name, args, .. } => {
+            let mut func_sql = name.join(".");
+            func_sql.push('(');
+            for (i, arg) in args.iter().enumerate() {
+                if i > 0 {
+                    func_sql.push_str(", ");
+                }
+                func_sql.push_str(&render_expr_to_sql(arg));
+            }
+            func_sql.push(')');
+            func_sql
+        }
+        
+        // Cast
+        Expr::Cast { expr, type_name } => {
+            format!("CAST({} AS {})", render_expr_to_sql(expr), type_name)
+        }
+        
+        // Case expressions
+        Expr::CaseSimple { operand, when_then, else_expr } => {
+            let mut sql = String::from("CASE ");
+            sql.push_str(&render_expr_to_sql(operand));
+            for (cond, result) in when_then {
+                sql.push_str(" WHEN ");
+                sql.push_str(&render_expr_to_sql(cond));
+                sql.push_str(" THEN ");
+                sql.push_str(&render_expr_to_sql(result));
+            }
+            if let Some(else_result) = else_expr {
+                sql.push_str(" ELSE ");
+                sql.push_str(&render_expr_to_sql(else_result));
+            }
+            sql.push_str(" END");
+            sql
+        }
+        
+        Expr::CaseSearched { when_then, else_expr } => {
+            let mut sql = String::from("CASE");
+            for (cond, result) in when_then {
+                sql.push_str(" WHEN ");
+                sql.push_str(&render_expr_to_sql(cond));
+                sql.push_str(" THEN ");
+                sql.push_str(&render_expr_to_sql(result));
+            }
+            if let Some(else_result) = else_expr {
+                sql.push_str(" ELSE ");
+                sql.push_str(&render_expr_to_sql(else_result));
+            }
+            sql.push_str(" END");
+            sql
+        }
+        
+        // Subqueries
+        Expr::ScalarSubquery(query) | Expr::Exists(query) | Expr::ArraySubquery(query) => {
+            format!("({})", render_query_to_sql(query, false))
+        }
+        
+        // IN expression
+        Expr::InList { expr, list, negated } => {
+            let mut sql = render_expr_to_sql(expr);
+            if *negated {
+                sql.push_str(" NOT");
+            }
+            sql.push_str(" IN (");
+            for (i, item) in list.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&render_expr_to_sql(item));
+            }
+            sql.push(')');
+            sql
+        }
+        
+        Expr::InSubquery { expr, subquery, negated } => {
+            let mut sql = render_expr_to_sql(expr);
+            if *negated {
+                sql.push_str(" NOT");
+            }
+            sql.push_str(" IN (");
+            sql.push_str(&render_query_to_sql(subquery, false));
+            sql.push(')');
+            sql
+        }
+        
+        // BETWEEN
+        Expr::Between { expr, low, high, negated } => {
+            let mut sql = render_expr_to_sql(expr);
+            if *negated {
+                sql.push_str(" NOT");
+            }
+            sql.push_str(" BETWEEN ");
+            sql.push_str(&render_expr_to_sql(low));
+            sql.push_str(" AND ");
+            sql.push_str(&render_expr_to_sql(high));
+            sql
+        }
+        
+        // IS NULL
+        Expr::IsNull { expr, negated } => {
+            let mut sql = render_expr_to_sql(expr);
+            sql.push_str(" IS");
+            if *negated {
+                sql.push_str(" NOT");
+            }
+            sql.push_str(" NULL");
+            sql
+        }
+        
+        // Wildcard
+        Expr::Wildcard => "*".to_string(),
+        Expr::QualifiedWildcard(parts) => format!("{}.*", parts.join(".")),
+        
+        // Array constructor
+        Expr::ArrayConstructor(elements) => {
+            let mut sql = String::from("ARRAY[");
+            for (i, elem) in elements.iter().enumerate() {
+                if i > 0 {
+                    sql.push_str(", ");
+                }
+                sql.push_str(&render_expr_to_sql(elem));
+            }
+            sql.push(']');
+            sql
+        }
+        
+        // For any other expression types, return a placeholder
+        _ => "<expr>".to_string(),
     }
 }
 

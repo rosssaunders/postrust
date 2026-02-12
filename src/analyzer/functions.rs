@@ -100,6 +100,7 @@ const KNOWN_FUNCTIONS: &[(&str, usize, usize)] = &[
     ("extract", 2, 2),
     ("age", 1, 2),
     ("make_date", 3, 3),
+    ("make_time", 3, 3),
     ("make_timestamp", 6, 6),
     ("make_interval", 0, 7),
     // Array functions
@@ -148,6 +149,8 @@ const KNOWN_FUNCTIONS: &[(&str, usize, usize)] = &[
     ("urlencode", 1, 1),
     // Misc
     ("pg_typeof", 1, 1),
+    ("pg_input_is_valid", 2, 2),
+    ("gen_random_uuid", 0, 0),
     ("generate_series", 2, 3),
     ("generate_subscripts", 2, 3),
     ("row_number", 0, 0),
@@ -170,6 +173,7 @@ const KNOWN_FUNCTIONS: &[(&str, usize, usize)] = &[
     ("pg_backend_pid", 0, 0),
     ("pg_get_constraintdef", 1, 2),
     ("pg_get_indexdef", 1, 3),
+    ("pg_get_viewdef", 1, 2),
     ("pg_relation_size", 1, 1),
     ("pg_total_relation_size", 1, 1),
     ("obj_description", 1, 2),
