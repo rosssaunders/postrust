@@ -5224,3 +5224,143 @@ fn test_lateral_subquery() {
         assert_eq!(result.rows.len(), 3);
     });
 }
+
+// ── Tests for Phase 7: new built-in functions ──────────────────────────────────────────
+
+#[test]
+fn test_gen_random_uuid() {
+    let result = run("SELECT gen_random_uuid()");
+    assert_eq!(result.rows.len(), 1);
+    let uuid_str = result.rows[0][0].render();
+    // Check UUID format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    assert_eq!(uuid_str.len(), 36);
+    assert_eq!(uuid_str.chars().filter(|c| *c == '-').count(), 4);
+    let parts: Vec<&str> = uuid_str.split('-').collect();
+    assert_eq!(parts.len(), 5);
+    assert_eq!(parts[0].len(), 8);
+    assert_eq!(parts[1].len(), 4);
+    assert_eq!(parts[2].len(), 4);
+    assert_eq!(parts[3].len(), 4);
+    assert_eq!(parts[4].len(), 12);
+}
+
+#[test]
+fn test_make_time() {
+    let result = run("SELECT make_time(14, 30, 45.5)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "14:30:45.500000");
+}
+
+#[test]
+fn test_make_time_without_fractional_seconds() {
+    let result = run("SELECT make_time(8, 15, 30)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "08:15:30");
+}
+
+#[test]
+fn test_format_basic_string() {
+    let result = run("SELECT format('Hello %s', 'World')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "Hello World");
+}
+
+#[test]
+fn test_format_multiple_args() {
+    let result = run("SELECT format('Hello %s, you are %s', 'World', 'great')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "Hello World, you are great");
+}
+
+#[test]
+fn test_format_with_identifier_quoting() {
+    let result = run("SELECT format('CREATE TABLE %I (id int)', 'my_table')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "CREATE TABLE my_table (id int)");
+}
+
+#[test]
+fn test_format_with_literal_quoting() {
+    let result = run("SELECT format('INSERT INTO t VALUES (%L)', 'value''s')");
+    assert_eq!(result.rows.len(), 1);
+    // The input 'value''s' is parsed as the string "value's", then re-quoted with doubled quotes
+    assert_eq!(result.rows[0][0].render(), "INSERT INTO t VALUES ('value''s')");
+}
+
+#[test]
+fn test_format_with_literal_percent() {
+    let result = run("SELECT format('100%% complete')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "100% complete");
+}
+
+#[test]
+fn test_format_with_null() {
+    let result = run("SELECT format('Hello %s', NULL)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0].render(), "Hello ");
+}
+
+#[test]
+fn test_pg_input_is_valid_integer() {
+    let result = run("SELECT pg_input_is_valid('42', 'integer')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(true));
+}
+
+#[test]
+fn test_pg_input_is_valid_invalid_integer() {
+    let result = run("SELECT pg_input_is_valid('foo', 'integer')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(false));
+}
+
+#[test]
+fn test_pg_input_is_valid_float() {
+    let result = run("SELECT pg_input_is_valid('3.14', 'float')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(true));
+}
+
+#[test]
+fn test_pg_input_is_valid_boolean() {
+    let result = run("SELECT pg_input_is_valid('true', 'boolean')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(true));
+}
+
+#[test]
+fn test_pg_input_is_valid_date() {
+    let result = run("SELECT pg_input_is_valid('2024-01-15', 'date')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(true));
+}
+
+#[test]
+fn test_pg_input_is_valid_invalid_date() {
+    let result = run("SELECT pg_input_is_valid('2024-13-01', 'date')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(false));
+}
+
+#[test]
+fn test_pg_input_is_valid_json() {
+    let result = run("SELECT pg_input_is_valid('{\"a\": 1}', 'json')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(true));
+}
+
+#[test]
+fn test_pg_input_is_valid_invalid_json() {
+    let result = run("SELECT pg_input_is_valid('{not json}', 'json')");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Bool(false));
+}
+
+#[test]
+fn test_pg_get_viewdef() {
+    let result = run("SELECT pg_get_viewdef('myview')");
+    assert_eq!(result.rows.len(), 1);
+    // For now, it returns a placeholder comment
+    assert!(result.rows[0][0].render().contains("myview"));
+}
