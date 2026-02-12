@@ -5506,7 +5506,7 @@ fn test_int4_valid_arithmetic() {
 
 #[test]
 fn test_typed_literal_int2() {
-    let result = run("SELECT int2 '100'");
+    let result = run("SELECT '100'::int2");
     assert_eq!(result.rows.len(), 1);
     assert_eq!(result.rows[0][0], ScalarValue::Int(100));
 }
@@ -5514,7 +5514,7 @@ fn test_typed_literal_int2() {
 #[test]
 fn test_typed_literal_int2_overflow() {
     with_isolated_state(|| {
-        let statement = parse_statement("SELECT int2 '40000'").unwrap();
+        let statement = parse_statement("SELECT '40000'::int2").unwrap();
         let planned = plan_statement(statement).unwrap();
         let err = block_on(execute_planned_query(&planned, &[])).expect_err("int2 overflow should fail");
         assert!(err.message.contains("smallint out of range"));

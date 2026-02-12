@@ -24,7 +24,7 @@ pub const INT8_MAX: i64 = i64::MAX;
 
 /// Validate that a value is in int2 range
 pub fn validate_int2(value: i64) -> Result<i16, EngineError> {
-    if value < INT2_MIN || value > INT2_MAX {
+    if !(INT2_MIN..=INT2_MAX).contains(&value) {
         return Err(EngineError {
             message: "smallint out of range".to_string(),
         });
@@ -34,7 +34,7 @@ pub fn validate_int2(value: i64) -> Result<i16, EngineError> {
 
 /// Validate that a value is in int4 range
 pub fn validate_int4(value: i64) -> Result<i32, EngineError> {
-    if value < INT4_MIN || value > INT4_MAX {
+    if !(INT4_MIN..=INT4_MAX).contains(&value) {
         return Err(EngineError {
             message: "integer out of range".to_string(),
         });
