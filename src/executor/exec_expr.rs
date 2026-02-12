@@ -1318,9 +1318,6 @@ async fn window_frame_rows(
                 .skip(start_group)
                 .take(end_group.saturating_sub(start_group) + 1)
             {
-                if group_idx > peer_groups.len() - 1 {
-                    break;
-                }
                 for &pos_idx in group {
                     // Apply exclusion
                     if let Some(exclusion) = frame.exclusion {

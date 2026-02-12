@@ -3294,17 +3294,23 @@ impl Parser {
                 // OVER can be followed by:
                 // 1. Window name: OVER window_name
                 // 2. Window spec: OVER (...)
-                if matches!(self.current_kind(), TokenKind::Identifier(_)) 
-                    && !matches!(self.current_kind(), TokenKind::LParen)
+                if matches!(self.current_kind(), TokenKind::Identifier(_))
                 {
-                    // OVER window_name (no parentheses)
-                    let window_name = self.parse_identifier()?;
-                    Some(Box::new(WindowSpec {
-                        name: Some(window_name),
-                        partition_by: Vec::new(),
-                        order_by: Vec::new(),
-                        frame: None,
-                    }))
+                    // Check if next token is LParen - if not, this is OVER window_name
+                    let next_is_lparen = matches!(self.peek_nth_kind(1), Some(TokenKind::LParen));
+                    if !next_is_lparen {
+                        // OVER window_name (no parentheses)
+                        let window_name = self.parse_identifier()?;
+                        Some(Box::new(WindowSpec {
+                            name: Some(window_name),
+                            partition_by: Vec::new(),
+                            order_by: Vec::new(),
+                            frame: None,
+                        }))
+                    } else {
+                        // OVER (...)
+                        Some(Box::new(self.parse_window_spec()?))
+                    }
                 } else {
                     // OVER (...)
                     Some(Box::new(self.parse_window_spec()?))
