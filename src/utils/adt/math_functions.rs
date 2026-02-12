@@ -15,7 +15,7 @@ pub(crate) fn numeric_mod(
         (_, 0) => Err(EngineError {
             message: "division by zero".to_string(),
         }),
-        (a, b) => Ok(ScalarValue::Int(a % b)),
+        (a, b) => Ok(ScalarValue::Int(crate::utils::adt::int_arithmetic::int4_mod(a, b)?)),
     }
 }
 

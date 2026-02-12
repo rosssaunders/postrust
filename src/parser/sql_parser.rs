@@ -3474,9 +3474,9 @@ impl Parser {
         let base = self.parse_expr_type_word()?.to_ascii_lowercase();
         let normalized = match base.as_str() {
             "bool" | "boolean" => "boolean".to_string(),
-            // Integer types - normalize to appropriate internal type
-            "int2" | "smallint" => "int8".to_string(),
-            "int" | "integer" | "int4" => "int8".to_string(),
+            // Integer types - preserve specific types for overflow checking
+            "int2" | "smallint" => "int2".to_string(),
+            "int" | "integer" | "int4" => "int4".to_string(),
             "int8" | "bigint" => "int8".to_string(),
             // Float types - normalize to float8
             "float4" | "real" => "float8".to_string(),
@@ -6371,7 +6371,7 @@ mod tests {
         let select = as_select(&query);
         assert!(matches!(
             &select.targets[0].expr,
-            Expr::Cast { type_name, .. } if type_name == "int8"
+            Expr::Cast { type_name, .. } if type_name == "int2"
         ));
 
         let stmt = parse_statement("SELECT 1::smallint").expect("parse should succeed");
@@ -6381,7 +6381,7 @@ mod tests {
         let select = as_select(&query);
         assert!(matches!(
             &select.targets[0].expr,
-            Expr::Cast { type_name, .. } if type_name == "int8"
+            Expr::Cast { type_name, .. } if type_name == "int2"
         ));
 
         // int4 / integer
@@ -6392,7 +6392,7 @@ mod tests {
         let select = as_select(&query);
         assert!(matches!(
             &select.targets[0].expr,
-            Expr::Cast { type_name, .. } if type_name == "int8"
+            Expr::Cast { type_name, .. } if type_name == "int4"
         ));
 
         let stmt = parse_statement("SELECT 1::integer").expect("parse should succeed");
@@ -6402,7 +6402,7 @@ mod tests {
         let select = as_select(&query);
         assert!(matches!(
             &select.targets[0].expr,
-            Expr::Cast { type_name, .. } if type_name == "int8"
+            Expr::Cast { type_name, .. } if type_name == "int4"
         ));
 
         // int8 / bigint
@@ -6564,7 +6564,7 @@ mod tests {
         let select = as_select(&query);
         assert!(matches!(
             &select.targets[0].expr,
-            Expr::Cast { type_name, .. } if type_name == "int8[]"
+            Expr::Cast { type_name, .. } if type_name == "int4[]"
         ));
 
         let stmt = parse_statement("SELECT ARRAY['a','b']::text[]").expect("parse should succeed");
@@ -6585,7 +6585,7 @@ mod tests {
         let select = as_select(&query);
         assert!(matches!(
             &select.targets[0].expr,
-            Expr::Cast { type_name, .. } if type_name == "int8[][]"
+            Expr::Cast { type_name, .. } if type_name == "int4[][]"
         ));
     }
 

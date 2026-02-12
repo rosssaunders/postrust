@@ -58,11 +58,18 @@ proptest! {
             let mut session = PostgresSession::new();
             let sql = format!("SELECT {expr}");
             let out = session.run_sync([FrontendMessage::Query { sql }]);
-            prop_assert!(
-                !out.iter()
-                    .any(|msg| matches!(msg, BackendMessage::ErrorResponse { .. })),
-                "unexpected error response: {out:?}"
-            );
+            // Allow overflow errors (integer out of range), but not other errors
+            if out.iter().any(|msg| matches!(msg, BackendMessage::ErrorResponse { .. })) {
+                // Check that it's an overflow error
+                let has_overflow = out.iter().any(|msg| {
+                    if let BackendMessage::ErrorResponse { message, .. } = msg {
+                        message.contains("out of range") || message.contains("division by zero")
+                    } else {
+                        false
+                    }
+                });
+                prop_assert!(has_overflow, "unexpected error (not overflow): {out:?}");
+            }
             Ok(())
         })?;
     }

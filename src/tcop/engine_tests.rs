@@ -5364,3 +5364,187 @@ fn test_pg_get_viewdef() {
     // For now, it returns a placeholder comment
     assert!(result.rows[0][0].render().contains("myview"));
 }
+
+// Tests for integer overflow handling
+
+#[test]
+fn test_int2_cast_valid() {
+    let result = run("SELECT CAST(100 AS int2)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(100));
+}
+
+#[test]
+fn test_int2_cast_max() {
+    let result = run("SELECT CAST(32767 AS int2)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(32767));
+}
+
+#[test]
+fn test_int2_cast_min() {
+    let result = run("SELECT CAST(-32768 AS int2)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(-32768));
+}
+
+#[test]
+fn test_int2_cast_overflow_positive() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT CAST(32768 AS int2)").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int2 overflow should fail");
+        assert!(err.message.contains("smallint out of range"));
+    });
+}
+
+#[test]
+fn test_int2_cast_overflow_negative() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT CAST(-32769 AS int2)").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int2 overflow should fail");
+        assert!(err.message.contains("smallint out of range"));
+    });
+}
+
+#[test]
+fn test_int4_cast_valid() {
+    let result = run("SELECT CAST(1000000 AS int4)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(1000000));
+}
+
+#[test]
+fn test_int4_cast_max() {
+    let result = run("SELECT CAST(2147483647 AS int4)");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(2147483647));
+}
+
+#[test]
+fn test_int4_cast_overflow() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT CAST(2147483648 AS int4)").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int4 overflow should fail");
+        assert!(err.message.contains("integer out of range"));
+    });
+}
+
+#[test]
+fn test_int4_addition_overflow() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT 2147483647 + 1").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int4 addition overflow should fail");
+        assert!(err.message.contains("integer out of range"));
+    });
+}
+
+#[test]
+fn test_int4_subtraction_overflow() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT -2147483648 - 1").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int4 subtraction overflow should fail");
+        assert!(err.message.contains("integer out of range"));
+    });
+}
+
+#[test]
+fn test_int4_multiplication_overflow() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT 50000 * 50000").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int4 multiplication overflow should fail");
+        assert!(err.message.contains("integer out of range"));
+    });
+}
+
+#[test]
+fn test_int4_division_by_zero() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT 100 / 0").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("division by zero should fail");
+        assert!(err.message.contains("division by zero"));
+    });
+}
+
+#[test]
+fn test_int4_modulo_by_zero() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT 100 % 0").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("modulo by zero should fail");
+        assert!(err.message.contains("division by zero"));
+    });
+}
+
+#[test]
+fn test_int4_division_overflow() {
+    // -2147483648 / -1 causes overflow in two's complement
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT -2147483648 / -1").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int4 division overflow should fail");
+        assert!(err.message.contains("integer out of range"));
+    });
+}
+
+#[test]
+fn test_int4_valid_arithmetic() {
+    let result = run("SELECT 100 + 200, 500 - 300, 10 * 20, 100 / 5, 17 % 5");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(300));
+    assert_eq!(result.rows[0][1], ScalarValue::Int(200));
+    assert_eq!(result.rows[0][2], ScalarValue::Int(200));
+    assert_eq!(result.rows[0][3], ScalarValue::Int(20));
+    assert_eq!(result.rows[0][4], ScalarValue::Int(2));
+}
+
+#[test]
+fn test_typed_literal_int2() {
+    let result = run("SELECT '100'::int2");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(100));
+}
+
+#[test]
+fn test_typed_literal_int2_overflow() {
+    with_isolated_state(|| {
+        let statement = parse_statement("SELECT '40000'::int2").unwrap();
+        let planned = plan_statement(statement).unwrap();
+        let err = block_on(execute_planned_query(&planned, &[])).expect_err("int2 overflow should fail");
+        assert!(err.message.contains("smallint out of range"));
+    });
+}
+
+#[test]
+fn test_hex_literal() {
+    let result = run("SELECT 0x10");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(16));
+}
+
+#[test]
+fn test_octal_literal() {
+    let result = run("SELECT 0o10");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(8));
+}
+
+#[test]
+fn test_binary_literal() {
+    let result = run("SELECT 0b1010");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(10));
+}
+
+#[test]
+fn test_underscore_in_literal() {
+    let result = run("SELECT 1_000_000");
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], ScalarValue::Int(1000000));
+}
