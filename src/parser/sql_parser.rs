@@ -566,6 +566,11 @@ impl Parser {
     }
 
     fn parse_insert_statement(&mut self) -> Result<Statement, ParseError> {
+        let stmt = self.parse_insert_statement_after_keyword()?;
+        Ok(Statement::Insert(stmt))
+    }
+
+    fn parse_insert_statement_after_keyword(&mut self) -> Result<InsertStatement, ParseError> {
         self.expect_keyword(Keyword::Into, "expected INTO after INSERT")?;
         let table_name = self.parse_qualified_name()?;
         let table_alias = self.parse_insert_table_alias()?;
@@ -629,17 +634,22 @@ impl Parser {
             Vec::new()
         };
 
-        Ok(Statement::Insert(InsertStatement {
+        Ok(InsertStatement {
             table_name,
             table_alias,
             columns,
             source,
             on_conflict,
             returning,
-        }))
+        })
     }
 
     fn parse_update_statement(&mut self) -> Result<Statement, ParseError> {
+        let stmt = self.parse_update_statement_after_keyword()?;
+        Ok(Statement::Update(stmt))
+    }
+
+    fn parse_update_statement_after_keyword(&mut self) -> Result<UpdateStatement, ParseError> {
         let table_name = self.parse_qualified_name()?;
         self.expect_keyword(Keyword::Set, "expected SET in UPDATE statement")?;
 
@@ -664,16 +674,21 @@ impl Parser {
             Vec::new()
         };
 
-        Ok(Statement::Update(UpdateStatement {
+        Ok(UpdateStatement {
             table_name,
             assignments,
             from,
             where_clause,
             returning,
-        }))
+        })
     }
 
     fn parse_delete_statement(&mut self) -> Result<Statement, ParseError> {
+        let stmt = self.parse_delete_statement_after_keyword()?;
+        Ok(Statement::Delete(stmt))
+    }
+
+    fn parse_delete_statement_after_keyword(&mut self) -> Result<DeleteStatement, ParseError> {
         self.expect_keyword(Keyword::From, "expected FROM after DELETE")?;
         let table_name = self.parse_qualified_name()?;
         let using = if self.consume_keyword(Keyword::Using) {
@@ -692,12 +707,12 @@ impl Parser {
             Vec::new()
         };
 
-        Ok(Statement::Delete(DeleteStatement {
+        Ok(DeleteStatement {
             table_name,
             using,
             where_clause,
             returning,
-        }))
+        })
     }
 
     fn parse_merge_statement(&mut self) -> Result<Statement, ParseError> {
@@ -2269,6 +2284,22 @@ impl Parser {
             return Ok(QueryExpr::Values(all_rows));
         }
 
+        // Support DML statements (INSERT/UPDATE/DELETE) in CTEs
+        if self.consume_keyword(Keyword::Insert) {
+            let stmt = self.parse_insert_statement_after_keyword()?;
+            return Ok(QueryExpr::Insert(Box::new(stmt)));
+        }
+
+        if self.consume_keyword(Keyword::Update) {
+            let stmt = self.parse_update_statement_after_keyword()?;
+            return Ok(QueryExpr::Update(Box::new(stmt)));
+        }
+
+        if self.consume_keyword(Keyword::Delete) {
+            let stmt = self.parse_delete_statement_after_keyword()?;
+            return Ok(QueryExpr::Delete(Box::new(stmt)));
+        }
+
         if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
             let nested = self.parse_query()?;
             self.expect_token(
@@ -2278,7 +2309,7 @@ impl Parser {
             return Ok(QueryExpr::Nested(Box::new(nested)));
         }
 
-        Err(self.error_at_current("expected query term (SELECT, VALUES, or parenthesized query)"))
+        Err(self.error_at_current("expected query term (SELECT, VALUES, INSERT, UPDATE, DELETE, or parenthesized query)"))
     }
 
     fn parse_select_after_select_keyword(&mut self) -> Result<SelectStatement, ParseError> {

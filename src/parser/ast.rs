@@ -628,6 +628,9 @@ pub enum QueryExpr {
     },
     Nested(Box<Query>),
     Values(Vec<Vec<Expr>>),
+    Insert(Box<InsertStatement>),
+    Update(Box<UpdateStatement>),
+    Delete(Box<DeleteStatement>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
