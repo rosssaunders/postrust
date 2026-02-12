@@ -12,8 +12,8 @@ use crate::tcop::engine::{EngineError, with_ext_read};
 use crate::utils::adt::datetime::{
     JustifyMode, current_date_string, current_timestamp_string, eval_age, eval_date_add_sub,
     eval_date_function, eval_date_trunc, eval_extract_or_date_part, eval_isfinite,
-    eval_justify_interval, eval_make_interval, eval_timestamp_function, eval_to_date_with_format,
-    eval_to_timestamp, eval_to_timestamp_with_format,
+    eval_justify_interval, eval_make_interval, eval_make_time, eval_timestamp_function,
+    eval_to_date_with_format, eval_to_timestamp, eval_to_timestamp_with_format,
 };
 use crate::utils::adt::json::{
     eval_array_to_json, eval_http_delete, eval_http_get, eval_http_get_with_params, eval_http_head,
@@ -29,13 +29,14 @@ use crate::utils::adt::math_functions::{
 };
 use crate::utils::adt::misc::{
     array_value_matches, compare_values_for_predicate, count_nonnulls, count_nulls, eval_extremum,
-    eval_regexp_match, eval_regexp_replace, eval_regexp_split_to_array, parse_bool_scalar,
-    parse_i64_scalar, quote_ident, quote_literal, quote_nullable, rand_f64,
+    eval_regexp_match, eval_regexp_replace, eval_regexp_split_to_array, gen_random_uuid,
+    parse_bool_scalar, parse_i64_scalar, pg_get_viewdef, pg_input_is_valid, quote_ident,
+    quote_literal, quote_nullable, rand_f64,
 };
 use crate::utils::adt::string_functions::{
-    TrimMode, ascii_code, chr_from_code, decode_bytes, encode_bytes, find_substring_position,
-    initcap_string, left_chars, md5_hex, overlay_text, pad_string, right_chars, sha256_hex,
-    substring_chars, trim_text,
+    TrimMode, ascii_code, chr_from_code, decode_bytes, encode_bytes, eval_format,
+    find_substring_position, initcap_string, left_chars, md5_hex, overlay_text, pad_string,
+    right_chars, sha256_hex, substring_chars, trim_text,
 };
 
 fn require_http_extension() -> Result<(), EngineError> {
@@ -642,6 +643,7 @@ pub(crate) async fn eval_scalar_function(
         "factorial" if args.len() == 1 => eval_factorial(&args[0]),
         "pi" if args.is_empty() => Ok(ScalarValue::Float(std::f64::consts::PI)),
         "random" if args.is_empty() => Ok(ScalarValue::Float(rand_f64())),
+        "gen_random_uuid" if args.is_empty() => Ok(ScalarValue::Text(gen_random_uuid())),
         "mod" if args.len() == 2 => {
             if args.iter().any(|a| matches!(a, ScalarValue::Null)) {
                 return Ok(ScalarValue::Null);
@@ -786,6 +788,14 @@ pub(crate) async fn eval_scalar_function(
             }
             Ok(ScalarValue::Text(quote_ident(&args[0].render())))
         }
+        "format" if !args.is_empty() => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let format_str = args[0].render();
+            let format_args = &args[1..];
+            Ok(ScalarValue::Text(eval_format(&format_str, format_args)?))
+        }
         "quote_nullable" if args.len() == 1 => Ok(ScalarValue::Text(quote_nullable(&args[0]))),
         "md5" if args.len() == 1 => {
             if matches!(args[0], ScalarValue::Null) {
@@ -853,6 +863,15 @@ pub(crate) async fn eval_scalar_function(
             };
             Ok(ScalarValue::Text(type_name.to_string()))
         }
+        "pg_input_is_valid" if args.len() == 2 => {
+            if matches!(args[0], ScalarValue::Null) || matches!(args[1], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let input = args[0].render();
+            let type_name = args[1].render();
+            let is_valid = pg_input_is_valid(&input, &type_name)?;
+            Ok(ScalarValue::Bool(is_valid))
+        }
         "pg_column_size" if args.len() == 1 => {
             let size = match &args[0] {
                 ScalarValue::Null => 0i64,
@@ -878,6 +897,21 @@ pub(crate) async fn eval_scalar_function(
             Ok(ScalarValue::Int(size))
         }
         "pg_get_userbyid" if args.len() == 1 => Ok(ScalarValue::Text("postrust".to_string())),
+        "pg_get_viewdef" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let view_name = args[0].render();
+            Ok(ScalarValue::Text(pg_get_viewdef(&view_name, false)?))
+        }
+        "pg_get_viewdef" if args.len() == 2 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let view_name = args[0].render();
+            let pretty = parse_bool_scalar(&args[1], "pg_get_viewdef() pretty")?;
+            Ok(ScalarValue::Text(pg_get_viewdef(&view_name, pretty)?))
+        }
         "has_table_privilege" if args.len() == 2 || args.len() == 3 => Ok(ScalarValue::Bool(true)),
         "has_column_privilege" if args.len() == 3 || args.len() == 4 => Ok(ScalarValue::Bool(true)),
         "has_schema_privilege" if args.len() == 2 || args.len() == 3 => Ok(ScalarValue::Bool(true)),
@@ -898,6 +932,15 @@ pub(crate) async fn eval_scalar_function(
             let m = parse_i64_scalar(&args[1], "make_date() month")? as u32;
             let d = parse_i64_scalar(&args[2], "make_date() day")? as u32;
             Ok(ScalarValue::Text(format!("{:04}-{:02}-{:02}", y, m, d)))
+        }
+        "make_time" if args.len() == 3 => {
+            if args.iter().any(|a| matches!(a, ScalarValue::Null)) {
+                return Ok(ScalarValue::Null);
+            }
+            let hour = parse_i64_scalar(&args[0], "make_time() hour")?;
+            let minute = parse_i64_scalar(&args[1], "make_time() minute")?;
+            let second = coerce_to_f64(&args[2], "make_time() second")?;
+            eval_make_time(hour, minute, second)
         }
         "make_timestamp" if args.len() == 6 => {
             if args.iter().any(|a| matches!(a, ScalarValue::Null)) {

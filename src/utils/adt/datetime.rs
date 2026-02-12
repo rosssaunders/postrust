@@ -704,3 +704,43 @@ fn civil_from_days(days: i64) -> DateValue {
         day: day as u32,
     }
 }
+
+/// Make a time value from hour, minute, and second.
+/// Matches PostgreSQL's make_time(hour, min, sec) function.
+pub(crate) fn eval_make_time(
+    hour: i64,
+    minute: i64,
+    second: f64,
+) -> Result<ScalarValue, EngineError> {
+    // Validate inputs like PostgreSQL does
+    if !(0..=23).contains(&hour) {
+        return Err(EngineError {
+            message: format!("hour {} is out of range 0..23", hour),
+        });
+    }
+    if !(0..=59).contains(&minute) {
+        return Err(EngineError {
+            message: format!("minute {} is out of range 0..59", minute),
+        });
+    }
+    if !(0.0..60.0).contains(&second) {
+        return Err(EngineError {
+            message: format!("second {} is out of range 0..<60", second),
+        });
+    }
+
+    let sec = second.trunc() as u32;
+    let frac = ((second - second.trunc()) * 1_000_000.0).round() as u32;
+
+    if frac == 0 {
+        Ok(ScalarValue::Text(format!(
+            "{:02}:{:02}:{:02}",
+            hour, minute, sec
+        )))
+    } else {
+        Ok(ScalarValue::Text(format!(
+            "{:02}:{:02}:{:02}.{:06}",
+            hour, minute, sec, frac
+        )))
+    }
+}
