@@ -1798,9 +1798,32 @@ pub(crate) fn eval_binary(
         JsonPathText => eval_json_path_operator(left, right, true),
         JsonPathExists => eval_json_path_predicate_operator(left, right, false),
         JsonPathMatch => eval_json_path_predicate_operator(left, right, true),
-        JsonConcat => eval_json_concat_operator(left, right),
-        JsonContains => eval_json_contains_operator(left, right),
-        JsonContainedBy => eval_json_contained_by_operator(left, right),
+        JsonConcat => {
+            // || operator: array concat if both arrays, else JSON/string concat
+            if matches!((&left, &right), (ScalarValue::Array(_), _) | (_, ScalarValue::Array(_))) {
+                eval_array_concat(left, right)
+            } else {
+                eval_json_concat_operator(left, right)
+            }
+        }
+        JsonContains | ArrayContains => {
+            // @> operator: array contains if both arrays, else JSON contains
+            if matches!((&left, &right), (ScalarValue::Array(_), ScalarValue::Array(_))) {
+                eval_array_contains(left, right)
+            } else {
+                eval_json_contains_operator(left, right)
+            }
+        }
+        JsonContainedBy | ArrayContainedBy => {
+            // <@ operator
+            if matches!((&left, &right), (ScalarValue::Array(_), ScalarValue::Array(_))) {
+                eval_array_contains(right, left)
+            } else {
+                eval_json_contained_by_operator(left, right)
+            }
+        }
+        ArrayOverlap => eval_array_overlap(left, right),
+        ArrayConcat => eval_array_concat(left, right),
         JsonHasKey => eval_json_has_key_operator(left, right),
         JsonHasAny => eval_json_has_any_all_operator(left, right, true),
         JsonHasAll => eval_json_has_any_all_operator(left, right, false),
@@ -2557,4 +2580,45 @@ fn eval_array_slice(
     
     let sliced = elements[start_idx..end_idx].to_vec();
     Ok(ScalarValue::Array(sliced))
+}
+
+/// Concatenate two arrays (or an array and a scalar).
+fn eval_array_concat(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, EngineError> {
+    let mut result = match left {
+        ScalarValue::Array(elems) => elems,
+        other => vec![other],
+    };
+    match right {
+        ScalarValue::Array(elems) => result.extend(elems),
+        other => result.push(other),
+    }
+    Ok(ScalarValue::Array(result))
+}
+
+/// Check if left array contains all elements of right array (`@>`).
+fn eval_array_contains(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, EngineError> {
+    let left_elems = match left {
+        ScalarValue::Array(elems) => elems,
+        _ => return Ok(ScalarValue::Bool(false)),
+    };
+    let right_elems = match right {
+        ScalarValue::Array(elems) => elems,
+        _ => return Ok(ScalarValue::Bool(false)),
+    };
+    let contains_all = right_elems.iter().all(|r| left_elems.contains(r));
+    Ok(ScalarValue::Bool(contains_all))
+}
+
+/// Check if two arrays share any elements (`&&`).
+fn eval_array_overlap(left: ScalarValue, right: ScalarValue) -> Result<ScalarValue, EngineError> {
+    let left_elems = match left {
+        ScalarValue::Array(elems) => elems,
+        _ => return Ok(ScalarValue::Bool(false)),
+    };
+    let right_elems = match right {
+        ScalarValue::Array(elems) => elems,
+        _ => return Ok(ScalarValue::Bool(false)),
+    };
+    let overlaps = left_elems.iter().any(|l| right_elems.contains(l));
+    Ok(ScalarValue::Bool(overlaps))
 }

@@ -271,7 +271,10 @@ fn infer_expr_type_oid(
                 | BinaryOp::JsonPathMatch
                 | BinaryOp::JsonHasKey
                 | BinaryOp::JsonHasAny
-                | BinaryOp::JsonHasAll => PG_BOOL_OID,
+                | BinaryOp::JsonHasAll
+                | BinaryOp::ArrayContains
+                | BinaryOp::ArrayContainedBy
+                | BinaryOp::ArrayOverlap => PG_BOOL_OID,
                 BinaryOp::JsonGet
                 | BinaryOp::JsonGetText
                 | BinaryOp::JsonPath
@@ -279,6 +282,7 @@ fn infer_expr_type_oid(
                 | BinaryOp::JsonConcat
                 | BinaryOp::JsonDelete
                 | BinaryOp::JsonDeletePath => PG_TEXT_OID,
+                BinaryOp::ArrayConcat => left_oid,
                 BinaryOp::Add => {
                     if (left_oid == PG_DATE_OID || left_oid == PG_TIMESTAMP_OID)
                         && right_oid == PG_INT8_OID

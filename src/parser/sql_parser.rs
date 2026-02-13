@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::parser::ast::{
     AlterRoleStatement, AlterSequenceAction, AlterSequenceStatement, AlterTableAction,
-    AlterTableStatement, AlterViewAction, AlterViewStatement, Assignment, BinaryOp,
+    AlterTableStatement, AlterViewAction, AlterViewStatement, Assignment, AssignmentSubscript, BinaryOp,
     ColumnDefinition, CommonTableExpr, ComparisonQuantifier, ConflictTarget, CopyDirection,
     CopyFormat, CopyOptions, CopyStatement, CreateExtensionStatement, CreateFunctionStatement,
     CreateIndexStatement, CreateRoleStatement, CreateSchemaStatement, CreateSequenceStatement,
@@ -587,8 +587,10 @@ impl Parser {
         let table_alias = self.parse_insert_table_alias()?;
         let columns = if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
             let mut out = vec![self.parse_identifier()?];
+            self.skip_array_subscripts();
             while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                 out.push(self.parse_identifier()?);
+                self.skip_array_subscripts();
             }
             self.expect_token(
                 |k| matches!(k, TokenKind::RParen),
@@ -1647,12 +1649,41 @@ impl Parser {
 
     fn parse_assignment(&mut self) -> Result<Assignment, ParseError> {
         let column = self.parse_identifier()?;
+        let mut subscripts = Vec::new();
+        // Parse optional array subscripts: col[idx], col[start:end], etc.
+        while self.consume_if(|k| matches!(k, TokenKind::LBracket)) {
+            // Check for empty-start slice [:end]
+            if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::Colon)) {
+                self.advance(); // consume ':'
+                let end_expr = if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::RBracket)) {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
+                self.expect_token(|k| matches!(k, TokenKind::RBracket), "expected ']'")?;
+                subscripts.push(AssignmentSubscript::Slice(None, end_expr));
+            } else {
+                let first = self.parse_expr()?;
+                if self.consume_if(|k| matches!(k, TokenKind::Colon)) {
+                    let end_expr = if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::RBracket)) {
+                        None
+                    } else {
+                        Some(self.parse_expr()?)
+                    };
+                    self.expect_token(|k| matches!(k, TokenKind::RBracket), "expected ']'")?;
+                    subscripts.push(AssignmentSubscript::Slice(Some(first), end_expr));
+                } else {
+                    self.expect_token(|k| matches!(k, TokenKind::RBracket), "expected ']'")?;
+                    subscripts.push(AssignmentSubscript::Index(first));
+                }
+            }
+        }
         self.expect_token(
             |k| matches!(k, TokenKind::Equal),
             "expected '=' in assignment",
         )?;
         let value = self.parse_expr()?;
-        Ok(Assignment { column, value })
+        Ok(Assignment { column, subscripts, value })
     }
 
     fn parse_insert_values_row(&mut self) -> Result<Vec<Expr>, ParseError> {
@@ -2043,6 +2074,27 @@ impl Parser {
             "bigserial" | "serial8" => TypeName::BigSerial,
             "numeric" | "decimal" => TypeName::Numeric,
             "money" => TypeName::Numeric, // treat money as numeric for now
+            "name" => TypeName::Name,
+            // PostgreSQL underscore-prefixed array type aliases
+            other if other.starts_with('_') => {
+                // _int2 => int2[], _text => text[], etc.
+                let inner = &other[1..];
+                let inner_ty = match inner {
+                    "bool" | "boolean" => TypeName::Bool,
+                    "int2" | "smallint" => TypeName::Int2,
+                    "int4" | "integer" | "int" => TypeName::Int4,
+                    "int8" | "bigint" => TypeName::Int8,
+                    "float4" | "real" => TypeName::Float4,
+                    "float8" => TypeName::Float8,
+                    "text" | "varchar" | "char" => TypeName::Text,
+                    "name" => TypeName::Name,
+                    "numeric" | "decimal" => TypeName::Numeric,
+                    _ => {
+                        return Err(self.error_at_current(&format!("unsupported type name \"{other}\"")));
+                    }
+                };
+                return Ok(TypeName::Array(Box::new(inner_ty)));
+            }
             other => {
                 return Err(self.error_at_current(&format!("unsupported type name \"{other}\"")));
             }
@@ -2069,7 +2121,17 @@ impl Parser {
             }
         }
 
-        Ok(ty)
+        // Handle array type suffix: int4[], text[][], etc.
+        let mut result_ty = ty;
+        while self.consume_if(|k| matches!(k, TokenKind::LBracket)) {
+            self.expect_token(
+                |k| matches!(k, TokenKind::RBracket),
+                "expected ']' after '[' in array type",
+            )?;
+            result_ty = TypeName::Array(Box::new(result_ty));
+        }
+
+        Ok(result_ty)
     }
 
     fn parse_query(&mut self) -> Result<Query, ParseError> {
@@ -2803,48 +2865,64 @@ impl Parser {
                 }
                 self.advance(); // consume '['
                 
-                // Parse first expression
-                let first_expr = self.parse_expr()?;
-                
-                // Check for slice syntax ':'
+                // Check for empty-start slice [:end] or [:]
                 if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::Colon)) {
                     self.advance(); // consume ':'
-                    
-                    // Check for end expression
-                    if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::RBracket)) {
-                        // arr[start:]
-                        self.expect_token(
-                            |k| matches!(k, TokenKind::RBracket),
-                            "expected ']' after array slice",
-                        )?;
-                        lhs = Expr::ArraySlice {
-                            expr: Box::new(lhs),
-                            start: Some(Box::new(first_expr)),
-                            end: None,
-                        };
+                    let end_expr = if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::RBracket)) {
+                        None // [:]
                     } else {
-                        // arr[start:end]
-                        let end_expr = self.parse_expr()?;
+                        Some(Box::new(self.parse_expr()?)) // [:end]
+                    };
+                    self.expect_token(|k| matches!(k, TokenKind::RBracket), "expected ']' after array slice")?;
+                    lhs = Expr::ArraySlice {
+                        expr: Box::new(lhs),
+                        start: None,
+                        end: end_expr,
+                    };
+                } else {
+                    // Parse first expression
+                    let first_expr = self.parse_expr()?;
+                    
+                    // Check for slice syntax ':'
+                    if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::Colon)) {
+                        self.advance(); // consume ':'
+                        
+                        // Check for end expression
+                        if self.peek_nth_kind(0).is_some_and(|k| matches!(k, TokenKind::RBracket)) {
+                            // arr[start:]
+                            self.expect_token(
+                                |k| matches!(k, TokenKind::RBracket),
+                                "expected ']' after array slice",
+                            )?;
+                            lhs = Expr::ArraySlice {
+                                expr: Box::new(lhs),
+                                start: Some(Box::new(first_expr)),
+                                end: None,
+                            };
+                        } else {
+                            // arr[start:end]
+                            let end_expr = self.parse_expr()?;
+                            self.expect_token(
+                                |k| matches!(k, TokenKind::RBracket),
+                                "expected ']' after array slice",
+                            )?;
+                            lhs = Expr::ArraySlice {
+                                expr: Box::new(lhs),
+                                start: Some(Box::new(first_expr)),
+                                end: Some(Box::new(end_expr)),
+                            };
+                        }
+                    } else {
+                        // Simple subscript: arr[index]
                         self.expect_token(
                             |k| matches!(k, TokenKind::RBracket),
-                            "expected ']' after array slice",
+                            "expected ']' after array subscript",
                         )?;
-                        lhs = Expr::ArraySlice {
+                        lhs = Expr::ArraySubscript {
                             expr: Box::new(lhs),
-                            start: Some(Box::new(first_expr)),
-                            end: Some(Box::new(end_expr)),
+                            index: Box::new(first_expr),
                         };
                     }
-                } else {
-                    // Simple subscript: arr[index]
-                    self.expect_token(
-                        |k| matches!(k, TokenKind::RBracket),
-                        "expected ']' after array subscript",
-                    )?;
-                    lhs = Expr::ArraySubscript {
-                        expr: Box::new(lhs),
-                        index: Box::new(first_expr),
-                    };
                 }
                 continue;
             }
@@ -3759,6 +3837,27 @@ impl Parser {
             // System types
             "regclass" => "regclass".to_string(),
             "oid" => "oid".to_string(),
+            "name" => "text".to_string(),
+            // PostgreSQL underscore-prefixed array type aliases
+            other if other.starts_with('_') => {
+                let inner = &other[1..];
+                let inner_norm = match inner {
+                    "bool" | "boolean" => "boolean",
+                    "int2" | "smallint" => "int4",
+                    "int4" | "integer" | "int" => "int4",
+                    "int8" | "bigint" => "int8",
+                    "float4" | "real" => "float8",
+                    "float8" => "float8",
+                    "numeric" | "decimal" => "float8",
+                    "text" | "varchar" | "char" | "name" => "text",
+                    _ => {
+                        return Err(
+                            self.error_at_current(&format!("unsupported cast type name \"{other}\""))
+                        );
+                    }
+                };
+                format!("{}[]", inner_norm)
+            }
             other => {
                 return Err(
                     self.error_at_current(&format!("unsupported cast type name \"{other}\""))
@@ -3979,6 +4078,22 @@ impl Parser {
                 Ok("interval".to_string())
             }
             _ => Err(self.error_at_current("expected identifier")),
+        }
+    }
+
+    /// Skip optional array subscripts like [1], [1:2], [1:2][3:4], etc.
+    /// Used in INSERT column lists where subscripts are accepted but we ignore them.
+    fn skip_array_subscripts(&mut self) {
+        while self.consume_if(|k| matches!(k, TokenKind::LBracket)) {
+            let mut depth = 1usize;
+            while depth > 0 {
+                match self.current_kind() {
+                    TokenKind::LBracket => { depth += 1; self.advance(); }
+                    TokenKind::RBracket => { depth -= 1; self.advance(); }
+                    TokenKind::Eof => break,
+                    _ => self.advance(),
+                }
+            }
         }
     }
 
@@ -4213,6 +4328,7 @@ impl Parser {
             TokenKind::Operator(op) if op == "?|" => Some((BinaryOp::JsonHasAny, 5, 6)),
             TokenKind::Operator(op) if op == "?&" => Some((BinaryOp::JsonHasAll, 5, 6)),
             TokenKind::Operator(op) if op == "#-" => Some((BinaryOp::JsonDeletePath, 11, 12)),
+            TokenKind::Operator(op) if op == "&&" => Some((BinaryOp::ArrayOverlap, 5, 6)),
             _ => None,
         }
     }
