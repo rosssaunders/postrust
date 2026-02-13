@@ -235,14 +235,14 @@ fn postgresql_compatibility_suite() {
                         continue;
                     }
                     stmt_err += 1;
-                    if error_messages.len() < 3 {
-                        error_messages.push(format!("SQL: {}... => {}", &statement[..statement.len().min(60)], error));
+                    if error_messages.len() < 200 {
+                        error_messages.push(format!("SQL: {}... => {}", &statement[..statement.len().min(80)], error));
                     }
                 }
                 Err(_panic) => {
                     // Statement caused a panic — treat as error and recreate session
                     stmt_err += 1;
-                    if error_messages.len() < 3 {
+                    if error_messages.len() < 200 {
                         error_messages.push(format!("PANIC in: {}...", &statement[..statement.len().min(60)]));
                     }
                     session = PostgresSession::new();

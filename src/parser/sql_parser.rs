@@ -274,6 +274,59 @@ impl Parser {
         if unique {
             return Err(self.error_at_current("expected INDEX after CREATE UNIQUE"));
         }
+        // CREATE RECURSIVE VIEW name (columns) AS ...
+        // Syntactic sugar for: CREATE VIEW name AS WITH RECURSIVE name(columns) AS (...) SELECT * FROM name
+        if self.consume_keyword(Keyword::Recursive) {
+            self.expect_keyword(Keyword::View, "expected VIEW after CREATE RECURSIVE")?;
+            let name = self.parse_qualified_name()?;
+            let column_aliases = self.parse_identifier_list_in_parens()?;
+            self.expect_keyword(Keyword::As, "expected AS in CREATE RECURSIVE VIEW")?;
+            // Parse the CTE body (non-recursive-term UNION ALL recursive-term)
+            let cte_body = self.parse_query()?;
+            let view_name_str = name.last().cloned().unwrap_or_default();
+            // Build: WITH RECURSIVE name(columns) AS (cte_body) SELECT * FROM name
+            let with_query = Query {
+                with: Some(WithClause {
+                    recursive: true,
+                    ctes: vec![CommonTableExpr {
+                        name: view_name_str.clone(),
+                        column_names: column_aliases.clone(),
+                        materialized: None,
+                        query: cte_body,
+                        search_clause: None,
+                        cycle_clause: None,
+                    }],
+                }),
+                body: QueryExpr::Select(SelectStatement {
+                    quantifier: Some(SelectQuantifier::All),
+                    targets: vec![SelectItem {
+                        expr: Expr::Wildcard,
+                        alias: None,
+                    }],
+                    from: vec![TableExpression::Relation(TableRef {
+                        name: vec![view_name_str],
+                        alias: None,
+                    })],
+                    where_clause: None,
+                    group_by: Vec::new(),
+                    having: None,
+                    window_definitions: Vec::new(),
+                    distinct_on: Vec::new(),
+                }),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+            };
+            return Ok(Statement::CreateView(CreateViewStatement {
+                name,
+                or_replace,
+                materialized: false,
+                with_data: true,
+                query: with_query,
+                if_not_exists: false,
+                column_aliases: Vec::new(), // columns are in the CTE itself
+            }));
+        }
         // Parse optional TEMP/TEMPORARY early so it's available for both VIEW and TABLE
         let temporary_early = self.consume_keyword(Keyword::Temporary) || self.consume_keyword(Keyword::Temp);
         if self.consume_keyword(Keyword::View) {
@@ -2736,6 +2789,7 @@ impl Parser {
         if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
             if self.peek_keyword(Keyword::Select)
                 || self.peek_keyword(Keyword::Values)
+                || self.peek_keyword(Keyword::With)
                 || matches!(self.current_kind(), TokenKind::LParen)
             {
                 let query = self.parse_query()?;

@@ -59,8 +59,23 @@ pub(crate) fn execute_query_with_outer<'a>(
                         execute_query_with_outer(&cte.query, params, outer_scope).await
                     })
                     .await?;
+                    let columns = if !cte.column_names.is_empty() {
+                        if cte.column_names.len() != cte_result.columns.len() {
+                            return Err(EngineError {
+                                message: format!(
+                                    "WITH query \"{}\" has {} columns available but {} columns specified",
+                                    cte.name,
+                                    cte_result.columns.len(),
+                                    cte.column_names.len()
+                                ),
+                            });
+                        }
+                        cte.column_names.clone()
+                    } else {
+                        cte_result.columns.clone()
+                    };
                     CteBinding {
-                        columns: cte_result.columns.clone(),
+                        columns,
                         rows: cte_result.rows.clone(),
                     }
                 };
@@ -114,7 +129,21 @@ async fn evaluate_recursive_cte_binding(
         execute_query_expr_with_outer(left, params, outer_scope).await
     })
     .await?;
-    let columns = seed.columns.clone();
+    let columns = if !cte.column_names.is_empty() {
+        if cte.column_names.len() != seed.columns.len() {
+            return Err(EngineError {
+                message: format!(
+                    "WITH query \"{}\" has {} columns available but {} columns specified",
+                    cte.name,
+                    seed.columns.len(),
+                    cte.column_names.len()
+                ),
+            });
+        }
+        cte.column_names.clone()
+    } else {
+        seed.columns.clone()
+    };
     let mut all_rows = if matches!(quantifier, SetQuantifier::Distinct) {
         dedupe_rows(seed.rows.clone())
     } else {
