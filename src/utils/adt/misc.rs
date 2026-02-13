@@ -212,6 +212,201 @@ pub(crate) fn eval_regexp_replace(
     Ok(ScalarValue::Text(out))
 }
 
+/// regexp_count(string, pattern [, start [, flags]]) - count pattern matches
+pub(crate) fn eval_regexp_count(
+    args: &[ScalarValue],
+) -> Result<ScalarValue, EngineError> {
+    if args.iter().take(2).any(|a| matches!(a, ScalarValue::Null)) {
+        return Ok(ScalarValue::Null);
+    }
+    let text = args[0].render();
+    let pattern = args[1].render();
+    let start = if args.len() >= 3 {
+        parse_i64_scalar(&args[2], "regexp_count() expects integer start")? as usize
+    } else {
+        1
+    };
+    let flags = if args.len() >= 4 { args[3].render() } else { String::new() };
+    if start < 1 {
+        return Err(EngineError {
+            message: "invalid value for parameter \"start\": 0".to_string(),
+        });
+    }
+    let search_text: String = text.chars().skip(start - 1).collect();
+    let regex = build_regex(&pattern, &flags, "regexp_count")?;
+    let count = regex.find_iter(&search_text).count();
+    Ok(ScalarValue::Int(count as i64))
+}
+
+/// regexp_instr(string, pattern [, start [, N [, endoption [, flags [, subexpr]]]]]) 
+pub(crate) fn eval_regexp_instr(
+    args: &[ScalarValue],
+) -> Result<ScalarValue, EngineError> {
+    if args.iter().take(2).any(|a| matches!(a, ScalarValue::Null)) {
+        return Ok(ScalarValue::Null);
+    }
+    let text = args[0].render();
+    let pattern = args[1].render();
+    let start = if args.len() >= 3 {
+        parse_i64_scalar(&args[2], "regexp_instr() start")? as usize
+    } else { 1 };
+    let n = if args.len() >= 4 {
+        parse_i64_scalar(&args[3], "regexp_instr() N")? as usize
+    } else { 1 };
+    let endoption = if args.len() >= 5 {
+        parse_i64_scalar(&args[4], "regexp_instr() endoption")? as usize
+    } else { 0 };
+    let flags = if args.len() >= 6 { args[5].render() } else { String::new() };
+    let subexpr = if args.len() >= 7 {
+        parse_i64_scalar(&args[6], "regexp_instr() subexpr")? as usize
+    } else { 0 };
+
+    if start < 1 || n < 1 {
+        return Ok(ScalarValue::Int(0));
+    }
+
+    let char_vec: Vec<char> = text.chars().collect();
+    let search_text: String = char_vec.iter().skip(start - 1).collect();
+    let regex = build_regex(&pattern, &flags, "regexp_instr")?;
+
+    let mut matches_iter = regex.captures_iter(&search_text);
+    let Some(caps) = matches_iter.nth(n - 1) else {
+        return Ok(ScalarValue::Int(0));
+    };
+
+    let m = if subexpr > 0 {
+        caps.get(subexpr)
+    } else {
+        caps.get(0)
+    };
+
+    let Some(m) = m else {
+        return Ok(ScalarValue::Int(0));
+    };
+
+    // Convert byte offset to char position in the search substring
+    let byte_start = m.start();
+    let byte_end = m.end();
+    let char_start = search_text[..byte_start].chars().count();
+    let char_end = search_text[..byte_end].chars().count();
+
+    let result = if endoption == 0 {
+        (start + char_start) as i64
+    } else {
+        (start + char_end) as i64
+    };
+    Ok(ScalarValue::Int(result))
+}
+
+/// regexp_substr(string, pattern [, start [, N [, flags [, subexpr]]]])
+pub(crate) fn eval_regexp_substr(
+    args: &[ScalarValue],
+) -> Result<ScalarValue, EngineError> {
+    if args.iter().take(2).any(|a| matches!(a, ScalarValue::Null)) {
+        return Ok(ScalarValue::Null);
+    }
+    let text = args[0].render();
+    let pattern = args[1].render();
+    let start = if args.len() >= 3 {
+        parse_i64_scalar(&args[2], "regexp_substr() start")? as usize
+    } else { 1 };
+    let n = if args.len() >= 4 {
+        parse_i64_scalar(&args[3], "regexp_substr() N")? as usize
+    } else { 1 };
+    let flags = if args.len() >= 5 { args[4].render() } else { String::new() };
+    let subexpr = if args.len() >= 6 {
+        parse_i64_scalar(&args[5], "regexp_substr() subexpr")? as usize
+    } else { 0 };
+
+    if start < 1 || n < 1 {
+        return Ok(ScalarValue::Null);
+    }
+
+    let search_text: String = text.chars().skip(start - 1).collect();
+    let regex = build_regex(&pattern, &flags, "regexp_substr")?;
+
+    let mut matches_iter = regex.captures_iter(&search_text);
+    let Some(caps) = matches_iter.nth(n - 1) else {
+        return Ok(ScalarValue::Null);
+    };
+
+    let m = if subexpr > 0 {
+        caps.get(subexpr)
+    } else {
+        caps.get(0)
+    };
+
+    match m {
+        Some(m) => Ok(ScalarValue::Text(m.as_str().to_string())),
+        None => Ok(ScalarValue::Null),
+    }
+}
+
+/// regexp_like(string, pattern [, flags]) - boolean match test
+pub(crate) fn eval_regexp_like(
+    args: &[ScalarValue],
+) -> Result<ScalarValue, EngineError> {
+    if args.iter().take(2).any(|a| matches!(a, ScalarValue::Null)) {
+        return Ok(ScalarValue::Null);
+    }
+    let text = args[0].render();
+    let pattern = args[1].render();
+    let flags = if args.len() >= 3 { args[2].render() } else { String::new() };
+    let regex = build_regex(&pattern, &flags, "regexp_like")?;
+    Ok(ScalarValue::Bool(regex.is_match(&text)))
+}
+
+/// unistr(text) - interpret Unicode escape sequences (\XXXX or \+XXXXXX)
+pub(crate) fn eval_unistr(text: &str) -> Result<ScalarValue, EngineError> {
+    let mut result = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            if i + 1 < chars.len() && chars[i + 1] == '\\' {
+                result.push('\\');
+                i += 2;
+            } else if i + 1 < chars.len() && chars[i + 1] == '+' {
+                // \+XXXXXX - 6 hex digits
+                if i + 8 > chars.len() {
+                    return Err(EngineError {
+                        message: "invalid Unicode escape sequence".to_string(),
+                    });
+                }
+                let hex: String = chars[i+2..i+8].iter().collect();
+                let code = u32::from_str_radix(&hex, 16).map_err(|_| EngineError {
+                    message: format!("invalid Unicode escape value: \\+{}", hex),
+                })?;
+                let c = char::from_u32(code).ok_or_else(|| EngineError {
+                    message: format!("invalid Unicode code point: {}", code),
+                })?;
+                result.push(c);
+                i += 8;
+            } else {
+                // \XXXX - 4 hex digits
+                if i + 5 > chars.len() {
+                    return Err(EngineError {
+                        message: "invalid Unicode escape sequence".to_string(),
+                    });
+                }
+                let hex: String = chars[i+1..i+5].iter().collect();
+                let code = u32::from_str_radix(&hex, 16).map_err(|_| EngineError {
+                    message: format!("invalid Unicode escape value: \\{}", hex),
+                })?;
+                let c = char::from_u32(code).ok_or_else(|| EngineError {
+                    message: format!("invalid Unicode code point: {}", code),
+                })?;
+                result.push(c);
+                i += 5;
+            }
+        } else {
+            result.push(chars[i]);
+            i += 1;
+        }
+    }
+    Ok(ScalarValue::Text(result))
+}
+
 pub(crate) fn eval_extremum(
     args: &[ScalarValue],
     greatest: bool,

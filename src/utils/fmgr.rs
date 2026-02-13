@@ -29,9 +29,10 @@ use crate::utils::adt::math_functions::{
 };
 use crate::utils::adt::misc::{
     array_value_matches, compare_values_for_predicate, count_nonnulls, count_nulls, eval_extremum,
-    eval_regexp_match, eval_regexp_replace, eval_regexp_split_to_array, gen_random_uuid,
-    parse_bool_scalar, parse_i64_scalar, pg_get_viewdef, pg_input_is_valid, quote_ident,
-    quote_literal, quote_nullable, rand_f64,
+    eval_regexp_count, eval_regexp_instr, eval_regexp_like, eval_regexp_match,
+    eval_regexp_replace, eval_regexp_split_to_array, eval_regexp_substr, eval_unistr,
+    gen_random_uuid, parse_bool_scalar, parse_i64_scalar, pg_get_viewdef, pg_input_is_valid,
+    quote_ident, quote_literal, quote_nullable, rand_f64,
 };
 use crate::utils::adt::string_functions::{
     TrimMode, ascii_code, chr_from_code, decode_bytes, encode_bytes, eval_format,
@@ -845,6 +846,99 @@ pub(crate) async fn eval_scalar_function(
                 return Ok(ScalarValue::Null);
             }
             eval_regexp_split_to_array(&args[0].render(), &args[1].render())
+        }
+        "regexp_count" if args.len() >= 2 && args.len() <= 4 => {
+            eval_regexp_count(args)
+        }
+        "regexp_instr" if args.len() >= 2 && args.len() <= 7 => {
+            eval_regexp_instr(args)
+        }
+        "regexp_substr" if args.len() >= 2 && args.len() <= 6 => {
+            eval_regexp_substr(args)
+        }
+        "regexp_like" if args.len() >= 2 && args.len() <= 3 => {
+            eval_regexp_like(args)
+        }
+        "to_hex" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let v = parse_i64_scalar(&args[0], "to_hex() expects integer")?;
+            Ok(ScalarValue::Text(format!("{:x}", v)))
+        }
+        "to_oct" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let v = parse_i64_scalar(&args[0], "to_oct() expects integer")?;
+            Ok(ScalarValue::Text(format!("{:o}", v)))
+        }
+        "to_bin" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            let v = parse_i64_scalar(&args[0], "to_bin() expects integer")?;
+            Ok(ScalarValue::Text(format!("{:b}", v)))
+        }
+        "unistr" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            eval_unistr(&args[0].render())
+        }
+        "starts_with" if args.len() == 2 => {
+            if args.iter().any(|a| matches!(a, ScalarValue::Null)) {
+                return Ok(ScalarValue::Null);
+            }
+            let text = args[0].render();
+            let prefix = args[1].render();
+            Ok(ScalarValue::Bool(text.starts_with(&prefix)))
+        }
+        "octet_length" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            Ok(ScalarValue::Int(args[0].render().len() as i64))
+        }
+        "character_length" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            Ok(ScalarValue::Int(args[0].render().chars().count() as i64))
+        }
+        "bit_length" if args.len() == 1 => {
+            if matches!(args[0], ScalarValue::Null) {
+                return Ok(ScalarValue::Null);
+            }
+            Ok(ScalarValue::Int(args[0].render().len() as i64 * 8))
+        }
+        "set_byte" if args.len() == 3 => {
+            if args.iter().any(|a| matches!(a, ScalarValue::Null)) {
+                return Ok(ScalarValue::Null);
+            }
+            let mut bytes = args[0].render().into_bytes();
+            let offset = parse_i64_scalar(&args[1], "set_byte() offset")? as usize;
+            let new_val = parse_i64_scalar(&args[2], "set_byte() value")? as u8;
+            if offset >= bytes.len() {
+                return Err(EngineError {
+                    message: "index out of range".to_string(),
+                });
+            }
+            bytes[offset] = new_val;
+            Ok(ScalarValue::Text(String::from_utf8_lossy(&bytes).to_string()))
+        }
+        "get_byte" if args.len() == 2 => {
+            if args.iter().any(|a| matches!(a, ScalarValue::Null)) {
+                return Ok(ScalarValue::Null);
+            }
+            let bytes = args[0].render().into_bytes();
+            let offset = parse_i64_scalar(&args[1], "get_byte() offset")? as usize;
+            if offset >= bytes.len() {
+                return Err(EngineError {
+                    message: "index out of range".to_string(),
+                });
+            }
+            Ok(ScalarValue::Int(bytes[offset] as i64))
         }
         "num_nulls" => Ok(ScalarValue::Int(count_nulls(args) as i64)),
         "num_nonnulls" => Ok(ScalarValue::Int(count_nonnulls(args) as i64)),
