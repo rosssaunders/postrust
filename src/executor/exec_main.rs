@@ -94,6 +94,19 @@ pub(crate) fn execute_query_with_outer<'a>(
     })
 }
 
+/// Evaluate a recursive CTE to completion, returning all accumulated rows.
+///
+/// Translated from PostgreSQL's `ExecRecursiveUnion()` in
+/// `src/backend/executor/nodeRecursiveunion.c`.
+///
+/// The algorithm executes the non-recursive term first, then loops executing
+/// the recursive term with only the working table until no new rows are
+/// produced. UNION mode deduplicates against accumulated results.
+///
+/// A safety iteration limit (`MAX_RECURSIVE_CTE_ITERATIONS`) prevents genuine
+/// infinite recursion from hanging the engine.
+const MAX_RECURSIVE_CTE_ITERATIONS: usize = 10_000;
+
 async fn evaluate_recursive_cte_binding(
     cte: &crate::parser::ast::CommonTableExpr,
     params: &[Option<String>],
@@ -151,14 +164,13 @@ async fn evaluate_recursive_cte_binding(
     };
     let mut working_rows = all_rows.clone();
 
-    let max_iterations = 10_000usize;
     let mut iterations = 0usize;
     while !working_rows.is_empty() {
-        if iterations >= max_iterations {
+        if iterations >= MAX_RECURSIVE_CTE_ITERATIONS {
             return Err(EngineError {
                 message: format!(
                     "recursive query \"{}\" exceeded {} iterations",
-                    cte.name, max_iterations
+                    cte.name, MAX_RECURSIVE_CTE_ITERATIONS
                 ),
             });
         }
