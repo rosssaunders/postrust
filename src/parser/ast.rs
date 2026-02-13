@@ -215,11 +215,13 @@ pub struct CopyOptions {
     pub format: Option<CopyFormat>,
     pub delimiter: Option<String>,
     pub null_marker: Option<String>,
+    pub header: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyStatement {
     pub table_name: Vec<String>,
+    pub columns: Vec<String>,
     pub direction: CopyDirection,
     pub options: CopyOptions,
 }

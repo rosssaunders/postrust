@@ -1361,6 +1361,29 @@ impl Parser {
             ));
         }
         let table_name = self.parse_qualified_name()?;
+        // Parse optional column list: COPY table (col1, col2, ...) FROM/TO
+        let columns = if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
+            let mut cols = Vec::new();
+            if !self.consume_if(|k| matches!(k, TokenKind::RParen)) {
+                loop {
+                    let col = self.take_keyword_or_identifier().ok_or_else(|| {
+                        self.error_at_current("expected column name in COPY column list")
+                    })?;
+                    cols.push(col);
+                    if self.consume_if(|k| matches!(k, TokenKind::Comma)) {
+                        continue;
+                    }
+                    self.expect_token(
+                        |k| matches!(k, TokenKind::RParen),
+                        "expected ')' after COPY column list",
+                    )?;
+                    break;
+                }
+            }
+            cols
+        } else {
+            Vec::new()
+        };
         let direction = if self.consume_keyword(Keyword::To) {
             CopyDirection::To
         } else if self.consume_keyword(Keyword::From) {
@@ -1391,6 +1414,7 @@ impl Parser {
             format: None,
             delimiter: None,
             null_marker: None,
+            header: false,
         };
         if self.consume_if(|k| matches!(k, TokenKind::LParen)) {
             if !self.consume_if(|k| matches!(k, TokenKind::RParen)) {
@@ -1415,6 +1439,7 @@ impl Parser {
         }
         Ok(Statement::Copy(CopyStatement {
             table_name,
+            columns,
             direction,
             options,
         }))
@@ -4626,6 +4651,22 @@ impl Parser {
             "NULL" => {
                 let null_marker = self.parse_copy_string_literal("NULL")?;
                 options.null_marker = Some(null_marker);
+            }
+            "HEADER" => {
+                // HEADER can optionally be followed by TRUE/FALSE, or standalone means TRUE
+                let saved = self.idx;
+                if let Some(next) = self.take_keyword_or_identifier_upper() {
+                    match next.as_str() {
+                        "TRUE" | "ON" => options.header = true,
+                        "FALSE" | "OFF" => options.header = false,
+                        _ => {
+                            self.idx = saved;
+                            options.header = true;
+                        }
+                    }
+                } else {
+                    options.header = true;
+                }
             }
             other => {
                 return Err(self.error_at_current(&format!("unsupported COPY option {}", other)));
