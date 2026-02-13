@@ -491,12 +491,70 @@ pub(crate) fn try_parse_bool(value: &ScalarValue) -> Option<bool> {
     match value {
         ScalarValue::Bool(v) => Some(*v),
         ScalarValue::Int(v) => Some(*v != 0),
-        ScalarValue::Text(v) => {
-            let normalized = v.trim().to_ascii_lowercase();
-            match normalized.as_str() {
-                "true" | "t" | "1" => Some(true),
-                "false" | "f" | "0" => Some(false),
-                _ => None,
+        ScalarValue::Text(v) => parse_bool_from_str(v),
+        _ => None,
+    }
+}
+
+/// Parse a boolean value from a string, following PostgreSQL's bool.c boolin() logic.
+/// Accepts: true/yes/on/1/t/y (true), false/no/off/0/f/n (false).
+/// Leading/trailing whitespace is ignored. Case-insensitive.
+pub(crate) fn parse_bool_from_str(s: &str) -> Option<bool> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Match PostgreSQL's parse_bool_with_len from bool.c
+    match trimmed.as_bytes()[0] | 0x20 {
+        b't' => {
+            if trimmed.len() == 1 || trimmed.eq_ignore_ascii_case("true") {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        b'f' => {
+            if trimmed.len() == 1 || trimmed.eq_ignore_ascii_case("false") {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        b'y' => {
+            if trimmed.len() == 1 || trimmed.eq_ignore_ascii_case("yes") {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        b'n' => {
+            if trimmed.len() == 1 || trimmed.eq_ignore_ascii_case("no") {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        b'1' => {
+            if trimmed.len() == 1 {
+                Some(true)
+            } else {
+                None
+            }
+        }
+        b'0' => {
+            if trimmed.len() == 1 {
+                Some(false)
+            } else {
+                None
+            }
+        }
+        b'o' => {
+            if trimmed.eq_ignore_ascii_case("on") {
+                Some(true)
+            } else if trimmed.eq_ignore_ascii_case("off") || trimmed.eq_ignore_ascii_case("of") {
+                Some(false)
+            } else {
+                None
             }
         }
         _ => None,

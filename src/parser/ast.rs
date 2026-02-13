@@ -872,6 +872,12 @@ pub enum Expr {
         expr: Box<Expr>,
         negated: bool,
     },
+    /// IS TRUE / IS NOT TRUE / IS FALSE / IS NOT FALSE / IS UNKNOWN / IS NOT UNKNOWN
+    BooleanTest {
+        expr: Box<Expr>,
+        test_type: BooleanTestType,
+        negated: bool,
+    },
     IsDistinctFrom {
         left: Box<Expr>,
         right: Box<Expr>,
@@ -905,6 +911,13 @@ pub enum Expr {
 pub enum ComparisonQuantifier {
     Any,
     All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BooleanTestType {
+    True,
+    False,
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

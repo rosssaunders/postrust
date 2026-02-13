@@ -14,7 +14,7 @@ impl ScalarValue {
     pub fn render(&self) -> String {
         match self {
             Self::Null => "NULL".to_string(),
-            Self::Bool(v) => v.to_string(),
+            Self::Bool(v) => if *v { "t" } else { "f" }.to_string(),
             Self::Int(v) => v.to_string(),
             Self::Float(v) => {
                 let mut text = v.to_string();

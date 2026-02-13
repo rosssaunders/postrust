@@ -8,8 +8,8 @@ use crate::executor::exec_main::{
     parse_non_negative_int, row_key,
 };
 use crate::parser::ast::{
-    BinaryOp, ComparisonQuantifier, Expr, OrderByExpr, UnaryOp, WindowDefinition, WindowFrameBound,
-    WindowFrameExclusion, WindowFrameUnits, WindowSpec,
+    BinaryOp, BooleanTestType, ComparisonQuantifier, Expr, OrderByExpr, UnaryOp, WindowDefinition,
+    WindowFrameBound, WindowFrameExclusion, WindowFrameUnits, WindowSpec,
 };
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::{
@@ -327,6 +327,18 @@ pub(crate) fn eval_expr<'a>(
                 let is_null = matches!(value, ScalarValue::Null);
                 Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
             }
+            Expr::BooleanTest { expr, test_type, negated } => {
+                let value = eval_expr(expr, scope, params).await?;
+                let result = match (test_type, &value) {
+                    (BooleanTestType::True, ScalarValue::Bool(true)) => true,
+                    (BooleanTestType::True, _) => false,
+                    (BooleanTestType::False, ScalarValue::Bool(false)) => true,
+                    (BooleanTestType::False, _) => false,
+                    (BooleanTestType::Unknown, ScalarValue::Null) => true,
+                    (BooleanTestType::Unknown, _) => false,
+                };
+                Ok(ScalarValue::Bool(if *negated { !result } else { result }))
+            }
             Expr::IsDistinctFrom {
                 left,
                 right,
@@ -596,6 +608,18 @@ pub(crate) fn eval_expr_with_window<'a>(
                 let value = eval_expr_with_window(expr, scope, row_idx, all_rows, window_definitions, params).await?;
                 let is_null = matches!(value, ScalarValue::Null);
                 Ok(ScalarValue::Bool(if *negated { !is_null } else { is_null }))
+            }
+            Expr::BooleanTest { expr, test_type, negated } => {
+                let value = eval_expr_with_window(expr, scope, row_idx, all_rows, window_definitions, params).await?;
+                let result = match (test_type, &value) {
+                    (BooleanTestType::True, ScalarValue::Bool(true)) => true,
+                    (BooleanTestType::True, _) => false,
+                    (BooleanTestType::False, ScalarValue::Bool(false)) => true,
+                    (BooleanTestType::False, _) => false,
+                    (BooleanTestType::Unknown, ScalarValue::Null) => true,
+                    (BooleanTestType::Unknown, _) => false,
+                };
+                Ok(ScalarValue::Bool(if *negated { !result } else { result }))
             }
             Expr::IsDistinctFrom {
                 left,
@@ -1631,10 +1655,17 @@ pub(crate) fn eval_cast_scalar(
         return Ok(ScalarValue::Null);
     }
     match type_name {
-        "boolean" => Ok(ScalarValue::Bool(parse_bool_scalar(
-            &value,
-            "cannot cast value to boolean",
-        )?)),
+        "boolean" => {
+            // PostgreSQL-compatible error message from bool.c
+            let input_text = match &value {
+                ScalarValue::Text(s) => s.clone(),
+                other => other.render(),
+            };
+            Ok(ScalarValue::Bool(parse_bool_scalar(
+                &value,
+                &format!("invalid input syntax for type boolean: \"{}\"", input_text),
+            )?))
+        }
         "int2" | "smallint" => {
             let val = parse_i64_scalar(&value, "cannot cast value to smallint")?;
             crate::utils::adt::int_arithmetic::validate_int2(val)?;
@@ -1657,7 +1688,13 @@ pub(crate) fn eval_cast_scalar(
             &value,
             "cannot cast value to double precision",
         )?)),
-        "text" => Ok(ScalarValue::Text(value.render())),
+        "text" => {
+            // PostgreSQL's boolout outputs "true"/"false" when casting to text
+            match &value {
+                ScalarValue::Bool(v) => Ok(ScalarValue::Text(if *v { "true" } else { "false" }.to_string())),
+                _ => Ok(ScalarValue::Text(value.render())),
+            }
+        }
         "date" => {
             let dt = parse_datetime_scalar(&value)?;
             Ok(ScalarValue::Text(format_date(dt.date)))
