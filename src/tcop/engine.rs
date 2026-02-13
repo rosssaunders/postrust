@@ -785,6 +785,22 @@ pub fn copy_table_column_oids(table_name: &[String]) -> Result<Vec<u32>, EngineE
         .collect())
 }
 
+pub fn copy_table_column_names(table_name: &[String]) -> Result<Vec<String>, EngineError> {
+    let table = with_catalog_read(|catalog| {
+        catalog
+            .resolve_table(table_name, &SearchPath::default())
+            .cloned()
+    })
+    .map_err(|err| EngineError {
+        message: err.message,
+    })?;
+    Ok(table
+        .columns()
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect())
+}
+
 pub async fn copy_insert_rows(
     table_name: &[String],
     rows: Vec<Vec<ScalarValue>>,

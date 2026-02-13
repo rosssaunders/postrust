@@ -27,7 +27,8 @@ use crate::security::{
 };
 use crate::tcop::engine::{
     EngineError, PlannedQuery, QueryResult, ScalarValue, copy_insert_rows,
-    copy_table_binary_snapshot, copy_table_column_oids, execute_planned_query, plan_statement,
+    copy_table_binary_snapshot, copy_table_column_names, copy_table_column_oids,
+    execute_planned_query, plan_statement,
     restore_state, snapshot_state, type_oid_size,
 };
 
@@ -310,10 +311,12 @@ enum CopyFormat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CopyCommand {
     table_name: Vec<String>,
+    columns: Vec<String>,
     direction: CopyDirection,
     format: CopyFormat,
     delimiter: char,
     null_marker: String,
+    header: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,9 +340,11 @@ enum AuthenticationState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CopyInState {
     table_name: Vec<String>,
+    columns: Vec<String>,
     format: CopyFormat,
     delimiter: char,
     null_marker: String,
+    header: bool,
     column_type_oids: Vec<PgType>,
     payload: Vec<u8>,
 }
@@ -1494,7 +1499,14 @@ impl PostgresSession {
                 }
                 PlannedOperation::Copy(command) => match command.direction {
                     CopyDirection::FromStdin => {
-                        let column_type_oids = self.copy_column_type_oids(&command.table_name)?;
+                        let column_type_oids = if command.columns.is_empty() {
+                            self.copy_column_type_oids(&command.table_name)?
+                        } else {
+                            self.copy_column_type_oids_for_columns(
+                                &command.table_name,
+                                &command.columns,
+                            )?
+                        };
                         let (overall_format, column_formats) = match command.format {
                             CopyFormat::Binary => (1, vec![1i16; column_type_oids.len()]),
                             CopyFormat::Text | CopyFormat::Csv => {
@@ -1503,9 +1515,11 @@ impl PostgresSession {
                         };
                         self.copy_in_state = Some(CopyInState {
                             table_name: command.table_name.clone(),
+                            columns: command.columns.clone(),
                             format: command.format,
                             delimiter: command.delimiter,
                             null_marker: command.null_marker.clone(),
+                            header: command.header,
                             column_type_oids: column_type_oids.clone(),
                             payload: Vec::new(),
                         });
@@ -1535,17 +1549,26 @@ impl PostgresSession {
                                 vec![1i16; snapshot.columns.len()],
                                 encode_copy_binary_stream(&snapshot.columns, &snapshot.rows)?,
                             ),
-                            CopyFormat::Text | CopyFormat::Csv => (
-                                0,
-                                vec![0i16; snapshot.columns.len()],
-                                encode_copy_text_stream(
-                                    &snapshot.rows,
-                                    &snapshot_column_type_oids,
-                                    command.delimiter,
-                                    &command.null_marker,
-                                    matches!(command.format, CopyFormat::Csv),
-                                )?,
-                            ),
+                            CopyFormat::Text | CopyFormat::Csv => {
+                                let column_names: Vec<String> = snapshot
+                                    .columns
+                                    .iter()
+                                    .map(|c| c.name.clone())
+                                    .collect();
+                                (
+                                    0,
+                                    vec![0i16; snapshot.columns.len()],
+                                    encode_copy_text_stream(
+                                        &snapshot.rows,
+                                        &snapshot_column_type_oids,
+                                        command.delimiter,
+                                        &command.null_marker,
+                                        matches!(command.format, CopyFormat::Csv),
+                                        command.header,
+                                        &column_names,
+                                    )?,
+                                )
+                            }
                         };
                         Ok(ExecutionOutcome::CopyOut {
                             overall_format,
@@ -1786,6 +1809,34 @@ impl PostgresSession {
             .map_err(SessionError::from)
     }
 
+    fn copy_column_type_oids_for_columns(
+        &self,
+        table_name: &[String],
+        columns: &[String],
+    ) -> Result<Vec<PgType>, SessionError> {
+        let all_oids = self.copy_column_type_oids(table_name)?;
+        let all_columns = security::with_current_role(&self.current_role, || {
+            copy_table_column_names(table_name)
+        })
+        .map_err(SessionError::from)?;
+        let mut result = Vec::with_capacity(columns.len());
+        for col in columns {
+            let col_lower = col.to_ascii_lowercase();
+            let idx = all_columns
+                .iter()
+                .position(|c| c.to_ascii_lowercase() == col_lower)
+                .ok_or_else(|| SessionError {
+                    message: format!(
+                        "column \"{}\" of relation \"{}\" does not exist",
+                        col,
+                        table_name.last().unwrap_or(&String::new())
+                    ),
+                })?;
+            result.push(all_oids[idx]);
+        }
+        Ok(result)
+    }
+
     async fn copy_snapshot(
         &self,
         table_name: &[String],
@@ -1833,7 +1884,7 @@ impl PostgresSession {
         let state = self.copy_in_state.take().ok_or_else(|| SessionError {
             message: "COPY done was sent without COPY IN state".to_string(),
         })?;
-        let rows = match state.format {
+        let mut rows = match state.format {
             CopyFormat::Binary => {
                 parse_copy_binary_stream(&state.payload, &state.column_type_oids)?
             }
@@ -1843,8 +1894,42 @@ impl PostgresSession {
                 state.delimiter,
                 &state.null_marker,
                 matches!(state.format, CopyFormat::Csv),
+                state.header,
             )?,
         };
+
+        // If a column list was specified, expand partial rows to full table width
+        if !state.columns.is_empty() {
+            let all_columns = security::with_current_role(&self.current_role, || {
+                copy_table_column_names(&state.table_name)
+            })
+            .map_err(SessionError::from)?;
+            let all_oids = self.copy_column_type_oids(&state.table_name)?;
+            // Build mapping: for each specified column, find its index in the full table
+            let mut col_indices = Vec::with_capacity(state.columns.len());
+            for col in &state.columns {
+                let col_lower = col.to_ascii_lowercase();
+                let idx = all_columns
+                    .iter()
+                    .position(|c| c.to_ascii_lowercase() == col_lower)
+                    .ok_or_else(|| SessionError {
+                        message: format!("column \"{}\" does not exist", col),
+                    })?;
+                col_indices.push(idx);
+            }
+            rows = rows
+                .into_iter()
+                .map(|partial_row| {
+                    let mut full_row = vec![ScalarValue::Null; all_oids.len()];
+                    for (src_idx, &dst_idx) in col_indices.iter().enumerate() {
+                        if src_idx < partial_row.len() {
+                            full_row[dst_idx] = partial_row[src_idx].clone();
+                        }
+                    }
+                    full_row
+                })
+                .collect();
+        }
 
         let inserted = match self.tx_state.visibility_mode() {
             VisibilityMode::Global => {
@@ -2227,6 +2312,7 @@ fn copy_command(statement: CopyStatement) -> Result<CopyCommand, SessionError> {
         format,
         delimiter,
         null_marker,
+        header,
     } = statement.options;
     let format = match format.unwrap_or(AstCopyFormat::Text) {
         AstCopyFormat::Text => CopyFormat::Text,
@@ -2256,6 +2342,7 @@ fn copy_command(statement: CopyStatement) -> Result<CopyCommand, SessionError> {
     });
     Ok(CopyCommand {
         table_name: normalize_identifier_parts(statement.table_name),
+        columns: normalize_identifier_parts(statement.columns),
         direction: match statement.direction {
             AstCopyDirection::To => CopyDirection::ToStdout,
             AstCopyDirection::From => CopyDirection::FromStdin,
@@ -2263,6 +2350,7 @@ fn copy_command(statement: CopyStatement) -> Result<CopyCommand, SessionError> {
         format,
         delimiter,
         null_marker,
+        header,
     })
 }
 
@@ -3297,8 +3385,20 @@ fn encode_copy_text_stream(
     delimiter: char,
     null_marker: &str,
     csv: bool,
+    header: bool,
+    column_names: &[String],
 ) -> Result<Vec<u8>, SessionError> {
     let mut out = String::new();
+    if header && !column_names.is_empty() {
+        out.push_str(
+            &column_names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(&delimiter.to_string()),
+        );
+        out.push('\n');
+    }
     for row in rows {
         if row.len() != column_type_oids.len() {
             return Err(SessionError {
@@ -3373,6 +3473,7 @@ fn parse_copy_text_stream(
     delimiter: char,
     null_marker: &str,
     csv: bool,
+    header: bool,
 ) -> Result<Vec<Vec<ScalarValue>>, SessionError> {
     let text = String::from_utf8(payload.to_vec()).map_err(|_| SessionError {
         message: "COPY text payload is not valid utf8".to_string(),
@@ -3383,12 +3484,18 @@ fn parse_copy_text_stream(
 
     let mut rows = Vec::new();
     let lines = text.split('\n').collect::<Vec<_>>();
+    let mut header_skipped = false;
     for (idx, raw_line) in lines.iter().enumerate() {
         let mut line = *raw_line;
         if let Some(stripped) = line.strip_suffix('\r') {
             line = stripped;
         }
         if line.is_empty() && idx + 1 == lines.len() {
+            continue;
+        }
+        // Skip the first line if HEADER is specified (matches PG behavior)
+        if header && !header_skipped {
+            header_skipped = true;
             continue;
         }
         let fields = if csv {
