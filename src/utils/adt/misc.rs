@@ -926,6 +926,10 @@ fn binary_op_to_sql(op: &crate::parser::ast::BinaryOp) -> &'static str {
         BinaryOp::JsonHasAll => "?&",
         BinaryOp::JsonDelete => "#-",
         BinaryOp::JsonDeletePath => "#-",
+        BinaryOp::ArrayContains => "@>",
+        BinaryOp::ArrayContainedBy => "<@",
+        BinaryOp::ArrayOverlap => "&&",
+        BinaryOp::ArrayConcat => "||",
     }
 }
 

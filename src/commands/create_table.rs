@@ -313,6 +313,7 @@ pub(crate) fn type_signature_from_ast(ty: TypeName) -> TypeSignature {
         | TypeName::Time => TypeSignature::Text,
         TypeName::Date => TypeSignature::Date,
         TypeName::Timestamp | TypeName::TimestampTz => TypeSignature::Timestamp,
+        TypeName::Array(_) | TypeName::Name => TypeSignature::Text,
     }
 }
 

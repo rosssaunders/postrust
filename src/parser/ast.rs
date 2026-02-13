@@ -247,6 +247,8 @@ pub enum TypeName {
     Serial,    // auto-incrementing INT4
     BigSerial, // auto-incrementing INT8
     Numeric,   // DECIMAL/NUMERIC
+    Array(Box<TypeName>), // e.g. int4[], text[][]
+    Name,      // PostgreSQL name type (63-byte identifier)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -346,7 +348,14 @@ pub enum OnConflictClause {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Assignment {
     pub column: String,
+    pub subscripts: Vec<AssignmentSubscript>,
     pub value: Expr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignmentSubscript {
+    Index(Expr),
+    Slice(Option<Expr>, Option<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -930,6 +939,10 @@ pub enum BinaryOp {
     JsonHasAll,
     JsonDelete,
     JsonDeletePath,
+    ArrayContains,     // @>
+    ArrayContainedBy,  // <@
+    ArrayOverlap,      // &&
+    ArrayConcat,       // ||
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
