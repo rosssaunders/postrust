@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::parser::ast::{
     AlterRoleStatement, AlterSequenceAction, AlterSequenceStatement, AlterTableAction,
-    AlterTableStatement, AlterViewAction, AlterViewStatement, Assignment, AssignmentSubscript, BinaryOp,
+    AlterTableStatement, AlterViewAction, AlterViewStatement, Assignment, AssignmentSubscript, BinaryOp, BooleanTestType,
     ColumnDefinition, CommonTableExpr, ComparisonQuantifier, ConflictTarget, CopyDirection,
     CopyFormat, CopyOptions, CopyStatement, CreateExtensionStatement, CreateFunctionStatement,
     CreateIndexStatement, CreateRoleStatement, CreateSchemaStatement, CreateSequenceStatement,
@@ -3018,7 +3018,33 @@ impl Parser {
                     };
                     continue;
                 }
-                self.expect_keyword(Keyword::Distinct, "expected NULL or DISTINCT after IS")?;
+                if self.consume_keyword(Keyword::True) {
+                    lhs = Expr::BooleanTest {
+                        expr: Box::new(lhs),
+                        test_type: BooleanTestType::True,
+                        negated,
+                    };
+                    continue;
+                }
+                if self.consume_keyword(Keyword::False) {
+                    lhs = Expr::BooleanTest {
+                        expr: Box::new(lhs),
+                        test_type: BooleanTestType::False,
+                        negated,
+                    };
+                    continue;
+                }
+                // IS [NOT] UNKNOWN
+                if matches!(self.current_kind(), TokenKind::Identifier(id) if id.eq_ignore_ascii_case("unknown")) {
+                    self.advance();
+                    lhs = Expr::BooleanTest {
+                        expr: Box::new(lhs),
+                        test_type: BooleanTestType::Unknown,
+                        negated,
+                    };
+                    continue;
+                }
+                self.expect_keyword(Keyword::Distinct, "expected NULL, TRUE, FALSE, UNKNOWN, or DISTINCT after IS")?;
                 self.expect_keyword(Keyword::From, "expected FROM after IS DISTINCT")?;
                 let rhs = self.parse_expr_bp(6)?;
                 lhs = Expr::IsDistinctFrom {
@@ -3310,6 +3336,39 @@ impl Parser {
 
     fn parse_identifier_expr(&mut self) -> Result<Expr, ParseError> {
         let mut name = vec![self.parse_expr_identifier()?];
+
+        // Handle type-name 'literal' syntax for types like bool, int, etc.
+        if name.len() == 1 {
+            let type_lower = name[0].to_ascii_lowercase();
+            let is_type_literal = matches!(type_lower.as_str(),
+                "bool" | "boolean" | "int" | "integer" | "int2" | "int4" | "int8"
+                | "smallint" | "bigint" | "float" | "float4" | "float8"
+                | "real" | "numeric" | "decimal" | "text" | "varchar"
+            );
+            if is_type_literal
+                && let Some(TokenKind::String(value)) = self.peek_nth_kind(0)
+            {
+                    let value_str = value.clone();
+                    self.advance();
+                    // Normalize type name for TypedLiteral
+                    let normalized = match type_lower.as_str() {
+                        "bool" | "boolean" => "boolean",
+                        "int" | "integer" | "int4" => "integer",
+                        "int2" | "smallint" => "smallint",
+                        "int8" | "bigint" => "bigint",
+                        "float" | "float8" => "double precision",
+                        "float4" | "real" => "real",
+                        "numeric" | "decimal" => "numeric",
+                        "text" | "varchar" => "text",
+                        _ => &type_lower,
+                    };
+                    return Ok(Expr::TypedLiteral {
+                        type_name: normalized.to_string(),
+                        value: value_str,
+                    });
+            }
+        }
+
         while self.consume_if(|k| matches!(k, TokenKind::Dot)) {
             // Check if this is a qualified wildcard (e.g., table.*)
             if self.consume_if(|k| matches!(k, TokenKind::Star)) {

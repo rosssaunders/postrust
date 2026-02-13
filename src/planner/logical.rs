@@ -410,6 +410,7 @@ fn collect_window_exprs(expr: &Expr, out: &mut Vec<Expr>) {
             collect_window_exprs(pattern, out);
         }
         Expr::IsNull { expr, .. } => collect_window_exprs(expr, out),
+        Expr::BooleanTest { expr, .. } => collect_window_exprs(expr, out),
         Expr::IsDistinctFrom { left, right, .. } => {
             collect_window_exprs(left, out);
             collect_window_exprs(right, out);

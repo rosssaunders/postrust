@@ -942,6 +942,37 @@ pub(crate) async fn eval_scalar_function(
         }
         "num_nulls" => Ok(ScalarValue::Int(count_nulls(args) as i64)),
         "num_nonnulls" => Ok(ScalarValue::Int(count_nonnulls(args) as i64)),
+        // Boolean comparison functions (PostgreSQL compatibility)
+        "booleq" if args.len() == 2 => {
+            let a = parse_bool_scalar(&args[0], "booleq() expects boolean arguments")?;
+            let b = parse_bool_scalar(&args[1], "booleq() expects boolean arguments")?;
+            Ok(ScalarValue::Bool(a == b))
+        }
+        "boolne" if args.len() == 2 => {
+            let a = parse_bool_scalar(&args[0], "boolne() expects boolean arguments")?;
+            let b = parse_bool_scalar(&args[1], "boolne() expects boolean arguments")?;
+            Ok(ScalarValue::Bool(a != b))
+        }
+        "boollt" if args.len() == 2 => {
+            let a = parse_bool_scalar(&args[0], "boollt() expects boolean arguments")?;
+            let b = parse_bool_scalar(&args[1], "boollt() expects boolean arguments")?;
+            Ok(ScalarValue::Bool(!a && b))
+        }
+        "boolgt" if args.len() == 2 => {
+            let a = parse_bool_scalar(&args[0], "boolgt() expects boolean arguments")?;
+            let b = parse_bool_scalar(&args[1], "boolgt() expects boolean arguments")?;
+            Ok(ScalarValue::Bool(a && !b))
+        }
+        "boolle" if args.len() == 2 => {
+            let a = parse_bool_scalar(&args[0], "boolle() expects boolean arguments")?;
+            let b = parse_bool_scalar(&args[1], "boolle() expects boolean arguments")?;
+            Ok(ScalarValue::Bool(a <= b))
+        }
+        "boolge" if args.len() == 2 => {
+            let a = parse_bool_scalar(&args[0], "boolge() expects boolean arguments")?;
+            let b = parse_bool_scalar(&args[1], "boolge() expects boolean arguments")?;
+            Ok(ScalarValue::Bool(a >= b))
+        }
         // --- System info functions ---
         "version" if args.is_empty() => Ok(ScalarValue::Text("Postrust 0.1.0 on Rust".to_string())),
         "current_database" if args.is_empty() => Ok(ScalarValue::Text("postrust".to_string())),

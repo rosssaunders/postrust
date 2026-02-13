@@ -324,7 +324,8 @@ fn infer_expr_type_oid(
         | Expr::Between { .. }
         | Expr::Like { .. }
         | Expr::IsNull { .. }
-        | Expr::IsDistinctFrom { .. } => PG_BOOL_OID,
+        | Expr::IsDistinctFrom { .. }
+        | Expr::BooleanTest { .. } => PG_BOOL_OID,
         Expr::CaseSimple {
             when_then,
             else_expr,
@@ -760,6 +761,7 @@ fn expr_references_relation(expr: &Expr, relation_name: &str) -> bool {
                 || expr_references_relation(pattern, relation_name)
         }
         Expr::IsNull { expr, .. } => expr_references_relation(expr, relation_name),
+        Expr::BooleanTest { expr, .. } => expr_references_relation(expr, relation_name),
         Expr::IsDistinctFrom { left, right, .. } => {
             expr_references_relation(left, relation_name)
                 || expr_references_relation(right, relation_name)
