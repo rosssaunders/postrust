@@ -415,7 +415,29 @@ impl<'a> Lexer<'a> {
                 });
                 break;
             }
-            out.push(self.next_token()?);
+            let mut token = self.next_token()?;
+            // SQL string continuation: adjacent string literals are concatenated
+            // Only whitespace (no comments) is allowed between continuation strings
+            if let TokenKind::String(ref mut s) = token.kind {
+                loop {
+                    let saved_pos = self.pos;
+                    self.skip_whitespace_only();
+                    if self.peek_char() == Some('\'') {
+                        let next = self.lex_single_quoted_string(self.pos, false)?;
+                        if let TokenKind::String(s2) = next.kind {
+                            s.push_str(&s2);
+                            token.end = next.end;
+                        } else {
+                            self.pos = saved_pos;
+                            break;
+                        }
+                    } else {
+                        self.pos = saved_pos;
+                        break;
+                    }
+                }
+            }
+            out.push(token);
         }
         Ok(out)
     }
@@ -992,6 +1014,12 @@ impl<'a> Lexer<'a> {
             return Ok(self.mk(start, kind));
         }
         Ok(self.mk(start, TokenKind::Operator(op)))
+    }
+
+    fn skip_whitespace_only(&mut self) {
+        while self.peek_char().is_some_and(scanner_isspace) {
+            self.advance_char();
+        }
     }
 
     fn skip_whitespace_and_comments(&mut self) -> Result<(), LexError> {
