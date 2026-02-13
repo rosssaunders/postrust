@@ -1199,6 +1199,7 @@ fn render_expr_to_sql(expr: &crate::parser::ast::Expr) -> String {
         Expr::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
         Expr::Null => "NULL".to_string(),
         Expr::Default => "DEFAULT".to_string(),
+        Expr::MultiColumnSubqueryRef { .. } => "(multi-column subquery ref)".to_string(),
         
         // Identifiers
         Expr::Identifier(parts) => parts.join("."),

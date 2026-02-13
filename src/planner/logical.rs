@@ -470,6 +470,7 @@ fn collect_window_exprs(expr: &Expr, out: &mut Vec<Expr>) {
             }
         }
         Expr::Default => {}
+        Expr::MultiColumnSubqueryRef { .. } => {}
     }
 }
 
