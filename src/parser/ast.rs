@@ -806,6 +806,8 @@ pub enum Expr {
     Float(String),
     Boolean(bool),
     Null,
+    /// DEFAULT keyword in INSERT VALUES — replaced by column default during execution
+    Default,
     Parameter(i32),
     FunctionCall {
         name: Vec<String>,
