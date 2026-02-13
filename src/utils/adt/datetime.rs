@@ -640,24 +640,23 @@ fn try_parse_with_month_name(text: &str) -> Option<DateValue> {
     }
     
     // Determine year and day
-    let (year, day) = if numeric_parts[0] > 31 || numeric_parts[0] > 99 {
-        // First number is year
+    // Values > 99 are definitely years (e.g., 1999)
+    // Values in 32-99 range could be years (YY format) or impossible as days, so treat as years
+    // Values <= 31 could be days or 2-digit years, use position to disambiguate
+    let (year, day) = if numeric_parts[0] > 31 {
+        // First number is year (either > 99 or 32-99 which is invalid as day)
         (normalize_year(numeric_parts[0]), numeric_parts[1] as u32)
-    } else if numeric_parts[1] > 31 || numeric_parts[1] > 99 {
+    } else if numeric_parts[1] > 31 {
         // Second number is year
         (normalize_year(numeric_parts[1]), numeric_parts[0] as u32)
     } else if month_pos == 0 {
         // Month first, so likely: Month DD YY
         (normalize_year(numeric_parts[1]), numeric_parts[0] as u32)
     } else if month_pos == parts.len() - 1 {
-        // Month last, so likely: YY DD Month or DD YY Month
-        if numeric_parts[0] > 31 {
-            (normalize_year(numeric_parts[0]), numeric_parts[1] as u32)
-        } else {
-            (normalize_year(numeric_parts[1]), numeric_parts[0] as u32)
-        }
+        // Month last, so likely: DD YY Month
+        (normalize_year(numeric_parts[1]), numeric_parts[0] as u32)
     } else {
-        // Month in middle
+        // Month in middle, so likely: DD Month YY
         (normalize_year(numeric_parts[1]), numeric_parts[0] as u32)
     };
     
@@ -1453,10 +1452,9 @@ mod tests {
             microsecond: 575401,
         };
         
-        let field = ScalarValue::Text("microsecond".to_string());
-        let source = ScalarValue::Text(format_timestamp(dt));
-        
-        // Can't directly test this without more infrastructure, but the implementation is there
+        // Verify the timestamp formats correctly with microseconds
+        let ts = format_timestamp(dt);
+        assert!(ts.contains(".575401"));
     }
 
     #[test]
