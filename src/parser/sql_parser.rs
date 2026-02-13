@@ -1686,14 +1686,22 @@ impl Parser {
         Ok(Assignment { column, subscripts, value })
     }
 
+    fn parse_insert_value_expr(&mut self) -> Result<Expr, ParseError> {
+        if self.consume_keyword(Keyword::Default) {
+            Ok(Expr::Default)
+        } else {
+            self.parse_expr()
+        }
+    }
+
     fn parse_insert_values_row(&mut self) -> Result<Vec<Expr>, ParseError> {
         self.expect_token(
             |k| matches!(k, TokenKind::LParen),
             "expected '(' to start VALUES row",
         )?;
-        let mut row = vec![self.parse_expr()?];
+        let mut row = vec![self.parse_insert_value_expr()?];
         while self.consume_if(|k| matches!(k, TokenKind::Comma)) {
-            row.push(self.parse_expr()?);
+            row.push(self.parse_insert_value_expr()?);
         }
         self.expect_token(
             |k| matches!(k, TokenKind::RParen),

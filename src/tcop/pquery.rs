@@ -240,6 +240,7 @@ fn infer_expr_type_oid(
         Expr::Float(_) => PG_FLOAT8_OID,
         Expr::Boolean(_) => PG_BOOL_OID,
         Expr::Null => PG_TEXT_OID,
+        Expr::Default => PG_TEXT_OID,
         Expr::Parameter(_) => PG_TEXT_OID,
         Expr::FunctionCall {
             name,

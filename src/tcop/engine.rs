@@ -966,46 +966,76 @@ async fn execute_insert(
         InsertSource::Values(values_rows) => {
             let mut rows = Vec::with_capacity(values_rows.len());
             for row_exprs in values_rows {
-                let mut row = Vec::with_capacity(row_exprs.len());
-                for expr in row_exprs {
-                    row.push(eval_expr(expr, &EvalScope::default(), params).await?);
+                if row_exprs.len() != target_indexes.len() {
+                    return Err(EngineError {
+                        message: format!(
+                            "INSERT has {} expressions but {} target columns",
+                            row_exprs.len(),
+                            target_indexes.len()
+                        ),
+                    });
+                }
+                // Build a full row, handling DEFAULT by applying column defaults
+                let mut row = vec![ScalarValue::Null; table.columns().len()];
+                let mut provided = vec![false; table.columns().len()];
+                for (expr, col_idx) in row_exprs.iter().zip(target_indexes.iter()) {
+                    if matches!(expr, Expr::Default) {
+                        // Leave as not provided; default fill below
+                    } else {
+                        let val = eval_expr(expr, &EvalScope::default(), params).await?;
+                        let column = &table.columns()[*col_idx];
+                        row[*col_idx] = coerce_value_for_column(val, column)?;
+                        provided[*col_idx] = true;
+                    }
+                }
+                for (idx, column) in table.columns().iter().enumerate() {
+                    if !provided[idx]
+                        && let Some(default_expr) = column.default()
+                    {
+                        let raw = eval_expr(default_expr, &EvalScope::default(), params).await?;
+                        row[idx] = coerce_value_for_column(raw, column)?;
+                    }
                 }
                 rows.push(row);
             }
             rows
         }
-        InsertSource::Query(query) => execute_query(query, params).await?.rows,
+        InsertSource::Query(query) => {
+            let query_rows = execute_query(query, params).await?.rows;
+            let mut rows = Vec::with_capacity(query_rows.len());
+            for source_row in &query_rows {
+                if source_row.len() != target_indexes.len() {
+                    return Err(EngineError {
+                        message: format!(
+                            "INSERT has {} expressions but {} target columns",
+                            source_row.len(),
+                            target_indexes.len()
+                        ),
+                    });
+                }
+                let mut row = vec![ScalarValue::Null; table.columns().len()];
+                let mut provided = vec![false; table.columns().len()];
+                for (raw, col_idx) in source_row.iter().zip(target_indexes.iter()) {
+                    let column = &table.columns()[*col_idx];
+                    row[*col_idx] = coerce_value_for_column(raw.clone(), column)?;
+                    provided[*col_idx] = true;
+                }
+                for (idx, column) in table.columns().iter().enumerate() {
+                    if !provided[idx]
+                        && let Some(default_expr) = column.default()
+                    {
+                        let raw = eval_expr(default_expr, &EvalScope::default(), params).await?;
+                        row[idx] = coerce_value_for_column(raw, column)?;
+                    }
+                }
+                rows.push(row);
+            }
+            rows
+        }
     };
 
     let mut materialized = Vec::with_capacity(source_rows.len());
-    for source_row in &source_rows {
-        if source_row.len() != target_indexes.len() {
-            return Err(EngineError {
-                message: format!(
-                    "INSERT has {} expressions but {} target columns",
-                    source_row.len(),
-                    target_indexes.len()
-                ),
-            });
-        }
-
-        let mut row = vec![ScalarValue::Null; table.columns().len()];
-        let mut provided = vec![false; table.columns().len()];
-        for (raw, col_idx) in source_row.iter().zip(target_indexes.iter()) {
-            let column = &table.columns()[*col_idx];
-            row[*col_idx] = coerce_value_for_column(raw.clone(), column)?;
-            provided[*col_idx] = true;
-        }
-
-        for (idx, column) in table.columns().iter().enumerate() {
-            if !provided[idx]
-                && let Some(default_expr) = column.default()
-            {
-                let raw = eval_expr(default_expr, &EvalScope::default(), params).await?;
-                row[idx] = coerce_value_for_column(raw, column)?;
-            }
-        }
-
+    for row in &source_rows {
         for (idx, column) in table.columns().iter().enumerate() {
             if matches!(row[idx], ScalarValue::Null) && !column.nullable() {
                 return Err(EngineError {
@@ -1017,7 +1047,7 @@ async fn execute_insert(
                 });
             }
         }
-        if !relation_row_passes_check_for_command(&table, &row, RlsCommand::Insert, params).await? {
+        if !relation_row_passes_check_for_command(&table, row, RlsCommand::Insert, params).await? {
             return Err(EngineError {
                 message: format!(
                     "new row violates row-level security policy for relation \"{}\"",
@@ -1026,7 +1056,7 @@ async fn execute_insert(
             });
         }
 
-        materialized.push(row);
+        materialized.push(row.clone());
     }
 
     let mut candidate_rows = with_storage_read(|storage| {

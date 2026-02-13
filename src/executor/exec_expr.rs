@@ -170,6 +170,9 @@ pub(crate) fn eval_expr<'a>(
 ) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
     Box::pin(async move {
         match expr {
+            Expr::Default => Err(EngineError {
+                message: "DEFAULT is only allowed in INSERT VALUES".to_string(),
+            }),
             Expr::Null => Ok(ScalarValue::Null),
             Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
             Expr::Integer(v) => Ok(ScalarValue::Int(*v)),
@@ -442,6 +445,9 @@ pub(crate) fn eval_expr_with_window<'a>(
 ) -> EngineFuture<'a, Result<ScalarValue, EngineError>> {
     Box::pin(async move {
         match expr {
+            Expr::Default => Err(EngineError {
+                message: "DEFAULT is only allowed in INSERT VALUES".to_string(),
+            }),
             Expr::Null => Ok(ScalarValue::Null),
             Expr::Boolean(v) => Ok(ScalarValue::Bool(*v)),
             Expr::Integer(v) => Ok(ScalarValue::Int(*v)),

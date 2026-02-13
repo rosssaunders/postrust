@@ -468,6 +468,7 @@ fn collect_window_exprs(expr: &Expr, out: &mut Vec<Expr>) {
                 collect_window_exprs(e, out);
             }
         }
+        Expr::Default => {}
     }
 }
 
