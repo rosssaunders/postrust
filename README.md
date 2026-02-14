@@ -23,6 +23,12 @@ WHERE key = 'result';
 
 Runs natively on Linux/macOS **and in the browser via WASM**. [Try it live →](https://rosssaunders.github.io/postrust)
 
+## Demo
+
+![Postrust CLI Demo](assets/demo.gif)
+
+*psql connecting to Postrust — CREATE TABLE, queries with window functions, JSON, CTEs, and live HTTP fetching.*
+
 ## Why async matters
 
 Most embeddable SQL engines block on I/O. That's fine for local files, but useless when your data lives behind an API.
