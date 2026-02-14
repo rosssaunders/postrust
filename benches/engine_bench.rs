@@ -1,5 +1,5 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
 fn assert_ok(out: &[BackendMessage]) {
     assert!(

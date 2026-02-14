@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Postrust Browser Test</title>
+    <title>OpenAssay Browser Test</title>
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/ag-grid-community/styles/ag-grid.css"
@@ -158,7 +158,7 @@
   </head>
   <body>
     <main class="app">
-      <h1 class="title">Postrust Browser SQL Harness</h1>
+      <h1 class="title">OpenAssay Browser SQL Harness</h1>
       <div class="toolbar">
         <button id="run" type="button">Run (Cmd/Ctrl + Enter)</button>
         <button id="export-snapshot" type="button">Export Snapshot</button>
@@ -191,7 +191,7 @@
       const exportBtn = document.getElementById("export-snapshot");
       const importBtn = document.getElementById("import-snapshot");
       const resetBtn = document.getElementById("reset-state");
-      const SNAPSHOT_KEY = "postgrust_snapshot_v1";
+      const SNAPSHOT_KEY = "openassay_snapshot_v1";
       let editor;
       let resultEditor;
       let pendingResultText = "Loading WASM runtime...";
@@ -342,8 +342,8 @@
             }
           }
         }
-        if (names.includes("execute_sql") && typeof window.postgrustExecute === "function") {
-          return window.postgrustExecute;
+        if (names.includes("execute_sql") && typeof window.openassayExecute === "function") {
+          return window.openassayExecute;
         }
         return null;
       }
@@ -389,7 +389,7 @@
 
       async function tryLoadWasmApi() {
         try {
-          const mod = await import("./pkg/postgrust.js");
+          const mod = await import("./pkg/openassay.js");
           if (typeof mod.default === "function") {
             await mod.default();
           }
@@ -435,7 +435,7 @@
         ]);
 
         if (typeof runFunction !== "function") {
-          setResult("No execute function found. Expected `postgrustExecute(sql)` or WASM export.");
+          setResult("No execute function found. Expected `openassayExecute(sql)` or WASM export.");
           return;
         }
 

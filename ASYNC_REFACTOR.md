@@ -1,7 +1,7 @@
 # Async Engine Refactor
 
 ## Goal
-Make the postrust SQL engine fully async, so that built-in functions like `http_get()` and WebSocket operations can use native async I/O instead of blocking calls.
+Make the openassay SQL engine fully async, so that built-in functions like `http_get()` and WebSocket operations can use native async I/O instead of blocking calls.
 
 ## Why
 - Synchronous XHR (used by `http_get` in WASM) is deprecated and will be removed from browsers

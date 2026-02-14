@@ -3,10 +3,10 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 
-use postgrust::protocol::messages::{
+use openassay::protocol::messages::{
     StartupAction, decode_frontend_message, decode_startup_action, encode_backend_message,
 };
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 use rcgen::generate_simple_self_signed;
 use rustls::{Certificate, PrivateKey, ServerConfig, ServerConnection, StreamOwned};
 
@@ -24,7 +24,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    println!("postgrust pgwire listening on {}", addr);
+    println!("openassay pgwire listening on {}", addr);
 
     for stream in listener.incoming() {
         match stream {

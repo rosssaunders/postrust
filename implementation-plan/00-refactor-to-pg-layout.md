@@ -221,7 +221,7 @@ This is the largest extraction — the query execution engine.
 
 ## Mapping Reference
 
-| PostgreSQL C directory        | Postrust Rust module         |
+| PostgreSQL C directory        | OpenAssay Rust module         |
 |-------------------------------|------------------------------|
 | `src/backend/tcop/`           | `src/tcop/`                  |
 | `src/backend/executor/`       | `src/executor/`              |

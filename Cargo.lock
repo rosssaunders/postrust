@@ -1004,6 +1004,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
+name = "openassay"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "byteorder",
+ "bytes",
+ "criterion",
+ "futures",
+ "hmac",
+ "js-sys",
+ "md-5",
+ "pbkdf2",
+ "postgres-protocol",
+ "proptest",
+ "rand 0.8.5",
+ "rcgen",
+ "regex",
+ "reqwest",
+ "rustls 0.21.12",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-postgres",
+ "tungstenite",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "openssl"
 version = "0.10.75"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1188,36 +1218,6 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
-]
-
-[[package]]
-name = "postgrust"
-version = "0.1.0"
-dependencies = [
- "base64",
- "byteorder",
- "bytes",
- "criterion",
- "futures",
- "hmac",
- "js-sys",
- "md-5",
- "pbkdf2",
- "postgres-protocol",
- "proptest",
- "rand 0.8.5",
- "rcgen",
- "regex",
- "reqwest",
- "rustls 0.21.12",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-postgres",
- "tungstenite",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]

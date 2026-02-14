@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Development server for the postrust Excel Add-in.
+ * Development server for the openassay Excel Add-in.
  * Serves the add-in files over HTTPS (required by Office Add-ins).
  *
  * Usage:
@@ -83,12 +83,12 @@ const server = https.createServer(
 );
 
 server.listen(PORT, () => {
-  console.log(`\n🐘 postrust Excel Add-in dev server`);
+  console.log(`\n🐘 openassay Excel Add-in dev server`);
   console.log(`   https://localhost:${PORT}/`);
   console.log(`   https://localhost:${PORT}/taskpane.html`);
   console.log(`\n📋 To use in Excel:`);
   console.log(`   1. Open Excel Online (excel.office.com)`);
   console.log(`   2. Insert → Office Add-ins → Upload My Add-in`);
   console.log(`   3. Upload manifest.xml from this directory`);
-  console.log(`   4. The "postrust SQL" panel will appear\n`);
+  console.log(`   4. The "openassay SQL" panel will appear\n`);
 });

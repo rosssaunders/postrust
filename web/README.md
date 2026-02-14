@@ -6,7 +6,7 @@ Build the WASM package:
 scripts/build_wasm.sh
 ```
 
-This writes `web/pkg/postgrust.js` + `web/pkg/postgrust_bg.wasm`.
+This writes `web/pkg/openassay.js` + `web/pkg/openassay_bg.wasm`.
 
 Run the local static server:
 

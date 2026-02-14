@@ -609,7 +609,7 @@ impl PostgresSession {
             }
             FrontendMessage::SslRequest => {
                 out.push(BackendMessage::NoticeResponse {
-                    message: "SSL is not supported by postgrust".to_string(),
+                    message: "SSL is not supported by openassay".to_string(),
                     code: "00000".to_string(),
                     detail: None,
                     hint: None,
@@ -945,7 +945,7 @@ impl PostgresSession {
         out.push(BackendMessage::AuthenticationOk);
         out.push(BackendMessage::ParameterStatus {
             name: "server_version".to_string(),
-            value: "16.0-postgrust".to_string(),
+            value: "16.0-openassay".to_string(),
         });
         out.push(BackendMessage::ParameterStatus {
             name: "client_encoding".to_string(),

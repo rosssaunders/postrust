@@ -1,4 +1,4 @@
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -128,7 +128,7 @@ fn normalize_output(output: &str) -> String {
 
 /// Check if a test failure is due to an unsupported feature rather than a bug
 fn is_expected_limitation(test_name: &str, error_output: &str) -> bool {
-    // Features that postrust might not fully support yet
+    // Features that openassay might not fully support yet
     let known_limitations = [
         "CREATE EXTENSION",
         "ALTER TABLE",
@@ -293,7 +293,7 @@ fn postgresql_compatibility_suite() {
     }
 }
 
-/// Test individual PostgreSQL features that postrust claims to support
+/// Test individual PostgreSQL features that openassay claims to support
 #[test] 
 fn test_core_postgresql_features() {
     let mut session = PostgresSession::new();

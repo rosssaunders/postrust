@@ -1059,8 +1059,8 @@ pub(crate) async fn eval_scalar_function(
             Ok(ScalarValue::Bool(a >= b))
         }
         // --- System info functions ---
-        "version" if args.is_empty() => Ok(ScalarValue::Text("Postrust 0.1.0 on Rust".to_string())),
-        "current_database" if args.is_empty() => Ok(ScalarValue::Text("postrust".to_string())),
+        "version" if args.is_empty() => Ok(ScalarValue::Text("OpenAssay 0.1.0 on Rust".to_string())),
+        "current_database" if args.is_empty() => Ok(ScalarValue::Text("openassay".to_string())),
         "current_schema" if args.is_empty() => Ok(ScalarValue::Text("public".to_string())),
         "current_user" | "session_user" | "user" if args.is_empty() => {
             let role = security::current_role();
@@ -1114,7 +1114,7 @@ pub(crate) async fn eval_scalar_function(
             };
             Ok(ScalarValue::Int(size))
         }
-        "pg_get_userbyid" if args.len() == 1 => Ok(ScalarValue::Text("postrust".to_string())),
+        "pg_get_userbyid" if args.len() == 1 => Ok(ScalarValue::Text("openassay".to_string())),
         "pg_get_viewdef" if args.len() == 1 => {
             if matches!(args[0], ScalarValue::Null) {
                 return Ok(ScalarValue::Null);

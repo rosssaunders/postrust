@@ -1,4 +1,4 @@
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
 #[test]
 fn measure_arrays_pass_rate() {

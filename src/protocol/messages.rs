@@ -664,14 +664,14 @@ mod tests {
     #[test]
     fn startup_packet_roundtrip() {
         let packet = StartupPacket::new("alice", Some("appdb".to_string()))
-            .with_parameter("application_name", "postgrust-tests");
+            .with_parameter("application_name", "openassay-tests");
         let encoded = encode_startup_packet(&packet);
         let decoded = decode_startup_packet(&encoded).expect("startup decode should succeed");
         assert_eq!(decoded.user, "alice");
         assert_eq!(decoded.database.as_deref(), Some("appdb"));
         assert_eq!(
             decoded.parameter("application_name"),
-            Some("postgrust-tests")
+            Some("openassay-tests")
         );
     }
 

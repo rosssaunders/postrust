@@ -1,7 +1,7 @@
 # Step 18: Logical Replication Target
 
 Goal:
-- Make postrust a PostgreSQL logical replication subscriber so it can replicate
+- Make openassay a PostgreSQL logical replication subscriber so it can replicate
   data from an upstream PostgreSQL server and serve local read queries over an
   in-memory copy.
 
@@ -9,7 +9,7 @@ Goal:
 
 ```
 ┌──────────────┐  logical replication   ┌──────────────┐
-│   Upstream   │  (pgoutput WAL stream) │   postrust   │
+│   Upstream   │  (pgoutput WAL stream) │   openassay   │
 │  PostgreSQL  │ ─────────────────────▶ │  (in-memory) │
 │   server     │  standby status msgs   │              │
 │              │ ◀───────────────────── │              │
@@ -69,14 +69,14 @@ Implementation files:
 
 ### Phase C: Schema Synchronization
 
-Mirror upstream table definitions into postrust's catalog.
+Mirror upstream table definitions into openassay's catalog.
 
 1. **Initial schema discovery** — query `pg_catalog.pg_class`,
    `pg_catalog.pg_attribute`, `pg_catalog.pg_namespace`, `pg_catalog.pg_type`
    on the upstream server to get table/column definitions.
 2. **Relation message handling** — when pgoutput sends Relation messages,
    verify/create/update the local table definition in the catalog.
-3. **Type mapping** — map upstream PostgreSQL type OIDs to postrust's supported
+3. **Type mapping** — map upstream PostgreSQL type OIDs to openassay's supported
    types. Unsupported types fall back to text representation.
 4. **Publication filtering** — only replicate tables in the specified publication.
 
@@ -90,7 +90,7 @@ Before streaming starts, copy existing data from upstream.
 1. **COPY export** — for each table in the publication, run
    `COPY table_name TO STDOUT` over the replication connection.
 2. **Row parsing** — parse COPY text/binary format rows.
-3. **Bulk insert** — insert rows into postrust's in-memory storage.
+3. **Bulk insert** — insert rows into openassay's in-memory storage.
 4. **Snapshot consistency** — use the replication slot's consistent point to
    ensure initial copy and subsequent streaming are seamless.
 
@@ -102,7 +102,7 @@ Implementation files:
 Apply streamed changes to in-memory storage.
 
 1. **Transaction batching** — collect changes between Begin/Commit messages and
-   apply them atomically using postrust's transaction system.
+   apply them atomically using openassay's transaction system.
 2. **INSERT** — insert new tuple into the target table's in-memory storage.
 3. **UPDATE** — find matching row (by primary key or replica identity) and
    replace with new tuple.
@@ -123,7 +123,7 @@ User-facing commands to configure replication.
    CREATE SUBSCRIPTION sub_name
      CONNECTION 'host=upstream dbname=mydb'
      PUBLICATION pub_name
-     WITH (copy_data = true, slot_name = 'postrust_sub');
+     WITH (copy_data = true, slot_name = 'openassay_sub');
    ```
 2. **ALTER SUBSCRIPTION** — enable/disable, refresh publication.
 3. **DROP SUBSCRIPTION** — disconnect and drop the replication slot on upstream.
@@ -138,7 +138,7 @@ Implementation files:
 ### Phase G: Monitoring and Resilience
 
 1. **Reconnection** — auto-reconnect on connection loss with exponential backoff.
-2. **LSN persistence** — write last applied LSN to a file so postrust can resume
+2. **LSN persistence** — write last applied LSN to a file so openassay can resume
    after restart (optional, since it's in-memory anyway).
 3. **Lag reporting** — expose replication lag in pg_stat_subscription.
 4. **Health checks** — periodic keepalive/status updates to upstream.
@@ -170,16 +170,16 @@ Implementation files:
 - Integration test: UPDATE/DELETE application with PK lookup
 - End-to-end test (requires a real PostgreSQL instance):
   - Create publication on upstream
-  - CREATE SUBSCRIPTION on postrust
-  - Insert rows upstream, verify they appear in postrust
+  - CREATE SUBSCRIPTION on openassay
+  - Insert rows upstream, verify they appear in openassay
   - Update/delete upstream, verify changes replicate
 
 ## Done Criteria
 
-- postrust can subscribe to a PostgreSQL publication
+- openassay can subscribe to a PostgreSQL publication
 - Initial data copy works
 - Streaming INSERT/UPDATE/DELETE changes are applied in real-time
-- Clients can connect to postrust and query replicated data
+- Clients can connect to openassay and query replicated data
 - Replication lag is visible via pg_stat_subscription
 - Reconnection works after upstream restart
 
@@ -187,5 +187,5 @@ Implementation files:
 
 - Read-only replica — writes to replicated tables should be rejected
 - Single upstream for now (no multi-source replication)
-- Supported types: all types postrust currently handles; others stored as text
+- Supported types: all types openassay currently handles; others stored as text
 - No support for DDL replication (schema changes require manual refresh)

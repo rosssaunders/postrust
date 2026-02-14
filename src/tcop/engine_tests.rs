@@ -4155,10 +4155,10 @@ fn generate_series_with_step() {
 fn system_info_functions() {
     let r = run("SELECT version(), current_database(), current_schema()");
     match &r.rows[0][0] {
-        ScalarValue::Text(v) => assert!(v.contains("Postrust")),
+        ScalarValue::Text(v) => assert!(v.contains("OpenAssay")),
         other => panic!("expected text, got {:?}", other),
     }
-    assert_eq!(r.rows[0][1], ScalarValue::Text("postrust".to_string()));
+    assert_eq!(r.rows[0][1], ScalarValue::Text("openassay".to_string()));
     assert_eq!(r.rows[0][2], ScalarValue::Text("public".to_string()));
 }
 
@@ -4385,7 +4385,7 @@ fn pg_settings_returns_guc_variables() {
 #[test]
 fn pg_database_returns_current_database() {
     let r = run("SELECT datname FROM pg_catalog.pg_database");
-    assert_eq!(r.rows[0][0], ScalarValue::Text("postrust".to_string()));
+    assert_eq!(r.rows[0][0], ScalarValue::Text("openassay".to_string()));
 }
 
 #[test]

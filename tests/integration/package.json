@@ -1,5 +1,5 @@
 {
-  "name": "postrust-integration-tests",
+  "name": "openassay-integration-tests",
   "version": "1.0.0",
   "private": true,
   "scripts": {

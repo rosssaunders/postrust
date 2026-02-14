@@ -1,4 +1,4 @@
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
 #[test]
 fn run_subselect_sql() {

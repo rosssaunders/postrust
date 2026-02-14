@@ -1,15 +1,15 @@
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
-/// Test postrust's core SQL capabilities using simplified test cases
+/// Test openassay's core SQL capabilities using simplified test cases
 /// that don't rely on PostgreSQL's specific test table structures.
 #[test]
-fn test_postrust_supported_features() {
+fn test_openassay_supported_features() {
     let mut session = PostgresSession::new();
     let mut passed = 0;
     let mut failed = 0;
     let mut test_results = Vec::new();
     
-    println!("Testing postrust's supported PostgreSQL features...\n");
+    println!("Testing openassay's supported PostgreSQL features...\n");
     
     // Helper function to run a test
     let mut run_test = |name: &str, sql: &str, should_succeed: bool| {
@@ -174,7 +174,7 @@ fn test_postrust_supported_features() {
     let total = passed + failed;
     let pass_rate = if total > 0 { (passed * 100) / total } else { 0 };
     
-    println!("\n=== Postrust Feature Compatibility Results ===");
+    println!("\n=== OpenAssay Feature Compatibility Results ===");
     println!("Total tests: {}", total);
     println!("Passed: {}", passed);
     println!("Failed: {}", failed);
@@ -189,7 +189,7 @@ fn test_postrust_supported_features() {
         }
     }
     
-    println!("\nNote: This test measures postrust's compatibility with core PostgreSQL features.");
+    println!("\nNote: This test measures openassay's compatibility with core PostgreSQL features.");
     println!("A high pass rate indicates good PostgreSQL compatibility for supported features.");
     
     // The test succeeds as long as basic functionality works

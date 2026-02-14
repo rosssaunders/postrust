@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Test the postrust WASM engine in Node.js.
+ * Test the openassay WASM engine in Node.js.
  * Proves the same engine that runs in the Excel add-in works correctly.
  */
 
@@ -9,13 +9,13 @@ const path = require('path');
 
 async function main() {
   console.log('═══════════════════════════════════════════════');
-  console.log('  postrust WASM Engine Test (Node.js)');
+  console.log('  openassay WASM Engine Test (Node.js)');
   console.log('═══════════════════════════════════════════════\n');
 
   // Load WASM
   console.log('Loading WASM engine...');
-  const wasmPath = path.join(__dirname, 'pkg', 'postgrust_bg.wasm');
-  const jsPath = path.join(__dirname, 'pkg', 'postgrust.js');
+  const wasmPath = path.join(__dirname, 'pkg', 'openassay_bg.wasm');
+  const jsPath = path.join(__dirname, 'pkg', 'openassay.js');
   
   // Dynamic import of ES module
   const mod = await import(jsPath);
@@ -114,8 +114,8 @@ async function main() {
 
   // Test 10: JSON
   console.log('\n🧪 Test 10: JSON functions');
-  r = await sql(`SELECT json_extract_path_text('{"name": "postrust", "version": "1"}', 'name') AS engine`);
-  assert(r.rows[0][0] === 'postrust', 'JSON extraction works');
+  r = await sql(`SELECT json_extract_path_text('{"name": "openassay", "version": "1"}', 'name') AS engine`);
+  assert(r.rows[0][0] === 'openassay', 'JSON extraction works');
 
   // Test 11: String functions
   console.log('\n🧪 Test 11: String functions');

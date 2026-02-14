@@ -1,7 +1,7 @@
 # Phase 11: Audit Report - PostgreSQL C Source Alignment
 
 ## Overview
-This document tracks the audit of Postrust implementation against PostgreSQL C source code to identify divergences and ensure compatibility.
+This document tracks the audit of OpenAssay implementation against PostgreSQL C source code to identify divergences and ensure compatibility.
 
 ## Module 1: Expression Evaluation
 
@@ -18,7 +18,7 @@ This document tracks the audit of Postrust implementation against PostgreSQL C s
 - **Opcode specialization**: Multiple variants (e.g., `FUNCEXPR_STRICT_1`, `FUNCEXPR_STRICT_2`) to optimize hot paths
 - **JIT-friendly**: Helper functions enable JIT compilation
 
-#### Postrust Approach
+#### OpenAssay Approach
 - **Recursive evaluator**: Match-based tree walking with async support
 - **Switch dispatch**: Traditional Rust match statements
 - **Uniform handling**: Single code path for each expression type
@@ -144,7 +144,7 @@ Both implementations handle NULL correctly:
 
 ### Error Messages - ✅ MOSTLY ALIGNED
 Sample comparison:
-| Operation | PostgreSQL | Postrust | Status |
+| Operation | PostgreSQL | OpenAssay | Status |
 |-----------|-----------|----------|--------|
 | Division by zero | "division by zero" | "division by zero" | ✅ Match |
 | INT overflow | "integer out of range" | "integer out of range" | ✅ Match |

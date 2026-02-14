@@ -1,4 +1,4 @@
-# Postrust CLI Demo
+# OpenAssay CLI Demo
 Output assets/demo.gif
 
 Set Shell "bash"
@@ -14,7 +14,7 @@ Hide
 Type "export PATH=/home/linuxbrew/.linuxbrew/opt/libpq/bin:/home/linuxbrew/.linuxbrew/bin:$PATH"
 Enter
 Sleep 500ms
-Type "pkill -f pg_server 2>/dev/null; sleep 2; /home/rosssaunders/code/rosssaunders/postrust/target/release/pg_server >/dev/null 2>&1 &"
+Type "pkill -f pg_server 2>/dev/null; sleep 2; /home/rosssaunders/code/rosssaunders/openassay/target/release/pg_server >/dev/null 2>&1 &"
 Enter
 Sleep 4s
 Type "clear"
@@ -22,7 +22,7 @@ Enter
 Sleep 500ms
 Show
 
-# Connect to Postrust
+# Connect to OpenAssay
 Type "psql -h 127.0.0.1 -p 55432 -U postgres"
 Enter
 Sleep 2s

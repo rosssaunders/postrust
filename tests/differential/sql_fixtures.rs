@@ -1,4 +1,4 @@
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
 #[derive(Debug)]
 struct Fixture {
@@ -40,7 +40,7 @@ fn differential_fixture_suite() {
             expected_rows: vec![vec!["b"]],
         },
         Fixture {
-            sql: "SELECT length('postrust')",
+            sql: "SELECT length('openassay')",
             expected_rows: vec![vec!["8"]],
         },
         Fixture {

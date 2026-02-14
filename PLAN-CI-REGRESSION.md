@@ -7,7 +7,7 @@
 ## Prompt for Codex
 
 ```
-You are working on postrust at ~/code/rosssaunders/postrust — an async PostgreSQL-compatible SQL engine in Rust.
+You are working on openassay at ~/code/rosssaunders/openassay — an async PostgreSQL-compatible SQL engine in Rust.
 
 Read COMPATIBILITY.md for the current PG18 regression test results.
 

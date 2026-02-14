@@ -1,7 +1,7 @@
-use postgrust::parser::scansup::downcase_truncate_identifier;
-use postgrust::parser::sql_parser::parse_statement;
-use postgrust::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
-use postgrust::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
+use openassay::parser::scansup::downcase_truncate_identifier;
+use openassay::parser::sql_parser::parse_statement;
+use openassay::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
+use openassay::tcop::postgres::{BackendMessage, FrontendMessage, PostgresSession};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -9,7 +9,7 @@ async fn main() {
     match args.next().as_deref() {
         Some("ident") => {
             let Some(identifier) = args.next() else {
-                eprintln!("usage: postgrust ident <identifier>");
+                eprintln!("usage: openassay ident <identifier>");
                 std::process::exit(2);
             };
             let transformed = downcase_truncate_identifier(&identifier, false);
@@ -18,7 +18,7 @@ async fn main() {
         Some("parse") => {
             let sql = args.collect::<Vec<_>>().join(" ");
             if sql.is_empty() {
-                eprintln!("usage: postgrust parse <sql>");
+                eprintln!("usage: openassay parse <sql>");
                 std::process::exit(2);
             }
             match parse_statement(&sql) {
@@ -36,7 +36,7 @@ async fn main() {
                 Err(msg) => {
                     eprintln!("{msg}");
                     eprintln!(
-                        "usage: postgrust exec [--param <value> | --null-param]... [--] <sql>"
+                        "usage: openassay exec [--param <value> | --null-param]... [--] <sql>"
                     );
                     std::process::exit(2);
                 }
@@ -97,7 +97,7 @@ async fn main() {
         }
         None => {
             eprintln!(
-                "usage:\n  postgrust ident <identifier>\n  postgrust parse <sql>\n  postgrust exec [--param <value> | --null-param]... [--] <sql>\n  postgrust <identifier>"
+                "usage:\n  openassay ident <identifier>\n  openassay parse <sql>\n  openassay exec [--param <value> | --null-param]... [--] <sql>\n  openassay <identifier>"
             );
             std::process::exit(2);
         }

@@ -1527,9 +1527,9 @@ fn virtual_relation_rows(
                 .into_iter()
                 .map(|name| {
                     vec![
-                        ScalarValue::Text("postrust".to_string()),
+                        ScalarValue::Text("openassay".to_string()),
                         ScalarValue::Text(name),
-                        ScalarValue::Text("postrust".to_string()),
+                        ScalarValue::Text("openassay".to_string()),
                     ]
                 })
                 .collect())
@@ -1545,7 +1545,7 @@ fn virtual_relation_rows(
         ("pg_catalog", "pg_database") => {
             Ok(vec![vec![
                 ScalarValue::Int(1),
-                ScalarValue::Text("postrust".to_string()),
+                ScalarValue::Text("openassay".to_string()),
                 ScalarValue::Int(10),
                 ScalarValue::Int(6), // UTF8
                 ScalarValue::Text("en_US.UTF-8".to_string()),
@@ -1580,7 +1580,7 @@ fn virtual_relation_rows(
                         rows.push(vec![
                             ScalarValue::Text(schema.name().to_string()),
                             ScalarValue::Text(table.name().to_string()),
-                            ScalarValue::Text("postrust".to_string()),
+                            ScalarValue::Text("openassay".to_string()),
                         ]);
                     }
                 }
@@ -1595,7 +1595,7 @@ fn virtual_relation_rows(
                         rows.push(vec![
                             ScalarValue::Text(schema.name().to_string()),
                             ScalarValue::Text(table.name().to_string()),
-                            ScalarValue::Text("postrust".to_string()),
+                            ScalarValue::Text("openassay".to_string()),
                         ]);
                     }
                 }

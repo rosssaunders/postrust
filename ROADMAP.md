@@ -1,4 +1,4 @@
-# Postrust Development Roadmap
+# OpenAssay Development Roadmap
 
 **Goal:** Full PostgreSQL-compatible SQL engine in Rust with WASM browser frontend
 

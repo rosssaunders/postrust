@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>postrust SQL</title>
+  <title>openassay SQL</title>
   <script src="https://appsforoffice.microsoft.com/lib/1.1/hosted/office.js"></script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -107,7 +107,7 @@
   </style>
 </head>
 <body>
-  <h1>🐘 postrust SQL</h1>
+  <h1>🐘 openassay SQL</h1>
   <p style="font-size:11px;color:#888;margin-bottom:12px;">
     Run PostgreSQL queries over your Excel data
   </p>
@@ -130,7 +130,7 @@
   <div id="results"></div>
 
   <script type="module">
-    import init, { execute_sql_json } from './pkg/postgrust.js';
+    import init, { execute_sql_json } from './pkg/openassay.js';
 
     let wasmReady = false;
     let lastResult = null;
@@ -167,7 +167,7 @@
       return name.toLowerCase().replace(/[^a-z0-9_]/g, '_').replace(/^[0-9]/, '_$&');
     }
 
-    // Import a range from Excel into postrust
+    // Import a range from Excel into openassay
     async function importRange(name, values) {
       if (!values || values.length < 2) {
         throw new Error('Need at least a header row and one data row');

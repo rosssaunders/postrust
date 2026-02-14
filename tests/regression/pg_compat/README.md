@@ -1,6 +1,6 @@
 # PostgreSQL Regression Test Compatibility
 
-This directory contains PostgreSQL regression tests from PostgreSQL 19 (development branch) that have been filtered to match postrust's supported feature set.
+This directory contains PostgreSQL regression tests from PostgreSQL 19 (development branch) that have been filtered to match openassay's supported feature set.
 
 ## Test Structure
 
@@ -10,7 +10,7 @@ This directory contains PostgreSQL regression tests from PostgreSQL 19 (developm
 
 ## Test Files
 
-The following PostgreSQL 19 (development branch) regression tests have been included based on postrust's supported features:
+The following PostgreSQL 19 (development branch) regression tests have been included based on openassay's supported features:
 
 ### Core SQL Operations
 - `select.sql` - Basic SELECT queries, expressions
@@ -61,14 +61,14 @@ The following PostgreSQL 19 (development branch) regression tests have been incl
 
 ### Method 1: Rust Test Framework (Recommended)
 
-The PostgreSQL compatibility tests are integrated into postrust's Rust test framework:
+The PostgreSQL compatibility tests are integrated into openassay's Rust test framework:
 
 ```bash
 # Run the comprehensive PostgreSQL compatibility test
 cargo test pg_compat::postgresql_compatibility_suite -- --nocapture
 
 # Run the simplified feature compatibility test (recommended)
-cargo test pg_compat_simplified::test_postrust_supported_features -- --nocapture
+cargo test pg_compat_simplified::test_openassay_supported_features -- --nocapture
 
 # Run core feature test
 cargo test pg_compat::test_core_postgresql_features -- --nocapture
@@ -100,9 +100,9 @@ If you have PostgreSQL client tools installed:
 
 ## Test Methodology
 
-1. **PostgreSQL Test Selection:** Tests were filtered from PostgreSQL 19 (devel)'s `src/test/regress/` directory based on postrust's claimed feature support from the README.md
+1. **PostgreSQL Test Selection:** Tests were filtered from PostgreSQL 19 (devel)'s `src/test/regress/` directory based on openassay's claimed feature support from the README.md
 
-2. **Feature Mapping:** Each test file was selected if it primarily tests features that postrust claims to support:
+2. **Feature Mapping:** Each test file was selected if it primarily tests features that openassay claims to support:
    - SELECT queries and expressions
    - JOINs and subqueries  
    - CTEs and window functions
@@ -110,17 +110,17 @@ If you have PostgreSQL client tools installed:
    - Basic data types and functions
    - DDL operations (CREATE TABLE, VIEW, INDEX, SEQUENCE)
 
-3. **Test Execution:** Tests are run using postrust's internal `PostgresSession` API rather than the wire protocol to ensure accurate feature testing.
+3. **Test Execution:** Tests are run using openassay's internal `PostgresSession` API rather than the wire protocol to ensure accurate feature testing.
 
 ## Compatibility Analysis
 
-Postrust shows **excellent compatibility** with core PostgreSQL features:
+OpenAssay shows **excellent compatibility** with core PostgreSQL features:
 
 - **✅ Strong areas:** Basic queries, JOINs, subqueries, CTEs, window functions, aggregates, string/math functions, DDL
 - **⚠️ Partial support:** JSON/JSONB (functions work, casting doesn't), some date/time functions
 - **❌ Missing features:** Some advanced PostgreSQL-specific syntax and functions
 
-The **94% pass rate** on core features indicates that postrust successfully implements the vast majority of PostgreSQL's essential SQL functionality.
+The **94% pass rate** on core features indicates that openassay successfully implements the vast majority of PostgreSQL's essential SQL functionality.
 
 ## Future Improvements
 

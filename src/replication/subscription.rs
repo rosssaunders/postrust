@@ -46,7 +46,7 @@ pub fn create_subscription(config: SubscriptionConfig) -> Result<(), Replication
         });
     }
     let (stop_tx, stop_rx) = oneshot::channel();
-    let thread_name = format!("postrust-subscription-{}", config.name);
+    let thread_name = format!("openassay-subscription-{}", config.name);
     let config_clone = config.clone();
     thread::Builder::new()
         .name(thread_name)

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>postrust — SQL Notebook</title>
+  <title>openassay — SQL Notebook</title>
   <style>
     :root {
       --bg: #1e1e2e;
@@ -304,7 +304,7 @@
 <body>
 
 <div class="header">
-  <h1>🐘 <span>postrust</span> SQL Notebook</h1>
+  <h1>🐘 <span>openassay</span> SQL Notebook</h1>
   <div class="header-status">
     <div class="dot loading" id="engine-dot"></div>
     <span id="engine-status">Loading engine...</span>
@@ -339,7 +339,7 @@
 </div>
 
 <script type="module">
-  import init, { execute_sql_json } from './pkg/postgrust.js';
+  import init, { execute_sql_json } from './pkg/openassay.js';
 
   let wasmReady = false;
   let cellCounter = 0;
@@ -920,7 +920,7 @@
 
     if (!loadFromHash()) {
       // Default starter cells
-      addCell("-- 🐘 Welcome to postrust SQL Notebook\n-- Ctrl+Enter to run, Ctrl+Shift+Enter to run & add new cell\n-- Drop CSV/JSON files to import data\n-- Use @name to save a cell's result as a table\n\nSELECT 'Hello, SQL Notebook!' AS message, version() AS engine;");
+      addCell("-- 🐘 Welcome to openassay SQL Notebook\n-- Ctrl+Enter to run, Ctrl+Shift+Enter to run & add new cell\n-- Drop CSV/JSON files to import data\n-- Use @name to save a cell's result as a table\n\nSELECT 'Hello, SQL Notebook!' AS message, version() AS engine;");
       addCell("-- Create sample data (or just drop a CSV!)\nCREATE TABLE sales (\n  name TEXT, category TEXT, region TEXT,\n  revenue DOUBLE PRECISION, quarter INT\n);\n\nINSERT INTO sales VALUES\n  ('Alpha', 'Tech', 'North', 150000, 1),\n  ('Beta', 'Finance', 'South', 98000, 1),\n  ('Gamma', 'Tech', 'East', 220000, 2),\n  ('Delta', 'Healthcare', 'North', 175000, 2),\n  ('Epsilon', 'Finance', 'West', 130000, 3),\n  ('Zeta', 'Tech', 'South', 310000, 3),\n  ('Eta', 'Healthcare', 'East', 89000, 4),\n  ('Theta', 'Tech', 'West', 195000, 4),\n  ('Iota', 'Finance', 'North', 142000, 4);");
       addCell("-- Use @name to save results as a reusable table\n-- No CREATE TABLE boilerplate needed!\n@by_category\nSELECT category, SUM(revenue) AS total_revenue,\n       COUNT(*) AS deals,\n       ROUND(AVG(revenue)::numeric, 0) AS avg_deal\nFROM sales\nGROUP BY category\nORDER BY total_revenue DESC;");
       addCell("-- Auto-charts when 2 columns! (label + number)\nSELECT category, total_revenue FROM by_category;");

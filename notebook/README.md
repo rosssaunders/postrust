@@ -1,4 +1,4 @@
-# postrust SQL Notebook
+# openassay SQL Notebook
 
 SQL notebooks that run entirely in your browser. No server, no Python, no kernel — just SQL.
 

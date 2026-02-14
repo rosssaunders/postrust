@@ -51,7 +51,7 @@ def categorize_error(error_line):
         return 'other'
 
 def analyze_compatibility():
-    results_file = Path("~/code/rosssaunders/postrust/tests/regression/pg_compat/results/pg18_compatibility_results.json").expanduser()
+    results_file = Path("~/code/rosssaunders/openassay/tests/regression/pg_compat/results/pg18_compatibility_results.json").expanduser()
     
     with open(results_file, 'r') as f:
         data = json.load(f)

@@ -1,11 +1,11 @@
-# postrust Excel Add-in
+# openassay Excel Add-in
 
 Run PostgreSQL queries over your Excel data — entirely in-browser via WebAssembly.
 
 ## How it works
 
 1. **Import** — Select a range or table in Excel; the add-in reads the cells and creates an in-memory SQL table
-2. **Query** — Write SQL in the task pane; the query runs locally via the postrust WASM engine
+2. **Query** — Write SQL in the task pane; the query runs locally via the openassay WASM engine
 3. **Export** — Send results back to a new Excel sheet
 
 No server, no network calls — everything runs in your browser.

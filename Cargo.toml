@@ -1,5 +1,5 @@
 [package]
-name = "postgrust"
+name = "openassay"
 version = "0.1.0"
 edition = "2024"
 

@@ -4,12 +4,12 @@
  *
  * 1. Spins up a real PostgreSQL via Docker
  * 2. Creates a table and publication on upstream PG
- * 3. Starts postrust's pg_server
- * 4. Executes CREATE SUBSCRIPTION on postrust to replicate from upstream
+ * 3. Starts openassay's pg_server
+ * 4. Executes CREATE SUBSCRIPTION on openassay to replicate from upstream
  * 5. Inserts data into upstream PG
- * 6. Asserts the data appears in postrust via PG wire protocol
+ * 6. Asserts the data appears in openassay via PG wire protocol
  *
- * Requirements: docker, cargo (postrust), node, npm (pg)
+ * Requirements: docker, cargo (openassay), node, npm (pg)
  *
  * Usage: npm test (or node replication_test.js)
  */
@@ -22,11 +22,11 @@ const PG_PORT = 15432;
 const PG_USER = 'postgres';
 const PG_PASS = 'testpass';
 const PG_DB = 'testdb';
-const PG_CONTAINER = 'postrust-test-pg';
+const PG_CONTAINER = 'openassay-test-pg';
 
 const POSTRUST_PORT = 55433;
 
-let postrustProc = null;
+let openassayProc = null;
 let passed = 0;
 let failed = 0;
 
@@ -120,18 +120,18 @@ async function setupUpstream() {
   `);
 
   // Create publication for all tables
-  await client.query(`CREATE PUBLICATION postrust_pub FOR ALL TABLES`);
+  await client.query(`CREATE PUBLICATION openassay_pub FOR ALL TABLES`);
 
   console.log('  Created tables: users, orders');
-  console.log('  Created publication: postrust_pub');
+  console.log('  Created publication: openassay_pub');
 
   await client.end();
 }
 
-function startPostrust() {
-  console.log('\n🚀 Starting postrust pg_server...');
+function startOpenAssay() {
+  console.log('\n🚀 Starting openassay pg_server...');
 
-  postrustProc = spawn(
+  openassayProc = spawn(
     'cargo',
     ['run', '--bin', 'pg_server', '--', `127.0.0.1:${POSTRUST_PORT}`],
     {
@@ -143,35 +143,35 @@ function startPostrust() {
   return new Promise((resolve, reject) => {
     let output = '';
     const timeout = setTimeout(() => {
-      reject(new Error('postrust failed to start within 30s'));
+      reject(new Error('openassay failed to start within 30s'));
     }, 30000);
 
-    postrustProc.stdout.on('data', (data) => {
+    openassayProc.stdout.on('data', (data) => {
       output += data.toString();
       if (output.includes('listening on')) {
         clearTimeout(timeout);
-        console.log(`  postrust listening on port ${POSTRUST_PORT}`);
+        console.log(`  openassay listening on port ${POSTRUST_PORT}`);
         resolve();
       }
     });
 
-    postrustProc.stderr.on('data', (data) => {
+    openassayProc.stderr.on('data', (data) => {
       const msg = data.toString();
       // cargo build output goes to stderr
       if (msg.includes('error') && !msg.includes('Compiling') && !msg.includes('Downloading')) {
         clearTimeout(timeout);
-        reject(new Error(`postrust error: ${msg}`));
+        reject(new Error(`openassay error: ${msg}`));
       }
     });
 
-    postrustProc.on('error', (err) => {
+    openassayProc.on('error', (err) => {
       clearTimeout(timeout);
       reject(err);
     });
   });
 }
 
-async function connectPostrust() {
+async function connectOpenAssay() {
   const client = new Client({
     host: 'localhost',
     port: POSTRUST_PORT,
@@ -196,8 +196,8 @@ async function connectUpstream() {
 }
 
 async function testBasicQuery() {
-  console.log('\n🧪 Test: Basic postrust query works');
-  const pr = await connectPostrust();
+  console.log('\n🧪 Test: Basic openassay query works');
+  const pr = await connectOpenAssay();
   try {
     const res = await pr.query('SELECT 1 AS num, \'hello\' AS greeting');
     assertEqual(res.rows.length, 1, 'Should return 1 row');
@@ -214,10 +214,10 @@ async function testBasicQuery() {
 }
 
 async function testCreateSubscription() {
-  console.log('\n🧪 Test: CREATE SUBSCRIPTION on postrust');
-  const pr = await connectPostrust();
+  console.log('\n🧪 Test: CREATE SUBSCRIPTION on openassay');
+  const pr = await connectOpenAssay();
   try {
-    // First create the target tables (postrust needs them before replication)
+    // First create the target tables (openassay needs them before replication)
     await pr.query(`
       CREATE TABLE users (
         id SERIAL PRIMARY KEY,
@@ -241,7 +241,7 @@ async function testCreateSubscription() {
       await pr.query(`
         CREATE SUBSCRIPTION test_sub
           CONNECTION 'host=localhost port=${PG_PORT} dbname=${PG_DB} user=${PG_USER} password=${PG_PASS}'
-          PUBLICATION postrust_pub
+          PUBLICATION openassay_pub
           WITH (copy_data = true)
       `);
       console.log('  ✓ PASS: CREATE SUBSCRIPTION succeeded');
@@ -288,8 +288,8 @@ async function testInitialSync() {
   console.log('  Waiting for replication sync...');
   await sleep(3000);
 
-  // Query postrust
-  const pr = await connectPostrust();
+  // Query openassay
+  const pr = await connectOpenAssay();
   try {
     const users = await pr.query('SELECT name, email FROM users ORDER BY name');
     assertEqual(users.rows.length, 3, 'Should have 3 users after initial sync');
@@ -329,8 +329,8 @@ async function testStreamingReplication() {
   console.log('  Waiting for streaming replication...');
   await sleep(2000);
 
-  // Verify in postrust
-  const pr = await connectPostrust();
+  // Verify in openassay
+  const pr = await connectOpenAssay();
   try {
     const users = await pr.query('SELECT name FROM users ORDER BY name');
     assertEqual(users.rows.length, 4, 'Should have 4 users after streaming insert');
@@ -365,7 +365,7 @@ async function testUpdateReplication() {
 
   await sleep(2000);
 
-  const pr = await connectPostrust();
+  const pr = await connectOpenAssay();
   try {
     const res = await pr.query(`SELECT email FROM users WHERE name = 'Alice'`);
     assertEqual(res.rows.length, 1, 'Alice should still exist');
@@ -394,7 +394,7 @@ async function testDeleteReplication() {
 
   await sleep(2000);
 
-  const pr = await connectPostrust();
+  const pr = await connectOpenAssay();
   try {
     const res = await pr.query(`SELECT COUNT(*) AS cnt FROM orders WHERE status = 'pending'`);
     assertEqual(res.rows[0].cnt, '0', 'Pending orders should be deleted');
@@ -410,8 +410,8 @@ async function testDeleteReplication() {
 
 async function cleanup() {
   console.log('\n🧹 Cleaning up...');
-  if (postrustProc) {
-    postrustProc.kill('SIGTERM');
+  if (openassayProc) {
+    openassayProc.kill('SIGTERM');
     await sleep(500);
   }
   try {
@@ -421,13 +421,13 @@ async function cleanup() {
 
 async function main() {
   console.log('═══════════════════════════════════════════════');
-  console.log('  postrust Replication Integration Test');
+  console.log('  openassay Replication Integration Test');
   console.log('═══════════════════════════════════════════════');
 
   try {
     await startPostgres();
     await setupUpstream();
-    await startPostrust();
+    await startOpenAssay();
 
     await testBasicQuery();
     await testCreateSubscription();
