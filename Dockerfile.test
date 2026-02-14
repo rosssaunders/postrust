@@ -1,0 +1,10 @@
+FROM rust:1.84-bookworm
+
+RUN apt-get update && apt-get install -y postgresql-client python3 && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+RUN cargo build --release --bin pg_server
+
+CMD ["bash", "-c", "target/release/pg_server 127.0.0.1:55432 & sleep 3 && python3 tests/regression/pg_compat/run_tests.py . && cat tests/regression/pg_compat/results/compatibility_summary.txt"]
