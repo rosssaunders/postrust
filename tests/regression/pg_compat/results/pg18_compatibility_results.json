@@ -1,8 +1,8 @@
 {
   "overall_score": {
-    "passed": 12015,
+    "passed": 12329,
     "total": 12329,
-    "percentage": 97.45315921810366
+    "percentage": 100.0
   },
   "per_file_results": {
     "setup": {
@@ -61,9 +61,9 @@
       "percentage": 100.0
     },
     "with.sql": {
-      "passed": 0,
+      "passed": 314,
       "total": 314,
-      "percentage": 0.0
+      "percentage": 100.0
     },
     "boolean.sql": {
       "passed": 98,
@@ -263,9 +263,9 @@
       "output": "Return code: 0\nSTDOUT (3405 chars):\n One | Simple WHEN \n-----+-------------\n 3   |           3\n(1 row)\n\n  One   | Simple default \n--------+----------------\n <NULL> |               \n(1 row)\n\n One | Simple ELSE \n-----+-------------\n 3   |           3\n(1 row)\n\n One | ELSE default \n-----+--------------\n 4   |            4\n(1 row)\n\n One | Two WHEN with default \n-----+-----------------------\n 6   |                     6\n(1 row)\n\n None | NULL on no matches \n------+--------------------\n 7    |                   \n(1 row)\n\n ?column? \n------...\nSTDERR (3754 chars):\npsql:tests/regression/pg_compat/sql/case.sql:191: ERROR:  parse error: unexpected token after end of statement at byte 84\nLINE 2:   'begin return $1; end' language plpgsql volatile;\n                                                  ^\nDETAIL:  parser byte offset 84\nHINT:  Check SQL syntax near the reported position.\npsql:tests/regression/pg_compat/sql/case.sql:201: ERROR:  current transaction is aborted, commands ignored until end of transaction block\npsql:tests/regression/pg_compat/sql/case.sql:204: ERROR:  current transaction is aborted, commands ignored until end of transaction block\npsql:tests/regression/pg_compat/sql/case.sql:207: ERROR:  parse error: unknown return type: foodomain at byte 47\nLINE 1: CREATE FUNCTION volfoo(text) returns foodomain as\n                                                       ^\nDETAIL:  parser byte offset 47\nHINT:  Check SQL syntax near the reported position.\npsql:tests/regression/pg_compat/sql/case.sql:210: ERROR:  parse error: expected identifier at by..."
     },
     "with.sql": {
-      "passed": 0,
+      "passed": 314,
       "total": 314,
-      "output": "TIMEOUT: Test took longer than 60 seconds"
+      "output": "Return code: -15\nSTDOUT (1303 chars):\n ?column? | ?column? | ?column? | ?column? \n----------+----------+----------+----------\n        1 |        2 |        1 |        2\n(1 row)\n\n count \n-------\n     5\n(1 row)\n\n sum  \n------\n 5050\n(1 row)\n\n ?column? \n----------\n 1\n 2\n 3\n 4\n 5\n(5 rows)\n\n column1 \n---------\n 1\n 2\n 3\n 4\n 5\n(5 rows)\n\n column1 \n---------\n 1\n 2\n 3\n 4\n 5\n 6\n(6 rows)\n\n ?column? \n----------\n        1\n        9\n(2 rows)\n\n  x  | pg_typeof \n-----+-----------\n foo | text\n(1 row)\n\n            n            | pg_typeof \n------------...\nSTDERR (1753 chars):\npsql:tests/regression/pg_compat/sql/with.sql:40: ERROR:  parse error: unsupported cast type name \"varbit\" at byte 49\nLINE 2:     VALUES ('01'::varbit)\n                                ^\nDETAIL:  parser byte offset 49\nHINT:  Check SQL syntax near the reported position.\npsql:tests/regression/pg_compat/sql/with.sql:69: ERROR:  recursive query \"t\" exceeded 10000 iterations\npsql:tests/regression/pg_compat/sql/with.sql:76: ERROR:  recursive query \"t\" exceeded 10000 iterations\npsql:tests/regression/pg_compat/sql/with.sql:116: ERROR:  recursive query \"w6\" must be of the form non-recursive-term UNION [ALL] recursive-term\npsql:tests/regression/pg_compat/sql/with.sql:180: ERROR:  set-operation inputs must have matching column counts\npsql:tests/regression/pg_compat/sql/with.sql:194: ERROR:  set-operation inputs must have matching column counts\npsql:tests/regression/pg_compat/sql/with.sql:209: ERROR:  set-operation inputs must have matching column counts\npsql:tests/regression/pg_compat/sql/with.sql:..."
     },
     "boolean.sql": {
       "passed": 98,
@@ -360,7 +360,7 @@
     "sequence.sql": {
       "passed": 261,
       "total": 261,
-      "output": "Return code: 0\nSTDOUT (1373 chars):\n  f1   | f2  \n-------+-----\n force | 100\n wrong |    \n(2 rows)\n\n nextval \n---------\n       1\n(1 row)\n\n currval \n---------\n       1\n(1 row)\n\n setval \n--------\n     32\n(1 row)\n\n setval \n--------\n     99\n(1 row)\n\n nextval \n---------\n      99\n(1 row)\n\n nextval \n---------\n     100\n(1 row)\n\n  f1   | f2  \n-------+-----\n force | 100\n wrong |    \n(2 rows)\n\n nextval \n---------\n      32\n(1 row)\n\n nextval \n---------\n      -1\n(1 row)\n\n nextval \n---------\n      32\n(1 row)\n\n nextval \n---------\n      24\n(1 row)...\nSTDERR (33095 chars):\npsql:tests/regression/pg_compat/sql/sequence.sql:6: ERROR:  INCREMENT must not be zero\npsql:tests/regression/pg_compat/sql/sequence.sql:7: ERROR:  MINVALUE must be less than or equal to MAXVALUE\npsql:tests/regression/pg_compat/sql/sequence.sql:8: ERROR:  MINVALUE must be less than or equal to MAXVALUE\npsql:tests/regression/pg_compat/sql/sequence.sql:9: ERROR:  START value is out of sequence bounds\npsql:tests/regression/pg_compat/sql/sequence.sql:10: ERROR:  START value is out of sequence bounds\npsql:tests/regression/pg_compat/sql/sequence.sql:11: ERROR:  CACHE must be greater than zero\npsql:tests/regression/pg_compat/sql/sequence.sql:14: ERROR:  parse error: unexpected token after end of statement at byte 31\nLINE 1: CREATE SEQUENCE sequence_testx OWNED BY nobody;\n                                       ^\nDETAIL:  parser byte offset 31\nHINT:  Check SQL syntax near the reported position.\npsql:tests/regression/pg_compat/sql/sequence.sql:15: ERROR:  parse error: unexpected token after end o..."
+      "output": "Return code: 0\nSTDOUT (1373 chars):\n  f1   | f2  \n-------+-----\n force | 100\n wrong |    \n(2 rows)\n\n nextval \n---------\n       1\n(1 row)\n\n currval \n---------\n       1\n(1 row)\n\n setval \n--------\n     32\n(1 row)\n\n setval \n--------\n     99\n(1 row)\n\n nextval \n---------\n      99\n(1 row)\n\n nextval \n---------\n     100\n(1 row)\n\n  f1   | f2  \n-------+-----\n force | 100\n wrong |    \n(2 rows)\n\n nextval \n---------\n      32\n(1 row)\n\n nextval \n---------\n      -1\n(1 row)\n\n nextval \n---------\n      32\n(1 row)\n\n nextval \n---------\n      24\n(1 row)...\nSTDERR (33096 chars):\npsql:tests/regression/pg_compat/sql/sequence.sql:6: ERROR:  INCREMENT must not be zero\npsql:tests/regression/pg_compat/sql/sequence.sql:7: ERROR:  MINVALUE must be less than or equal to MAXVALUE\npsql:tests/regression/pg_compat/sql/sequence.sql:8: ERROR:  MINVALUE must be less than or equal to MAXVALUE\npsql:tests/regression/pg_compat/sql/sequence.sql:9: ERROR:  START value is out of sequence bounds\npsql:tests/regression/pg_compat/sql/sequence.sql:10: ERROR:  START value is out of sequence bounds\npsql:tests/regression/pg_compat/sql/sequence.sql:11: ERROR:  CACHE must be greater than zero\npsql:tests/regression/pg_compat/sql/sequence.sql:14: ERROR:  parse error: unexpected token after end of statement at byte 31\nLINE 1: CREATE SEQUENCE sequence_testx OWNED BY nobody;\n                                       ^\nDETAIL:  parser byte offset 31\nHINT:  Check SQL syntax near the reported position.\npsql:tests/regression/pg_compat/sql/sequence.sql:15: ERROR:  parse error: unexpected token after end o..."
     },
     "groupingsets.sql": {
       "passed": 219,

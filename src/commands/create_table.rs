@@ -21,6 +21,13 @@ pub async fn execute_create_table(
     let (schema_name, table_name) = relation_name_for_create(&create.name)?;
     let mut transformed_columns = create.columns.clone();
     let mut identity_sequence_names = Vec::new();
+    // SERIAL/BIGSERIAL columns are syntactic sugar for IDENTITY — treat them the same way
+    for column in &mut transformed_columns {
+        if matches!(column.data_type, TypeName::Serial | TypeName::BigSerial) && !column.identity {
+            column.identity = true;
+        }
+    }
+
     for column in &mut transformed_columns {
         if !column.identity {
             continue;

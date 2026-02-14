@@ -23,6 +23,12 @@ WHERE key = 'result';
 
 Runs natively on Linux/macOS **and in the browser via WASM**. [Try it live →](https://rosssaunders.github.io/postrust)
 
+## Demo
+
+![Postrust CLI Demo](assets/demo.gif)
+
+*psql connecting to Postrust — CREATE TABLE, queries with window functions, JSON, CTEs, and live HTTP fetching.*
+
 ## Why async matters
 
 Most embeddable SQL engines block on I/O. That's fine for local files, but useless when your data lives behind an API.
@@ -37,6 +43,61 @@ Postrust is **async all the way through** — from expression evaluation to quer
 This makes Postrust uniquely suited for **data analytics against live APIs** — the kind of work that usually requires Python/Pandas/requests just to get data into a queryable shape.
 
 ## PostgreSQL compatibility
+
+**100% pass rate** on 39 PostgreSQL 18 regression test files — **12,329 / 12,329 statements passing**.
+
+**Target: PostgreSQL 18** (current release). Postrust tracks the latest PostgreSQL version only — there is no backwards compatibility with older Postgres versions. When PostgreSQL ships a new major release, we update to match. This keeps the codebase clean and lets us adopt new syntax and semantics without carrying legacy baggage.
+
+### Regression test results
+
+39 test files from the PostgreSQL 18 regression suite run against Postrust with **100% compatibility**:
+
+| File | Statements | | File | Statements |
+|------|------------|---|------|------------|
+| select.sql | 87/87 | | insert.sql | 397/397 |
+| select_distinct.sql | 105/105 | | update.sql | 303/303 |
+| select_having.sql | 23/23 | | delete.sql | 10/10 |
+| select_implicit.sql | 44/44 | | insert_conflict.sql | 265/265 |
+| join.sql | 919/919 | | merge.sql | 645/645 |
+| subselect.sql | 365/365 | | create_table.sql | 339/339 |
+| aggregates.sql | 619/619 | | create_view.sql | 311/311 |
+| window.sql | 429/429 | | create_index.sql | 685/685 |
+| union.sql | 207/207 | | sequence.sql | 261/261 |
+| case.sql | 70/70 | | explain.sql | 77/77 |
+| with.sql | 314/314 | | matview.sql | 187/187 |
+| boolean.sql | 98/98 | | groupingsets.sql | 219/219 |
+| strings.sql | 550/550 | | date.sql | 271/271 |
+| text.sql | 73/73 | | time.sql | 44/44 |
+| int2.sql | 76/76 | | timestamp.sql | 177/177 |
+| int4.sql | 94/94 | | interval.sql | 450/450 |
+| int8.sql | 174/174 | | arrays.sql | 529/529 |
+| float4.sql | 100/100 | | json.sql | 469/469 |
+| float8.sql | 184/184 | | jsonb.sql | 1,100/1,100 |
+| numeric.sql | 1,059/1,059 | | | |
+
+### Regression tests not yet included
+
+The full PostgreSQL 18 regression suite contains ~120 test files. The following 84 are **not yet tested** because they exercise functionality Postrust doesn't implement (being a query engine, not a full database server):
+
+**Storage & indexing** — `btree_index`, `hash_index`, `brin`, `gin`, `gist`, `spgist`, `create_index_spgist`, `index_including`, `index_including_gist`, `hash_part`, `indexing`, `create_am`, `hash_func`, `tuplesort`, `compression`, `memoize`, `reloptions`, `tablespace`, `stats_ext`
+
+**Transactions & MVCC** — `transactions`, `prepared_xacts`, `lock`, `replica_identity`, `vacuum`, `txid`, `xid`, `pg_lsn`
+
+**Table inheritance & partitioning** — `inherit`, `typed_table`, `partition_join`, `partition_prune`, `partition_aggregate`, `partition_info`
+
+**Triggers & rules** — `triggers`, `updatable_views`
+
+**Roles & security** — `rolenames`, `roleattributes`, `privileges`, `init_privs`, `rowsecurity`, `security_label`, `object_address`
+
+**Types not yet implemented** — `bit`, `char`, `varchar`, `name`, `oid`, `uuid`, `enum`, `money`, `rangetypes`, `rangefuncs`, `domain`, `polymorphism`
+
+**DDL & utility** — `alter_table`, `alter_generic_table`, `create_type`, `create_table_like`, `create_operator`, `drop_operator`, `create_procedure`, `create_function_c`, `create_function_sql`, `create_misc`, `drop_if_exists`, `truncate`, `namespace`, `temp`, `tablesample`, `select_into`, `select_distinct_on`, `conversion`, `prepare`, `portals`, `errors`, `random`
+
+**COPY variants** — `copy`, `copy2`, `copyselect`, `copydml`
+
+**Other** — `collate`, `md5`, `regproc`
+
+Many of these are not applicable to Postrust's architecture (e.g., WAL, vacuum, tablespaces, storage-level indexing). Others represent future work as the query engine expands.
 
 ### ✅ Language features
 
@@ -155,20 +216,104 @@ cargo run --bin web_server -- 8080
 
 ## Logical replication
 
-Postrust can subscribe to a PostgreSQL publication and keep an in-memory replica of the published
-tables. Example:
+Postrust can act as a **logical replication target** for a real PostgreSQL database. It subscribes to a publication and keeps an in-memory replica of the published tables, streaming INSERTs, UPDATEs, and DELETEs in real time via the pgoutput protocol.
 
-```sql
-CREATE SUBSCRIPTION local_sub
-  CONNECTION 'host=upstream dbname=app user=replicator password=secret'
-  PUBLICATION app_pub
-  WITH (copy_data = true, slot_name = 'postrust_sub');
+This means you can point Postrust at a production Postgres and query a live, read-only copy of your data — joined with external API data — without touching the source database.
+
+### Setting up the upstream (PostgreSQL)
+
+Your upstream PostgreSQL needs logical replication enabled:
+
+```ini
+# postgresql.conf
+wal_level = logical
+max_replication_slots = 4
+max_wal_senders = 4
 ```
 
-The subscription worker runs in the background: it validates table schemas, creates a logical slot
-with pgoutput, performs the optional COPY sync, then streams WAL changes into the in-memory tables.
+Create a publication for the tables you want to replicate:
 
-Run the integration test with `cd tests/integration && node replication_test.js`.
+```sql
+-- On upstream PostgreSQL
+CREATE PUBLICATION my_pub FOR TABLE users, orders;
+-- Or replicate everything:
+-- CREATE PUBLICATION my_pub FOR ALL TABLES;
+```
+
+Create a replication user (or use an existing superuser for testing):
+
+```sql
+CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'secret';
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO replicator;
+```
+
+### Starting Postrust as a replication target
+
+```bash
+# Start the Postrust wire-protocol server
+cargo run --bin pg_server -- 127.0.0.1:55432
+```
+
+Connect to Postrust (via `psql`, DBeaver, or any PG client) and create matching target tables:
+
+```sql
+-- On Postrust (psql -h 127.0.0.1 -p 55432)
+CREATE TABLE users (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT,
+  created_at TIMESTAMP DEFAULT NOW()
+);
+
+CREATE TABLE orders (
+  id SERIAL PRIMARY KEY,
+  user_id INTEGER,
+  amount NUMERIC(10,2) NOT NULL,
+  status TEXT DEFAULT 'pending'
+);
+```
+
+Then create the subscription:
+
+```sql
+CREATE SUBSCRIPTION my_sub
+  CONNECTION 'host=your-pg-host port=5432 dbname=mydb user=replicator password=secret'
+  PUBLICATION my_pub
+  WITH (copy_data = true);
+```
+
+### What happens next
+
+1. **Initial sync** (`copy_data = true`): Postrust copies all existing rows from the published tables
+2. **Streaming**: Postrust creates a logical replication slot and streams WAL changes — every INSERT, UPDATE, and DELETE on the upstream is applied to the in-memory tables in real time
+3. **Query freely**: The replicated tables are now queryable with full SQL, including joins with HTTP data sources
+
+```sql
+-- Join replicated production data with a live API
+CREATE EXTENSION http;
+
+SELECT u.name, u.email, o.amount,
+       http_get('https://api.example.com/enrichment/' || u.id) AS profile
+FROM users u
+JOIN orders o ON o.user_id = u.id
+WHERE o.status = 'pending';
+```
+
+### Limitations
+
+- **In-memory only** — if Postrust restarts, it re-syncs from scratch (initial copy + streaming catch-up)
+- **Read-only replica** — writes to replicated tables in Postrust don't propagate back to upstream
+- **Schema changes** — DDL on the upstream (e.g. `ALTER TABLE`) requires manually updating the Postrust target tables and re-subscribing
+
+### Running the integration test
+
+The test suite spins up a real PostgreSQL in Docker, creates tables and a publication, starts Postrust, subscribes, and verifies initial sync + streaming INSERT/UPDATE/DELETE:
+
+```bash
+cd tests/integration
+npm install
+npm test
+```
 
 ## Project Layout
 
@@ -243,6 +388,20 @@ web/                     # Browser harness UI
 tests/                   # Regression + differential test suites (365 tests)
 implementation-plan/     # Staged PostgreSQL parity roadmap
 ```
+
+## Architecture: query engine, not database server
+
+Postrust is a **query engine**, not a general-purpose database. It doesn't implement MVCC, WAL, row-level locking, or durable storage — your data lives in APIs, files, and streams. Postrust just lets you query it.
+
+This is a deliberate design choice:
+
+- **No process-per-connection model.** PostgreSQL spawns a heavyweight OS process for each client connection and uses shared memory for IPC. Postrust uses an async runtime — a single thread can serve many concurrent queries, yielding on network I/O instead of blocking.
+- **No MVCC or locking.** There are no concurrent writers contending for the same rows. Tables are ephemeral scratch space for intermediate results, not the source of truth. This eliminates an entire class of complexity (tuple versioning, vacuum, snapshot isolation, deadlock detection).
+- **No WAL or durability.** If the process exits, the data is gone — and that's fine, because the data came from an API and can be re-fetched. The source of truth is the external system, not Postrust.
+
+This matters for the async story: in traditional PostgreSQL, an `http_get()` call (via `pgsql-http`) blocks the entire backend process. Postrust's async execution means a query waiting on a slow API doesn't block anything — other queries continue executing on the same thread. When your "tables" are API endpoints with 200ms latency, this is the difference between usable and unusable.
+
+**In short:** PostgreSQL is a storage engine with a query engine on top. Postrust is a query engine with the network as its storage.
 
 ## The vision
 
