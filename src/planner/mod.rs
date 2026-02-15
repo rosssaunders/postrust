@@ -173,12 +173,12 @@ fn build_delete_source_query(delete: &DeleteStatement) -> Query {
 impl PlanNode {
     pub fn explain(&self, lines: &mut Vec<String>, indent: usize) {
         match self {
-            PlanNode::Query(plan) => plan.physical.explain(lines, indent),
-            PlanNode::Insert(_) => physical::explain_leaf(lines, indent, "Insert"),
-            PlanNode::Update(_) => physical::explain_leaf(lines, indent, "Update"),
-            PlanNode::Delete(_) => physical::explain_leaf(lines, indent, "Delete"),
-            PlanNode::Merge(_) => physical::explain_leaf(lines, indent, "Merge"),
-            PlanNode::PassThrough(_) => physical::explain_leaf(lines, indent, "PassThrough"),
+            Self::Query(plan) => plan.physical.explain(lines, indent),
+            Self::Insert(_) => physical::explain_leaf(lines, indent, "Insert"),
+            Self::Update(_) => physical::explain_leaf(lines, indent, "Update"),
+            Self::Delete(_) => physical::explain_leaf(lines, indent, "Delete"),
+            Self::Merge(_) => physical::explain_leaf(lines, indent, "Merge"),
+            Self::PassThrough(_) => physical::explain_leaf(lines, indent, "PassThrough"),
         }
     }
 }

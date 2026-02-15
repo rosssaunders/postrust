@@ -115,7 +115,7 @@ impl TransactionContext {
             .iter()
             .rposition(|frame| frame.name == normalized)
         else {
-            return Err(format!("savepoint \"{}\" does not exist", name));
+            return Err(format!("savepoint \"{name}\" does not exist"));
         };
         self.savepoints.truncate(idx);
         Ok(())
@@ -134,7 +134,7 @@ impl TransactionContext {
             .iter()
             .rposition(|frame| frame.name == normalized)
         else {
-            return Err(format!("savepoint \"{}\" does not exist", name));
+            return Err(format!("savepoint \"{name}\" does not exist"));
         };
         let snapshot = self.savepoints[idx].snapshot.clone();
         if let Some(snapshots) = self.snapshots.as_mut() {

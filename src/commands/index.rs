@@ -81,7 +81,7 @@ pub async fn execute_create_index(
             Ok(())
         });
         match result {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(err) => {
                 if create.if_not_exists && err.message.contains("already exists") {
                     return Ok(QueryResult {
@@ -104,7 +104,7 @@ pub async fn execute_create_index(
         };
         let result = with_catalog_write(|catalog| catalog.add_index(table.schema_name(), table.name(), index));
         match result {
-            Ok(_) => {}
+            Ok(()) => {}
             Err(err) => {
                 if create.if_not_exists && err.message.contains("already exists") {
                     return Ok(QueryResult {
@@ -225,7 +225,7 @@ fn resolve_index_target(index_name: &[String]) -> Result<Option<IndexTarget>, En
             });
             if matches.len() > 1 {
                 return Err(EngineError {
-                    message: format!("index reference \"{}\" is ambiguous", name),
+                    message: format!("index reference \"{name}\" is ambiguous"),
                 });
             }
             Ok(matches.pop())

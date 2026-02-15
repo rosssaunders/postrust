@@ -24,7 +24,7 @@ pub(crate) fn coerce_to_f64(v: &ScalarValue, context: &str) -> Result<f64, Engin
         ScalarValue::Int(i) => Ok(*i as f64),
         ScalarValue::Float(f) => Ok(*f),
         _ => Err(EngineError {
-            message: format!("{} expects numeric argument", context),
+            message: format!("{context} expects numeric argument"),
         }),
     }
 }

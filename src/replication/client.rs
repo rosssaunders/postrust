@@ -103,10 +103,10 @@ impl ConnectionConfig {
             format!("user={}", self.user),
         ];
         if let Some(password) = &self.password {
-            parts.push(format!("password={}", password));
+            parts.push(format!("password={password}"));
         }
         if let Some(db) = &self.database {
-            parts.push(format!("dbname={}", db));
+            parts.push(format!("dbname={db}"));
         }
         if replication {
             parts.push("replication=database".to_string());
@@ -268,8 +268,7 @@ impl ReplicationClient {
         slot_name: &str,
     ) -> Result<ReplicationSlot, ReplicationError> {
         let sql = format!(
-            "CREATE_REPLICATION_SLOT {} LOGICAL pgoutput",
-            slot_name
+            "CREATE_REPLICATION_SLOT {slot_name} LOGICAL pgoutput"
         );
         let rows = self.connection.simple_query(&sql).await?;
         let row = rows.first().ok_or_else(|| ReplicationError {

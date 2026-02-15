@@ -5,9 +5,9 @@ pub enum ScalarValue {
     Int(i64),
     Float(f64),
     Text(String),
-    Array(Vec<ScalarValue>),
+    Array(Vec<Self>),
     /// Row/Record type for ROW(a, b, c) or (a, b, c) expressions
-    Record(Vec<ScalarValue>),
+    Record(Vec<Self>),
 }
 
 impl ScalarValue {
@@ -21,7 +21,7 @@ impl ScalarValue {
             Self::Array(values) => render_array_literal(values),
             Self::Record(values) => {
                 let parts: Vec<String> = values.iter().map(|v| {
-                    if matches!(v, ScalarValue::Null) {
+                    if matches!(v, Self::Null) {
                         String::new()
                     } else {
                         v.render()
@@ -34,6 +34,7 @@ impl ScalarValue {
 }
 
 /// Render a float8 (f64) value matching PostgreSQL's output format.
+///
 /// PostgreSQL uses shortest-representation output (extra_float_digits = 1 by default in modern PG).
 /// Special values: NaN, Infinity, -Infinity.
 /// Integer-valued floats are rendered without decimal point (e.g. 0, 1, -5).
@@ -67,7 +68,7 @@ pub fn render_float4(v: f64) -> String {
             "-Infinity".to_string()
         };
     }
-    let text = format!("{}", v32);
+    let text = format!("{v32}");
     text
 }
 

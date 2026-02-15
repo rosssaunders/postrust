@@ -290,7 +290,7 @@ impl Parser {
                     recursive: true,
                     ctes: vec![CommonTableExpr {
                         name: view_name_str.clone(),
-                        column_names: column_aliases.clone(),
+                        column_names: column_aliases,
                         materialized: None,
                         query: cte_body,
                         search_clause: None,
@@ -1391,8 +1391,7 @@ impl Parser {
                 }
                 _ => {
                     return Err(self.error_at_current(&format!(
-                        "unsupported subscription option {}",
-                        option
+                        "unsupported subscription option {option}"
                     )));
                 }
             }
@@ -2319,7 +2318,7 @@ impl Parser {
             "time" => TypeName::Time,
             "timestamp" => {
                 // Check for WITH TIME ZONE / WITHOUT TIME ZONE
-                if let TokenKind::Keyword(Keyword::With) = self.current_kind() {
+                if matches!(self.current_kind(), TokenKind::Keyword(Keyword::With)) {
                     // peek ahead for TIME ZONE
                     // For now, just treat as TimestampTz if WITH follows
                     TypeName::Timestamp
@@ -3444,9 +3443,8 @@ impl Parser {
                     type_name: type_name.to_string(),
                     value: value_str,
                 });
-            } else {
-                unreachable!() // We already checked for string literal above
             }
+            unreachable!() // We already checked for string literal above
         }
         if self.consume_keyword(Keyword::Cast) {
             self.expect_token(
@@ -4214,7 +4212,7 @@ impl Parser {
                         );
                     }
                 };
-                format!("{}[]", inner_norm)
+                format!("{inner_norm}[]")
             }
             other => {
                 return Err(
@@ -4250,7 +4248,7 @@ impl Parser {
                 |k| matches!(k, TokenKind::RBracket),
                 "expected ']' after '[' in array type",
             )?;
-            final_type = format!("{}[]", final_type);
+            final_type = format!("{final_type}[]");
         }
 
         Ok(final_type)
@@ -4331,7 +4329,7 @@ impl Parser {
                 Ok("interval".to_string())
             }
             TokenKind::Keyword(kw) if Self::is_unreserved_keyword(kw) => {
-                let name = format!("{:?}", kw).to_ascii_lowercase();
+                let name = format!("{kw:?}").to_ascii_lowercase();
                 self.advance();
                 Ok(name)
             }
@@ -4526,7 +4524,7 @@ impl Parser {
                 Ok("interval".to_string())
             }
             TokenKind::Keyword(kw) if Self::is_unreserved_keyword(kw) => {
-                let name = format!("{:?}", kw).to_ascii_lowercase();
+                let name = format!("{kw:?}").to_ascii_lowercase();
                 self.advance();
                 Ok(name)
             }
@@ -4558,7 +4556,7 @@ impl Parser {
                 Some(out)
             }
             TokenKind::Keyword(kw) => {
-                let out = format!("{:?}", kw).to_lowercase();
+                let out = format!("{kw:?}").to_lowercase();
                 self.advance();
                 Some(out)
             }
@@ -4574,7 +4572,7 @@ impl Parser {
                 Some(out)
             }
             TokenKind::Keyword(kw) => {
-                let out = format!("{:?}", kw).to_ascii_uppercase();
+                let out = format!("{kw:?}").to_ascii_uppercase();
                 self.advance();
                 Some(out)
             }
@@ -4622,7 +4620,7 @@ impl Parser {
             } else if let Some(privilege) = TablePrivilegeKind::from_keyword(&token) {
                 privileges.push(privilege);
             } else {
-                return Err(self.error_at_current(&format!("unsupported privilege {}", token)));
+                return Err(self.error_at_current(&format!("unsupported privilege {token}")));
             }
             if self.consume_if(|k| matches!(k, TokenKind::Comma)) {
                 continue;
@@ -4642,7 +4640,7 @@ impl Parser {
         while !matches!(self.current_kind(), TokenKind::Eof | TokenKind::Semicolon) {
             let token = match self.current_kind() {
                 TokenKind::Identifier(value) => value.clone(),
-                TokenKind::Keyword(kw) => format!("{:?}", kw).to_lowercase(),
+                TokenKind::Keyword(kw) => format!("{kw:?}").to_lowercase(),
                 _ => {
                     let raw = format!("{:?}", self.current_kind());
                     return Err(
@@ -4723,7 +4721,7 @@ impl Parser {
                 }
             }
             other => {
-                return Err(self.error_at_current(&format!("unsupported COPY option {}", other)));
+                return Err(self.error_at_current(&format!("unsupported COPY option {other}")));
             }
         }
         Ok(())
@@ -4740,7 +4738,7 @@ impl Parser {
             "BINARY" => Ok(CopyFormat::Binary),
             "CSV" => Ok(CopyFormat::Csv),
             "TEXT" => Ok(CopyFormat::Text),
-            _ => Err(self.error_at_current(&format!("{message_prefix} {}", token))),
+            _ => Err(self.error_at_current(&format!("{message_prefix} {token}"))),
         }
     }
 
@@ -4957,7 +4955,7 @@ impl Parser {
         {
             let token = &self.tokens[self.idx];
             match &token.kind {
-                TokenKind::Keyword(kw) => value_parts.push(format!("{:?}", kw).to_lowercase()),
+                TokenKind::Keyword(kw) => value_parts.push(format!("{kw:?}").to_lowercase()),
                 TokenKind::Identifier(s) => value_parts.push(s.clone()),
                 TokenKind::String(s) => value_parts.push(s.clone()),
                 TokenKind::Integer(i) => value_parts.push(i.to_string()),
@@ -5014,8 +5012,8 @@ impl Parser {
                 } else {
                     // first_ident is param name, next is type
                     let type_ident = self.parse_identifier()?;
-                    let dt = self.try_parse_type_name(&type_ident).map_err(|_| {
-                        self.error_at_current(&format!("unknown type: {}", type_ident))
+                    let dt = self.try_parse_type_name(&type_ident).map_err(|()| {
+                        self.error_at_current(&format!("unknown type: {type_ident}"))
                     })?;
                     (Some(first_ident), dt)
                 };
@@ -5054,8 +5052,8 @@ impl Parser {
                 loop {
                     let col_name = self.parse_identifier()?;
                     let type_ident = self.parse_identifier()?;
-                    let dt = self.try_parse_type_name(&type_ident).map_err(|_| {
-                        self.error_at_current(&format!("unknown type: {}", type_ident))
+                    let dt = self.try_parse_type_name(&type_ident).map_err(|()| {
+                        self.error_at_current(&format!("unknown type: {type_ident}"))
                     })?;
                     cols.push(ColumnDefinition {
                         name: col_name,
@@ -5076,8 +5074,8 @@ impl Parser {
                 Some(FunctionReturnType::Table(cols))
             } else {
                 let type_ident = self.parse_identifier()?;
-                let dt = self.try_parse_type_name(&type_ident).map_err(|_| {
-                    self.error_at_current(&format!("unknown return type: {}", type_ident))
+                let dt = self.try_parse_type_name(&type_ident).map_err(|()| {
+                    self.error_at_current(&format!("unknown return type: {type_ident}"))
                 })?;
                 Some(FunctionReturnType::Type(dt))
             }

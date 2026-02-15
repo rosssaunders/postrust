@@ -38,7 +38,7 @@ pub(crate) fn build_regex(
             'g' => {}
             _ => {
                 return Err(EngineError {
-                    message: format!("{fn_name}() unsupported regex flag {}", flag),
+                    message: format!("{fn_name}() unsupported regex flag {flag}"),
                 });
             }
         }
@@ -375,10 +375,10 @@ pub(crate) fn eval_unistr(text: &str) -> Result<ScalarValue, EngineError> {
                 }
                 let hex: String = chars[i+2..i+8].iter().collect();
                 let code = u32::from_str_radix(&hex, 16).map_err(|_| EngineError {
-                    message: format!("invalid Unicode escape value: \\+{}", hex),
+                    message: format!("invalid Unicode escape value: \\+{hex}"),
                 })?;
                 let c = char::from_u32(code).ok_or_else(|| EngineError {
-                    message: format!("invalid Unicode code point: {}", code),
+                    message: format!("invalid Unicode code point: {code}"),
                 })?;
                 result.push(c);
                 i += 8;
@@ -391,10 +391,10 @@ pub(crate) fn eval_unistr(text: &str) -> Result<ScalarValue, EngineError> {
                 }
                 let hex: String = chars[i+1..i+5].iter().collect();
                 let code = u32::from_str_radix(&hex, 16).map_err(|_| EngineError {
-                    message: format!("invalid Unicode escape value: \\{}", hex),
+                    message: format!("invalid Unicode escape value: \\{hex}"),
                 })?;
                 let c = char::from_u32(code).ok_or_else(|| EngineError {
-                    message: format!("invalid Unicode code point: {}", code),
+                    message: format!("invalid Unicode code point: {code}"),
                 })?;
                 result.push(c);
                 i += 5;
@@ -809,7 +809,7 @@ pub(crate) fn pg_get_viewdef(
 ) -> Result<String, crate::tcop::engine::EngineError> {
     // For now, return a placeholder message indicating the view exists but we can't retrieve the definition.
     // TODO: Implement actual view definition retrieval from catalog when proper catalog access is available.
-    Ok(format!("-- View definition for: {}", view_name))
+    Ok(format!("-- View definition for: {view_name}"))
 }
 
 // The following functions are prepared for future pg_get_viewdef implementation

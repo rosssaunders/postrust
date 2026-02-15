@@ -163,41 +163,41 @@ pub enum PhysicalPlan {
 impl PhysicalPlan {
     pub fn cost(&self) -> PlanCost {
         match self {
-            PhysicalPlan::Result(plan) => plan.cost,
-            PhysicalPlan::Scan(plan) => plan.cost,
-            PhysicalPlan::FunctionScan(plan) => plan.cost,
-            PhysicalPlan::CteScan(plan) => plan.cost,
-            PhysicalPlan::Subquery(plan) => plan.cost,
-            PhysicalPlan::Filter(plan) => plan.cost,
-            PhysicalPlan::Project(plan) => plan.cost,
-            PhysicalPlan::Aggregate(plan) => plan.cost,
-            PhysicalPlan::Window(plan) => plan.cost,
-            PhysicalPlan::Distinct(plan) => plan.cost,
-            PhysicalPlan::Sort(plan) => plan.cost,
-            PhysicalPlan::Limit(plan) => plan.cost,
-            PhysicalPlan::Cte(plan) => plan.cost,
-            PhysicalPlan::SetOp(plan) => plan.cost,
-            PhysicalPlan::HashJoin(plan) => plan.cost,
-            PhysicalPlan::NestedLoopJoin(plan) => plan.cost,
+            Self::Result(plan) => plan.cost,
+            Self::Scan(plan) => plan.cost,
+            Self::FunctionScan(plan) => plan.cost,
+            Self::CteScan(plan) => plan.cost,
+            Self::Subquery(plan) => plan.cost,
+            Self::Filter(plan) => plan.cost,
+            Self::Project(plan) => plan.cost,
+            Self::Aggregate(plan) => plan.cost,
+            Self::Window(plan) => plan.cost,
+            Self::Distinct(plan) => plan.cost,
+            Self::Sort(plan) => plan.cost,
+            Self::Limit(plan) => plan.cost,
+            Self::Cte(plan) => plan.cost,
+            Self::SetOp(plan) => plan.cost,
+            Self::HashJoin(plan) => plan.cost,
+            Self::NestedLoopJoin(plan) => plan.cost,
         }
     }
 
     pub fn explain(&self, lines: &mut Vec<String>, indent: usize) {
         let prefix = " ".repeat(indent);
         match self {
-            PhysicalPlan::Result(plan) => {
+            Self::Result(plan) => {
                 lines.push(format!(
                     "{}Result  ({})",
                     prefix,
                     format_cost(plan.cost)
                 ));
             }
-            PhysicalPlan::Scan(plan) => {
+            Self::Scan(plan) => {
                 let label = match &plan.scan_type {
                     ScanType::Seq => "Seq Scan",
                     ScanType::Index(index) => {
                         let name = index.name.clone();
-                        lines.push(format!("{}Index Cond: <predicate>", prefix));
+                        lines.push(format!("{prefix}Index Cond: <predicate>"));
                         return lines.push(format!(
                             "{}Index Scan using {} on {}  ({})",
                             prefix,
@@ -215,10 +215,10 @@ impl PhysicalPlan {
                     format_cost(plan.cost)
                 ));
                 if plan.filter.is_some() {
-                    lines.push(format!("{}  Filter: <predicate>", prefix));
+                    lines.push(format!("{prefix}  Filter: <predicate>"));
                 }
             }
-            PhysicalPlan::FunctionScan(plan) => {
+            Self::FunctionScan(plan) => {
                 lines.push(format!(
                     "{}Function Scan {}  ({})",
                     prefix,
@@ -226,7 +226,7 @@ impl PhysicalPlan {
                     format_cost(plan.cost)
                 ));
             }
-            PhysicalPlan::CteScan(plan) => {
+            Self::CteScan(plan) => {
                 let label = plan.alias.as_deref().unwrap_or(&plan.name);
                 lines.push(format!(
                     "{}CTE Scan on {}  ({})",
@@ -235,49 +235,49 @@ impl PhysicalPlan {
                     format_cost(plan.cost)
                 ));
             }
-            PhysicalPlan::Subquery(plan) => {
+            Self::Subquery(plan) => {
                 lines.push(format!("{}Subquery Scan  ({})", prefix, format_cost(plan.cost)));
                 plan.plan.explain(lines, indent + 2);
             }
-            PhysicalPlan::Filter(plan) => {
+            Self::Filter(plan) => {
                 lines.push(format!("{}Filter  ({})", prefix, format_cost(plan.cost)));
-                lines.push(format!("{}  Filter: <predicate>", prefix));
+                lines.push(format!("{prefix}  Filter: <predicate>"));
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Project(plan) => {
+            Self::Project(plan) => {
                 lines.push(format!("{}Result  ({})", prefix, format_cost(plan.cost)));
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Aggregate(plan) => {
+            Self::Aggregate(plan) => {
                 lines.push(format!("{}Aggregate  ({})", prefix, format_cost(plan.cost)));
                 if !plan.group_by.is_empty() {
-                    lines.push(format!("{}  Group Key: <keys>", prefix));
+                    lines.push(format!("{prefix}  Group Key: <keys>"));
                 }
                 if plan.having.is_some() {
-                    lines.push(format!("{}  Filter: <having>", prefix));
+                    lines.push(format!("{prefix}  Filter: <having>"));
                 }
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Window(plan) => {
+            Self::Window(plan) => {
                 lines.push(format!("{}Window  ({})", prefix, format_cost(plan.cost)));
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Distinct(plan) => {
+            Self::Distinct(plan) => {
                 lines.push(format!("{}Unique  ({})", prefix, format_cost(plan.cost)));
                 if !plan.on.is_empty() {
-                    lines.push(format!("{}  Unique Key: <keys>", prefix));
+                    lines.push(format!("{prefix}  Unique Key: <keys>"));
                 }
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Sort(plan) => {
+            Self::Sort(plan) => {
                 lines.push(format!("{}Sort  ({})", prefix, format_cost(plan.cost)));
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Limit(plan) => {
+            Self::Limit(plan) => {
                 lines.push(format!("{}Limit  ({})", prefix, format_cost(plan.cost)));
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::Cte(plan) => {
+            Self::Cte(plan) => {
                 lines.push(format!("{}CTE  ({})", prefix, format_cost(plan.cost)));
                 for cte in &plan.ctes {
                     lines.push(format!(
@@ -290,7 +290,7 @@ impl PhysicalPlan {
                 }
                 plan.input.explain(lines, indent + 2);
             }
-            PhysicalPlan::SetOp(plan) => {
+            Self::SetOp(plan) => {
                 lines.push(format!(
                     "{}{op:?}  ({cost})",
                     prefix,
@@ -300,18 +300,18 @@ impl PhysicalPlan {
                 plan.left.explain(lines, indent + 2);
                 plan.right.explain(lines, indent + 2);
             }
-            PhysicalPlan::HashJoin(plan) => {
+            Self::HashJoin(plan) => {
                 lines.push(format!("{}Hash Join  ({})", prefix, format_cost(plan.cost)));
                 if plan.condition.is_some() || plan.natural {
-                    lines.push(format!("{}  Hash Cond: <condition>", prefix));
+                    lines.push(format!("{prefix}  Hash Cond: <condition>"));
                 }
                 plan.left.explain(lines, indent + 2);
                 plan.right.explain(lines, indent + 2);
             }
-            PhysicalPlan::NestedLoopJoin(plan) => {
+            Self::NestedLoopJoin(plan) => {
                 lines.push(format!("{}Nested Loop  ({})", prefix, format_cost(plan.cost)));
                 if plan.condition.is_some() || plan.natural {
-                    lines.push(format!("{}  Join Filter: <condition>", prefix));
+                    lines.push(format!("{prefix}  Join Filter: <condition>"));
                 }
                 plan.left.explain(lines, indent + 2);
                 plan.right.explain(lines, indent + 2);
@@ -322,7 +322,7 @@ impl PhysicalPlan {
 
 pub fn explain_leaf(lines: &mut Vec<String>, indent: usize, label: &str) {
     let prefix = " ".repeat(indent);
-    lines.push(format!("{}{label}  (cost=0.00..0.01 rows=1 width=0)", prefix));
+    lines.push(format!("{prefix}{label}  (cost=0.00..0.01 rows=1 width=0)"));
 }
 
 pub fn plan_physical(logical: &LogicalPlan) -> Result<PhysicalPlan, PlannerError> {

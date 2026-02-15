@@ -157,7 +157,7 @@ pub(crate) async fn eval_scalar_function(
             with_sequences_write(|sequences| {
                 let Some(state) = sequences.get_mut(&sequence_name) else {
                     return Err(EngineError {
-                        message: format!("sequence \"{}\" does not exist", sequence_name),
+                        message: format!("sequence \"{sequence_name}\" does not exist"),
                     });
                 };
                 let value = sequence_next_value(state, &sequence_name)?;
@@ -176,14 +176,13 @@ pub(crate) async fn eval_scalar_function(
             with_sequences_read(|sequences| {
                 let Some(state) = sequences.get(&sequence_name) else {
                     return Err(EngineError {
-                        message: format!("sequence \"{}\" does not exist", sequence_name),
+                        message: format!("sequence \"{sequence_name}\" does not exist"),
                     });
                 };
                 if !state.called {
                     return Err(EngineError {
                         message: format!(
-                            "currval of sequence \"{}\" is not yet defined",
-                            sequence_name
+                            "currval of sequence \"{sequence_name}\" is not yet defined"
                         ),
                     });
                 }
@@ -208,7 +207,7 @@ pub(crate) async fn eval_scalar_function(
             with_sequences_write(|sequences| {
                 let Some(state) = sequences.get_mut(&sequence_name) else {
                     return Err(EngineError {
-                        message: format!("sequence \"{}\" does not exist", sequence_name),
+                        message: format!("sequence \"{sequence_name}\" does not exist"),
                     });
                 };
                 set_sequence_value(state, &sequence_name, value, is_called)?;
@@ -949,21 +948,21 @@ pub(crate) async fn eval_scalar_function(
                 return Ok(ScalarValue::Null);
             }
             let v = parse_i64_scalar(&args[0], "to_hex() expects integer")?;
-            Ok(ScalarValue::Text(format!("{:x}", v)))
+            Ok(ScalarValue::Text(format!("{v:x}")))
         }
         "to_oct" if args.len() == 1 => {
             if matches!(args[0], ScalarValue::Null) {
                 return Ok(ScalarValue::Null);
             }
             let v = parse_i64_scalar(&args[0], "to_oct() expects integer")?;
-            Ok(ScalarValue::Text(format!("{:o}", v)))
+            Ok(ScalarValue::Text(format!("{v:o}")))
         }
         "to_bin" if args.len() == 1 => {
             if matches!(args[0], ScalarValue::Null) {
                 return Ok(ScalarValue::Null);
             }
             let v = parse_i64_scalar(&args[0], "to_bin() expects integer")?;
-            Ok(ScalarValue::Text(format!("{:b}", v)))
+            Ok(ScalarValue::Text(format!("{v:b}")))
         }
         "unistr" if args.len() == 1 => {
             if matches!(args[0], ScalarValue::Null) {
@@ -1149,7 +1148,7 @@ pub(crate) async fn eval_scalar_function(
             let y = parse_i64_scalar(&args[0], "make_date() year")? as i32;
             let m = parse_i64_scalar(&args[1], "make_date() month")? as u32;
             let d = parse_i64_scalar(&args[2], "make_date() day")? as u32;
-            Ok(ScalarValue::Text(format!("{:04}-{:02}-{:02}", y, m, d)))
+            Ok(ScalarValue::Text(format!("{y:04}-{m:02}-{d:02}")))
         }
         "make_time" if args.len() == 3 => {
             if args.iter().any(|a| matches!(a, ScalarValue::Null)) {
@@ -1174,13 +1173,11 @@ pub(crate) async fn eval_scalar_function(
             let frac = ((s - s.trunc()) * 1_000_000.0).round() as u32;
             if frac == 0 {
                 Ok(ScalarValue::Text(format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                    y, mo, d, h, mi, sec
+                    "{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{sec:02}"
                 )))
             } else {
                 Ok(ScalarValue::Text(format!(
-                    "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
-                    y, mo, d, h, mi, sec, frac
+                    "{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{sec:02}.{frac:06}"
                 )))
             }
         }
@@ -1203,7 +1200,7 @@ pub(crate) async fn eval_scalar_function(
             match cleaned.parse::<f64>() {
                 Ok(v) => Ok(ScalarValue::Float(v)),
                 Err(_) => Err(EngineError {
-                    message: format!("invalid input for to_number: {}", s),
+                    message: format!("invalid input for to_number: {s}"),
                 }),
             }
         }
@@ -1541,7 +1538,7 @@ pub(crate) async fn eval_scalar_function(
             Ok(ScalarValue::Text(result.join(&delimiter)))
         }
         _ => Err(EngineError {
-            message: format!("unsupported function call {}", fn_name),
+            message: format!("unsupported function call {fn_name}"),
         }),
     }
 }

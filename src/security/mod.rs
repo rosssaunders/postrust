@@ -257,8 +257,7 @@ pub fn require_manage_relation(
         return Ok(());
     }
     Err(format!(
-        "permission denied for relation \"{}\" (owner required)",
-        relation_name
+        "permission denied for relation \"{relation_name}\" (owner required)"
     ))
 }
 
@@ -275,14 +274,13 @@ pub fn grant_table_privileges(
         let actor_closure = state.roles.role_closure(&actor);
         if !state.roles.is_superuser(&actor) && !actor_closure.contains(&owner) {
             return Err(format!(
-                "permission denied for relation \"{}\"",
-                relation_name
+                "permission denied for relation \"{relation_name}\""
             ));
         }
         for grantee in grantees {
             let grantee = normalize_identifier(grantee);
             if !state.roles.role_exists(&grantee) {
-                return Err(format!("role \"{}\" does not exist", grantee));
+                return Err(format!("role \"{grantee}\" does not exist"));
             }
             state.acl.grant(relation_oid, &grantee, privileges);
         }
@@ -303,14 +301,13 @@ pub fn revoke_table_privileges(
         let actor_closure = state.roles.role_closure(&actor);
         if !state.roles.is_superuser(&actor) && !actor_closure.contains(&owner) {
             return Err(format!(
-                "permission denied for relation \"{}\"",
-                relation_name
+                "permission denied for relation \"{relation_name}\""
             ));
         }
         for grantee in grantees {
             let grantee = normalize_identifier(grantee);
             if !state.roles.role_exists(&grantee) {
-                return Err(format!("role \"{}\" does not exist", grantee));
+                return Err(format!("role \"{grantee}\" does not exist"));
             }
             state.acl.revoke(relation_oid, &grantee, privileges);
         }
@@ -375,7 +372,7 @@ pub fn create_policy(
     for role in &mut policy.roles {
         *role = normalize_identifier(role);
         if !role_exists(role) {
-            return Err(format!("role \"{}\" does not exist", role));
+            return Err(format!("role \"{role}\" does not exist"));
         }
     }
     policy.name = normalize_identifier(&policy.name);

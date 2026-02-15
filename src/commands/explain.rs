@@ -47,13 +47,11 @@ fn describe_statement_plan(stmt: &Statement, lines: &mut Vec<String>, indent: us
             QueryExpr::Select(select) => {
                 if select.from.is_empty() {
                     lines.push(format!(
-                        "{}Result  (cost=0.00..0.01 rows=1 width=0)",
-                        prefix
+                        "{prefix}Result  (cost=0.00..0.01 rows=1 width=0)"
                     ));
                 } else {
                     lines.push(format!(
-                        "{}Seq Scan  (cost=0.00..1.00 rows=1 width=0)",
-                        prefix
+                        "{prefix}Seq Scan  (cost=0.00..1.00 rows=1 width=0)"
                     ));
                     for table_expr in &select.from {
                         if let TableExpression::Relation(rel) = table_expr {
@@ -62,13 +60,12 @@ fn describe_statement_plan(stmt: &Statement, lines: &mut Vec<String>, indent: us
                     }
                 }
                 if select.where_clause.is_some() {
-                    lines.push(format!("{}  Filter: <condition>", prefix));
+                    lines.push(format!("{prefix}  Filter: <condition>"));
                 }
             }
             QueryExpr::SetOperation { op, .. } => {
                 lines.push(format!(
-                    "{}{:?}  (cost=0.00..1.00 rows=1 width=0)",
-                    prefix, op
+                    "{prefix}{op:?}  (cost=0.00..1.00 rows=1 width=0)"
                 ));
             }
             QueryExpr::Nested(inner) => {
@@ -83,29 +80,25 @@ fn describe_statement_plan(stmt: &Statement, lines: &mut Vec<String>, indent: us
             }
             QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_) => {
                 lines.push(format!(
-                    "{}Data-modifying statement in WITH (not yet supported)",
-                    prefix
+                    "{prefix}Data-modifying statement in WITH (not yet supported)"
                 ));
             }
         },
         Statement::Insert(_) => {
             lines.push(format!(
-                "{}Insert  (cost=0.00..1.00 rows=0 width=0)",
-                prefix
+                "{prefix}Insert  (cost=0.00..1.00 rows=0 width=0)"
             ));
         }
         Statement::Update(_) => {
             lines.push(format!(
-                "{}Update  (cost=0.00..1.00 rows=0 width=0)",
-                prefix
+                "{prefix}Update  (cost=0.00..1.00 rows=0 width=0)"
             ));
         }
         Statement::Delete(_) => {
             lines.push(format!(
-                "{}Delete  (cost=0.00..1.00 rows=0 width=0)",
-                prefix
+                "{prefix}Delete  (cost=0.00..1.00 rows=0 width=0)"
             ));
         }
-        _ => lines.push(format!("{}Utility Statement", prefix)),
+        _ => lines.push(format!("{prefix}Utility Statement")),
     }
 }

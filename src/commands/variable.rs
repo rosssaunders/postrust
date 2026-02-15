@@ -19,7 +19,7 @@ fn global_guc() -> &'static RwLock<HashMap<String, String>> {
         m.insert("integer_datetimes".to_string(), "on".to_string());
         m.insert("standard_conforming_strings".to_string(), "on".to_string());
         m.insert("search_path".to_string(), "\"$user\", public".to_string());
-        m.insert("application_name".to_string(), "".to_string());
+        m.insert("application_name".to_string(), String::new());
         RwLock::new(m)
     })
 }

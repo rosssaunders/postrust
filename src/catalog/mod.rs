@@ -132,7 +132,7 @@ impl Catalog {
         };
         if schema.table(&table_name).is_some() {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" already exists", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" already exists"),
             });
         }
 
@@ -146,8 +146,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" specified more than once for relation \"{}.{}\"",
-                        column_name, schema_name, table_name
+                        "column \"{column_name}\" specified more than once for relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -205,8 +204,7 @@ impl Catalog {
                 {
                     return Err(CatalogError {
                         message: format!(
-                            "column \"{}\" does not exist in relation \"{}.{}\"",
-                            col, schema_name, table_name
+                            "column \"{col}\" does not exist in relation \"{schema_name}.{table_name}\""
                         ),
                     });
                 }
@@ -217,8 +215,7 @@ impl Catalog {
             if normalized_cols.is_empty() {
                 return Err(CatalogError {
                     message: format!(
-                        "empty key constraint is invalid for relation \"{}.{}\"",
-                        schema_name, table_name
+                        "empty key constraint is invalid for relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -241,8 +238,7 @@ impl Catalog {
                 {
                     return Err(CatalogError {
                         message: format!(
-                            "column \"{}\" does not exist in relation \"{}.{}\"",
-                            col, schema_name, table_name
+                            "column \"{col}\" does not exist in relation \"{schema_name}.{table_name}\""
                         ),
                     });
                 }
@@ -253,8 +249,7 @@ impl Catalog {
             if normalized_cols.is_empty() {
                 return Err(CatalogError {
                     message: format!(
-                        "empty foreign key constraint is invalid for relation \"{}.{}\"",
-                        schema_name, table_name
+                        "empty foreign key constraint is invalid for relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -267,8 +262,7 @@ impl Catalog {
             if normalized_referenced_table.is_empty() {
                 return Err(CatalogError {
                     message: format!(
-                        "foreign key constraint has invalid REFERENCES target for relation \"{}.{}\"",
-                        schema_name, table_name
+                        "foreign key constraint has invalid REFERENCES target for relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -316,8 +310,7 @@ impl Catalog {
             if !seen_constraint_names.insert(name.clone()) {
                 return Err(CatalogError {
                     message: format!(
-                        "constraint \"{}\" specified more than once for relation \"{}.{}\"",
-                        name, schema_name, table_name
+                        "constraint \"{name}\" specified more than once for relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -329,8 +322,7 @@ impl Catalog {
             if !seen_constraint_names.insert(name.clone()) {
                 return Err(CatalogError {
                     message: format!(
-                        "constraint \"{}\" specified more than once for relation \"{}.{}\"",
-                        name, schema_name, table_name
+                        "constraint \"{name}\" specified more than once for relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -343,8 +335,7 @@ impl Catalog {
         if primary_key_count > 1 {
             return Err(CatalogError {
                 message: format!(
-                    "relation \"{}.{}\" has more than one primary key",
-                    schema_name, table_name
+                    "relation \"{schema_name}.{table_name}\" has more than one primary key"
                 ),
             });
         }
@@ -404,7 +395,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&view_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, view_name),
+                message: format!("relation \"{schema_name}.{view_name}\" does not exist"),
             });
         };
         table.set_view_definition(Some(definition));
@@ -428,7 +419,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&view_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, view_name),
+                message: format!("relation \"{schema_name}.{view_name}\" does not exist"),
             });
         };
         let expected_kind = if materialized {
@@ -440,11 +431,10 @@ impl Catalog {
             return Err(CatalogError {
                 message: if materialized {
                     format!(
-                        "\"{}.{}\" is not a materialized view",
-                        schema_name, view_name
+                        "\"{schema_name}.{view_name}\" is not a materialized view"
                     )
                 } else {
-                    format!("\"{}.{}\" is not a view", schema_name, view_name)
+                    format!("\"{schema_name}.{view_name}\" is not a view")
                 },
             });
         }
@@ -458,8 +448,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" specified more than once for relation \"{}.{}\"",
-                        column_name, schema_name, view_name
+                        "column \"{column_name}\" specified more than once for relation \"{schema_name}.{view_name}\""
                     ),
                 });
             }
@@ -503,14 +492,13 @@ impl Catalog {
         };
         if schema.table(&new_name).is_some() {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" already exists", schema_name, new_name),
+                message: format!("relation \"{schema_name}.{new_name}\" already exists"),
             });
         }
         let Some(mut table) = schema.remove_table(&relation_name) else {
             return Err(CatalogError {
                 message: format!(
-                    "relation \"{}.{}\" does not exist",
-                    schema_name, relation_name
+                    "relation \"{schema_name}.{relation_name}\" does not exist"
                 ),
             });
         };
@@ -540,8 +528,7 @@ impl Catalog {
         if target_schema.table(&relation_name).is_some() {
             return Err(CatalogError {
                 message: format!(
-                    "relation \"{}.{}\" already exists",
-                    target_schema_name, relation_name
+                    "relation \"{target_schema_name}.{relation_name}\" already exists"
                 ),
             });
         }
@@ -556,8 +543,7 @@ impl Catalog {
         let Some(mut table) = source_schema.remove_table(&relation_name) else {
             return Err(CatalogError {
                 message: format!(
-                    "relation \"{}.{}\" does not exist",
-                    source_schema_name, relation_name
+                    "relation \"{source_schema_name}.{relation_name}\" does not exist"
                 ),
             });
         };
@@ -577,7 +563,7 @@ impl Catalog {
         let table_name = normalize_name(table_name)?;
         let Some(target_table) = self.table(&schema_name, &table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
         let target_oid = target_table.oid();
@@ -615,7 +601,7 @@ impl Catalog {
 
         let Some(_) = schema.remove_table(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -637,7 +623,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -649,8 +635,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" already exists in relation \"{}.{}\"",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" already exists in relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -662,8 +647,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "relation \"{}.{}\" already has a primary key",
-                    schema_name, table_name
+                    "relation \"{schema_name}.{table_name}\" already has a primary key"
                 ),
             });
         }
@@ -740,7 +724,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -749,8 +733,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "constraint \"{}\" already exists for relation \"{}.{}\"",
-                    name, schema_name, table_name
+                    "constraint \"{name}\" already exists for relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -762,8 +745,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "relation \"{}.{}\" already has a primary key",
-                    schema_name, table_name
+                    "relation \"{schema_name}.{table_name}\" already has a primary key"
                 ),
             });
         }
@@ -778,8 +760,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" does not exist in relation \"{}.{}\"",
-                        col, schema_name, table_name
+                        "column \"{col}\" does not exist in relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -790,8 +771,7 @@ impl Catalog {
         if normalized_cols.is_empty() {
             return Err(CatalogError {
                 message: format!(
-                    "empty key constraint is invalid for relation \"{}.{}\"",
-                    schema_name, table_name
+                    "empty key constraint is invalid for relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -835,7 +815,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -844,8 +824,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "constraint \"{}\" already exists for relation \"{}.{}\"",
-                    name, schema_name, table_name
+                    "constraint \"{name}\" already exists for relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -860,8 +839,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" does not exist in relation \"{}.{}\"",
-                        col, schema_name, table_name
+                        "column \"{col}\" does not exist in relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -872,8 +850,7 @@ impl Catalog {
         if normalized_cols.is_empty() {
             return Err(CatalogError {
                 message: format!(
-                    "empty foreign key constraint is invalid for relation \"{}.{}\"",
-                    schema_name, table_name
+                    "empty foreign key constraint is invalid for relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -885,8 +862,7 @@ impl Catalog {
         if normalized_referenced_table.is_empty() {
             return Err(CatalogError {
                 message: format!(
-                    "foreign key constraint has invalid REFERENCES target for relation \"{}.{}\"",
-                    schema_name, table_name
+                    "foreign key constraint has invalid REFERENCES target for relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -946,7 +922,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -972,8 +948,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" does not exist in relation \"{}.{}\"",
-                        col, schema_name, table_name
+                        "column \"{col}\" does not exist in relation \"{schema_name}.{table_name}\""
                     ),
                 });
             }
@@ -1015,7 +990,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -1026,8 +1001,7 @@ impl Catalog {
         else {
             return Err(CatalogError {
                 message: format!(
-                    "index \"{}\" does not exist on relation \"{}.{}\"",
-                    index_name, schema_name, table_name
+                    "index \"{index_name}\" does not exist on relation \"{schema_name}.{table_name}\""
                 ),
             });
         };
@@ -1041,8 +1015,7 @@ impl Catalog {
         if constraint_pos.is_some() && !cascade {
             return Err(CatalogError {
                 message: format!(
-                    "cannot drop index \"{}\" because constraint \"{}\" on relation \"{}.{}\" depends on it",
-                    index_name, index_name, schema_name, table_name
+                    "cannot drop index \"{index_name}\" because constraint \"{index_name}\" on relation \"{schema_name}.{table_name}\" depends on it"
                 ),
             });
         }
@@ -1065,7 +1038,7 @@ impl Catalog {
         let column_name = normalize_name(column_name)?;
         let Some(table) = self.table(&schema_name, &table_name).cloned() else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
         let target_table_oid = table.oid();
@@ -1077,8 +1050,7 @@ impl Catalog {
         else {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" does not exist",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" does not exist"
                 ),
             });
         };
@@ -1090,8 +1062,7 @@ impl Catalog {
         }) {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" is referenced by a key constraint",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" is referenced by a key constraint"
                 ),
             });
         }
@@ -1103,8 +1074,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" of relation \"{}.{}\" is referenced by a foreign key constraint",
-                        column_name, schema_name, table_name
+                        "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" is referenced by a foreign key constraint"
                     ),
                 });
             }
@@ -1123,8 +1093,7 @@ impl Catalog {
             {
                 return Err(CatalogError {
                     message: format!(
-                        "column \"{}\" of relation \"{}.{}\" is referenced by a foreign key constraint",
-                        column_name, schema_name, table_name
+                        "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" is referenced by a foreign key constraint"
                     ),
                 });
             }
@@ -1136,8 +1105,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" is referenced by an index",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" is referenced by an index"
                 ),
             });
         }
@@ -1183,7 +1151,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -1210,7 +1178,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -1239,8 +1207,7 @@ impl Catalog {
 
         Err(CatalogError {
             message: format!(
-                "constraint \"{}\" of relation \"{}.{}\" does not exist",
-                constraint_name, schema_name, table_name
+                "constraint \"{constraint_name}\" of relation \"{schema_name}.{table_name}\" does not exist"
             ),
         })
     }
@@ -1263,7 +1230,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
 
@@ -1274,8 +1241,7 @@ impl Catalog {
         {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" already exists in relation \"{}.{}\"",
-                    new_name, schema_name, table_name
+                    "column \"{new_name}\" already exists in relation \"{schema_name}.{table_name}\""
                 ),
             });
         }
@@ -1287,8 +1253,7 @@ impl Catalog {
         else {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" does not exist",
-                    old_name, schema_name, table_name
+                    "column \"{old_name}\" of relation \"{schema_name}.{table_name}\" does not exist"
                 ),
             });
         };
@@ -1342,7 +1307,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
         let part_of_primary_key = table.key_constraints().iter().any(|constraint| {
@@ -1359,16 +1324,14 @@ impl Catalog {
         else {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" does not exist",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" does not exist"
                 ),
             });
         };
         if nullable && part_of_primary_key {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" is part of a primary key",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" is part of a primary key"
                 ),
             });
         }
@@ -1394,7 +1357,7 @@ impl Catalog {
         };
         let Some(table) = schema.table_mut(&table_name) else {
             return Err(CatalogError {
-                message: format!("relation \"{}.{}\" does not exist", schema_name, table_name),
+                message: format!("relation \"{schema_name}.{table_name}\" does not exist"),
             });
         };
         let Some(column) = table
@@ -1404,8 +1367,7 @@ impl Catalog {
         else {
             return Err(CatalogError {
                 message: format!(
-                    "column \"{}\" of relation \"{}.{}\" does not exist",
-                    column_name, schema_name, table_name
+                    "column \"{column_name}\" of relation \"{schema_name}.{table_name}\" does not exist"
                 ),
             });
         };
@@ -1509,7 +1471,7 @@ impl Catalog {
                     }
                 }
                 Err(CatalogError {
-                    message: format!("relation \"{}\" does not exist", table_name),
+                    message: format!("relation \"{table_name}\" does not exist"),
                 })
             }
             [schema_name, table_name] => {
@@ -1518,8 +1480,7 @@ impl Catalog {
                 let Some(table) = self.table(&schema_name, &table_name) else {
                     return Err(CatalogError {
                         message: format!(
-                            "relation \"{}.{}\" does not exist",
-                            schema_name, table_name
+                            "relation \"{schema_name}.{table_name}\" does not exist"
                         ),
                     });
                 };
@@ -1549,8 +1510,8 @@ fn normalize_sequence_ref(raw: &str) -> Option<String> {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>();
     match parts.as_slice() {
-        [name] => Some(format!("public.{}", name)),
-        [schema, name] => Some(format!("{}.{}", schema, name)),
+        [name] => Some(format!("public.{name}")),
+        [schema, name] => Some(format!("{schema}.{name}")),
         _ => None,
     }
 }

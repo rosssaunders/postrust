@@ -180,7 +180,7 @@ async fn execute_simple_query(sql: &str) -> Result<Vec<BrowserQueryResult>, Stri
                                     "\\x{}",
                                     bytes
                                         .iter()
-                                        .map(|b| format!("{:02x}", b))
+                                        .map(|b| format!("{b:02x}"))
                                         .collect::<String>()
                                 )
                             }),

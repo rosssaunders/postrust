@@ -263,14 +263,12 @@ fn check_expr_functions(expr: &Expr) -> Result<(), EngineError> {
                                 arg_count
                             ),
                         });
-                    } else {
-                        return Err(EngineError {
-                            message: format!(
-                                "function {}() requires between {} and {} arguments, got {}",
-                                lower_name, min_args, max_args, arg_count
-                            ),
-                        });
                     }
+                    return Err(EngineError {
+                        message: format!(
+                            "function {lower_name}() requires between {min_args} and {max_args} arguments, got {arg_count}"
+                        ),
+                    });
                 }
             }
             // Unknown functions are allowed — they might be user-defined

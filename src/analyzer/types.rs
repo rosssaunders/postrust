@@ -17,12 +17,9 @@ pub fn can_coerce_implicit(from: &TypeSignature, to: &TypeSignature) -> bool {
     matches!(
         (from, to),
         // Numeric promotions
-        (TypeSignature::Int8, TypeSignature::Float8)
-            // Text can coerce to most types in assignment context
-            | (TypeSignature::Text, TypeSignature::Date)
-            | (TypeSignature::Text, TypeSignature::Timestamp)
-            // Date → Timestamp promotion
-            | (TypeSignature::Date, TypeSignature::Timestamp)
+        (TypeSignature::Int8, TypeSignature::Float8) |
+(TypeSignature::Text, TypeSignature::Date | TypeSignature::Timestamp) |
+(TypeSignature::Date, TypeSignature::Timestamp)
     )
 }
 
@@ -79,7 +76,7 @@ pub fn check_expr_is_numeric(expr: &Expr) -> Result<(), EngineError> {
             // PostgreSQL allows string literals if they parse as numbers
             if s.parse::<i64>().is_err() && s.parse::<f64>().is_err() {
                 return Err(EngineError {
-                    message: format!("invalid input syntax for type bigint: \"{}\"", s),
+                    message: format!("invalid input syntax for type bigint: \"{s}\""),
                 });
             }
             Ok(())

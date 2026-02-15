@@ -33,15 +33,15 @@ pub(crate) fn pad_string(input: &str, len: usize, fill: &str, left: bool) -> Str
     }
     let padding: String = fill_chars.iter().cycle().take(pad_len).collect();
     if left {
-        format!("{}{}", padding, input)
+        format!("{padding}{input}")
     } else {
-        format!("{}{}", input, padding)
+        format!("{input}{padding}")
     }
 }
 
 pub(crate) fn md5_hex(input: &str) -> String {
     let digest = md5_digest(input.as_bytes());
-    digest.iter().map(|b| format!("{:02x}", b)).collect()
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub(crate) fn md5_digest(input: &[u8]) -> [u8; 16] {
@@ -125,14 +125,14 @@ pub(crate) fn md5_digest(input: &[u8]) -> [u8; 16] {
 pub(crate) fn encode_bytes(input: &[u8], format: &str) -> Result<String, EngineError> {
     let format = format.trim().to_ascii_lowercase();
     match format.as_str() {
-        "hex" => Ok(input.iter().map(|b| format!("{:02x}", b)).collect()),
+        "hex" => Ok(input.iter().map(|b| format!("{b:02x}")).collect()),
         "base64" => {
             use base64::Engine;
             Ok(base64::engine::general_purpose::STANDARD.encode(input))
         }
         "escape" => Ok(escape_bytes(input)),
         _ => Err(EngineError {
-            message: format!("encode() unsupported format {}", format),
+            message: format!("encode() unsupported format {format}"),
         }),
     }
 }
@@ -151,7 +151,7 @@ pub(crate) fn decode_bytes(input: &str, format: &str) -> Result<Vec<u8>, EngineE
         }
         "escape" => decode_escape_bytes(input),
         _ => Err(EngineError {
-            message: format!("decode() unsupported format {}", format),
+            message: format!("decode() unsupported format {format}"),
         }),
     }
 }
@@ -165,7 +165,7 @@ fn escape_bytes(input: &[u8]) -> String {
             out.push(byte as char);
         } else {
             out.push('\\');
-            out.push_str(&format!("{:03o}", byte));
+            out.push_str(&format!("{byte:03o}"));
         }
     }
     out
@@ -378,8 +378,8 @@ pub(crate) fn sha256_hex(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     // Return as \\x prefixed hex string (bytea output format)
-    let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
-    format!("\\x{}", hex)
+    let hex: String = result.iter().map(|b| format!("{b:02x}")).collect();
+    format!("\\x{hex}")
 }
 
 /// Implements PostgreSQL's format() function.
@@ -488,7 +488,7 @@ pub(crate) fn eval_format(
             }
             _ => {
                 return Err(EngineError {
-                    message: format!("unrecognized format type: {}", format_type),
+                    message: format!("unrecognized format type: {format_type}"),
                 });
             }
         }

@@ -117,7 +117,7 @@ impl EvalScope {
             return Some(value.clone());
         }
 
-        let suffix = format!(".{}", key);
+        let suffix = format!(".{key}");
         let mut matches = self
             .qualified
             .iter()
@@ -759,16 +759,14 @@ pub(crate) fn eval_expr_with_window<'a>(
                     {
                         return Err(EngineError {
                             message: format!(
-                                "{}() aggregate modifiers require grouped aggregate evaluation",
-                                fn_name
+                                "{fn_name}() aggregate modifiers require grouped aggregate evaluation"
                             ),
                         });
                     }
                     if is_aggregate_function(&fn_name) {
                         return Err(EngineError {
                             message: format!(
-                                "aggregate function {}() must be used with grouped evaluation",
-                                fn_name
+                                "aggregate function {fn_name}() must be used with grouped evaluation"
                             ),
                         });
                     }
@@ -829,7 +827,7 @@ fn resolve_window_spec(
         .iter()
         .find(|d| d.name == *ref_name)
         .ok_or_else(|| EngineError {
-            message: format!("window \"{}\" does not exist", ref_name),
+            message: format!("window \"{ref_name}\" does not exist"),
         })?;
     
     // Merge: start with base definition, then apply refinements from spec
@@ -837,8 +835,7 @@ fn resolve_window_spec(
     if !spec.partition_by.is_empty() {
         return Err(EngineError {
             message: format!(
-                "cannot override PARTITION BY clause of window \"{}\"",
-                ref_name
+                "cannot override PARTITION BY clause of window \"{ref_name}\""
             ),
         });
     }
@@ -1136,7 +1133,7 @@ async fn eval_window_function(
             .await
         }
         _ => Err(EngineError {
-            message: format!("unsupported window function {}", fn_name),
+            message: format!("unsupported window function {fn_name}"),
         }),
     }
 }
@@ -1701,33 +1698,27 @@ pub(crate) fn eval_cast_scalar(
             };
             Ok(ScalarValue::Bool(parse_bool_scalar(
                 &value,
-                &format!("invalid input syntax for type boolean: \"{}\"", input_text),
+                &format!("invalid input syntax for type boolean: \"{input_text}\""),
             )?))
         }
         "int2" | "smallint" => {
-            match &value {
-                ScalarValue::Float(v) => {
-                    let result = crate::utils::adt::float::float8_to_int2(*v)?;
-                    Ok(ScalarValue::Int(result))
-                }
-                _ => {
-                    let val = parse_i64_scalar(&value, "cannot cast value to smallint")?;
-                    crate::utils::adt::int_arithmetic::validate_int2(val)?;
-                    Ok(ScalarValue::Int(val))
-                }
+            if let ScalarValue::Float(v) = &value {
+                let result = crate::utils::adt::float::float8_to_int2(*v)?;
+                Ok(ScalarValue::Int(result))
+            } else {
+                let val = parse_i64_scalar(&value, "cannot cast value to smallint")?;
+                crate::utils::adt::int_arithmetic::validate_int2(val)?;
+                Ok(ScalarValue::Int(val))
             }
         }
         "int4" | "integer" | "int" => {
-            match &value {
-                ScalarValue::Float(v) => {
-                    let result = crate::utils::adt::float::float8_to_int4(*v)?;
-                    Ok(ScalarValue::Int(result))
-                }
-                _ => {
-                    let val = parse_i64_scalar(&value, "cannot cast value to integer")?;
-                    crate::utils::adt::int_arithmetic::validate_int4(val)?;
-                    Ok(ScalarValue::Int(val))
-                }
+            if let ScalarValue::Float(v) = &value {
+                let result = crate::utils::adt::float::float8_to_int4(*v)?;
+                Ok(ScalarValue::Int(result))
+            } else {
+                let val = parse_i64_scalar(&value, "cannot cast value to integer")?;
+                crate::utils::adt::int_arithmetic::validate_int4(val)?;
+                Ok(ScalarValue::Int(val))
             }
         }
         "int8" | "bigint" => {
@@ -1804,7 +1795,7 @@ pub(crate) fn eval_cast_scalar(
             Ok(ScalarValue::Text(text))
         }
         other => Err(EngineError {
-            message: format!("unsupported cast type {}", other),
+            message: format!("unsupported cast type {other}"),
         }),
     }
 }
@@ -1919,7 +1910,7 @@ pub(crate) fn eval_binary(
     left: ScalarValue,
     right: ScalarValue,
 ) -> Result<ScalarValue, EngineError> {
-    use BinaryOp::*;
+    use BinaryOp::{Or, And, Eq, NotEq, Lt, Lte, Gt, Gte, Add, Sub, Mul, Div, Mod, JsonGet, JsonGetText, JsonPath, JsonPathText, JsonPathExists, JsonPathMatch, JsonConcat, JsonContains, ArrayContains, JsonContainedBy, ArrayContainedBy, ArrayOverlap, ArrayConcat, JsonHasKey, JsonHasAny, JsonHasAll, JsonDelete, JsonDeletePath};
     match op {
         Or => eval_logical_or(left, right),
         And => eval_logical_and(left, right),
@@ -2257,8 +2248,7 @@ async fn eval_function(
     if distinct || !order_by.is_empty() || !within_group.is_empty() || filter.is_some() {
         return Err(EngineError {
             message: format!(
-                "{}() aggregate modifiers require grouped aggregate evaluation",
-                fn_name
+                "{fn_name}() aggregate modifiers require grouped aggregate evaluation"
             ),
         });
     }
@@ -2270,8 +2260,7 @@ async fn eval_function(
     if is_aggregate_function(&fn_name) {
         return Err(EngineError {
             message: format!(
-                "aggregate function {}() must be used with grouped evaluation",
-                fn_name
+                "aggregate function {fn_name}() must be used with grouped evaluation"
             ),
         });
     }
@@ -2292,7 +2281,7 @@ async fn eval_function(
                 "recv" => return execute_ws_recv(&values).await,
                 _ => {
                     return Err(EngineError {
-                        message: format!("function ws.{}() does not exist", fn_name),
+                        message: format!("function ws.{fn_name}() does not exist"),
                     });
                 }
             }
@@ -2411,13 +2400,13 @@ async fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineErro
             Ok((conn.real_io, conn.state == "closed"))
         } else {
             Err(EngineError {
-                message: format!("connection {} does not exist", conn_id),
+                message: format!("connection {conn_id} does not exist"),
             })
         }
     })?;
     if is_closed {
         return Err(EngineError {
-            message: format!("connection {} is closed", conn_id),
+            message: format!("connection {conn_id} is closed"),
         });
     }
 
@@ -2444,7 +2433,7 @@ async fn execute_ws_send(args: &[ScalarValue]) -> Result<ScalarValue, EngineErro
             Ok(ScalarValue::Bool(true))
         } else {
             Err(EngineError {
-                message: format!("connection {} does not exist", conn_id),
+                message: format!("connection {conn_id} does not exist"),
             })
         }
     })
@@ -2487,7 +2476,7 @@ async fn execute_ws_close(args: &[ScalarValue]) -> Result<ScalarValue, EngineErr
             Ok(ScalarValue::Bool(true))
         } else {
             Err(EngineError {
-                message: format!("connection {} does not exist", conn_id),
+                message: format!("connection {conn_id} does not exist"),
             })
         }
     })
@@ -2526,7 +2515,7 @@ async fn execute_ws_recv(args: &[ScalarValue]) -> Result<ScalarValue, EngineErro
             }
         } else {
             Err(EngineError {
-                message: format!("connection {} does not exist", conn_id),
+                message: format!("connection {conn_id} does not exist"),
             })
         }
     })
@@ -2568,7 +2557,7 @@ pub(crate) async fn execute_ws_messages(
             Ok((vec!["message".to_string()], rows))
         } else {
             Err(EngineError {
-                message: format!("connection {} does not exist", conn_id),
+                message: format!("connection {conn_id} does not exist"),
             })
         }
     })
@@ -2587,7 +2576,7 @@ pub async fn ws_simulate_message(
             Ok(conn.on_message.clone())
         } else {
             Err(EngineError {
-                message: format!("connection {} does not exist", conn_id),
+                message: format!("connection {conn_id} does not exist"),
             })
         }
     })?;
@@ -2616,7 +2605,7 @@ pub async fn ws_simulate_message(
             };
             let stmt = crate::parser::sql_parser::parse_statement(&substituted).map_err(|e| {
                 EngineError {
-                    message: format!("callback parse error: {}", e),
+                    message: format!("callback parse error: {e}"),
                 }
             })?;
             let planned = plan_statement(stmt)?;

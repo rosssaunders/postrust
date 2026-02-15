@@ -249,7 +249,7 @@ pub enum TypeName {
     Serial,    // auto-incrementing INT4
     BigSerial, // auto-incrementing INT8
     Numeric,   // DECIMAL/NUMERIC
-    Array(Box<TypeName>), // e.g. int4[], text[][]
+    Array(Box<Self>), // e.g. int4[], text[][]
     Name,      // PostgreSQL name type (63-byte identifier)
 }
 
@@ -634,10 +634,10 @@ pub struct CycleClause {
 pub enum QueryExpr {
     Select(SelectStatement),
     SetOperation {
-        left: Box<QueryExpr>,
+        left: Box<Self>,
         op: SetOperator,
         quantifier: SetQuantifier,
-        right: Box<QueryExpr>,
+        right: Box<Self>,
     },
     Nested(Box<Query>),
     Values(Vec<Vec<Expr>>),
@@ -821,95 +821,95 @@ pub enum Expr {
     Parameter(i32),
     FunctionCall {
         name: Vec<String>,
-        args: Vec<Expr>,
+        args: Vec<Self>,
         distinct: bool,
         order_by: Vec<OrderByExpr>,
         within_group: Vec<OrderByExpr>,
-        filter: Option<Box<Expr>>,
+        filter: Option<Box<Self>>,
         over: Option<Box<WindowSpec>>,
     },
     Cast {
-        expr: Box<Expr>,
+        expr: Box<Self>,
         type_name: String,
     },
     Wildcard,
     QualifiedWildcard(Vec<String>), // e.g., table.* or schema.table.*
     Unary {
         op: UnaryOp,
-        expr: Box<Expr>,
+        expr: Box<Self>,
     },
     Binary {
-        left: Box<Expr>,
+        left: Box<Self>,
         op: BinaryOp,
-        right: Box<Expr>,
+        right: Box<Self>,
     },
     AnyAll {
-        left: Box<Expr>,
+        left: Box<Self>,
         op: BinaryOp,
-        right: Box<Expr>,
+        right: Box<Self>,
         quantifier: ComparisonQuantifier,
     },
     Exists(Box<Query>),
     ScalarSubquery(Box<Query>),
-    ArrayConstructor(Vec<Expr>),
+    ArrayConstructor(Vec<Self>),
     /// Row constructor: ROW(a, b, c) or (a, b, c)
-    RowConstructor(Vec<Expr>),
+    RowConstructor(Vec<Self>),
     ArraySubquery(Box<Query>),
     InList {
-        expr: Box<Expr>,
-        list: Vec<Expr>,
+        expr: Box<Self>,
+        list: Vec<Self>,
         negated: bool,
     },
     InSubquery {
-        expr: Box<Expr>,
+        expr: Box<Self>,
         subquery: Box<Query>,
         negated: bool,
     },
     Between {
-        expr: Box<Expr>,
-        low: Box<Expr>,
-        high: Box<Expr>,
+        expr: Box<Self>,
+        low: Box<Self>,
+        high: Box<Self>,
         negated: bool,
     },
     Like {
-        expr: Box<Expr>,
-        pattern: Box<Expr>,
+        expr: Box<Self>,
+        pattern: Box<Self>,
         case_insensitive: bool,
         negated: bool,
-        escape: Option<Box<Expr>>,
+        escape: Option<Box<Self>>,
     },
     IsNull {
-        expr: Box<Expr>,
+        expr: Box<Self>,
         negated: bool,
     },
     /// IS TRUE / IS NOT TRUE / IS FALSE / IS NOT FALSE / IS UNKNOWN / IS NOT UNKNOWN
     BooleanTest {
-        expr: Box<Expr>,
+        expr: Box<Self>,
         test_type: BooleanTestType,
         negated: bool,
     },
     IsDistinctFrom {
-        left: Box<Expr>,
-        right: Box<Expr>,
+        left: Box<Self>,
+        right: Box<Self>,
         negated: bool,
     },
     CaseSimple {
-        operand: Box<Expr>,
-        when_then: Vec<(Expr, Expr)>,
-        else_expr: Option<Box<Expr>>,
+        operand: Box<Self>,
+        when_then: Vec<(Self, Self)>,
+        else_expr: Option<Box<Self>>,
     },
     CaseSearched {
-        when_then: Vec<(Expr, Expr)>,
-        else_expr: Option<Box<Expr>>,
+        when_then: Vec<(Self, Self)>,
+        else_expr: Option<Box<Self>>,
     },
     ArraySubscript {
-        expr: Box<Expr>,
-        index: Box<Expr>,
+        expr: Box<Self>,
+        index: Box<Self>,
     },
     ArraySlice {
-        expr: Box<Expr>,
-        start: Option<Box<Expr>>,
-        end: Option<Box<Expr>>,
+        expr: Box<Self>,
+        start: Option<Box<Self>>,
+        end: Option<Box<Self>>,
     },
     TypedLiteral {
         type_name: String,

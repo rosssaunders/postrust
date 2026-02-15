@@ -22,7 +22,7 @@ pub async fn copy_tables(
             continue;
         };
         let qualified = format!("\"{}\".\"{}\"", table.namespace, table.name);
-        let sql = format!("COPY {} TO STDOUT", qualified);
+        let sql = format!("COPY {qualified} TO STDOUT");
         let stream = client.copy_out(sql.as_str()).await?;
         tokio::pin!(stream);
         let mut buffer = Vec::new();
@@ -34,10 +34,10 @@ pub async fn copy_tables(
             buffer.extend_from_slice(&chunk);
             while let Some(pos) = buffer.iter().position(|b| *b == b'\n') {
                 let mut line = buffer.drain(..=pos).collect::<Vec<_>>();
-                if let Some(b'\n') = line.last() {
+                if matches!(line.last(), Some(b'\n')) {
                     line.pop();
                 }
-                if let Some(b'\r') = line.last() {
+                if matches!(line.last(), Some(b'\r')) {
                     line.pop();
                 }
                 if line == b"\\." {
@@ -53,7 +53,7 @@ pub async fn copy_tables(
         }
         if !buffer.is_empty() {
             let mut line = std::mem::take(&mut buffer);
-            if let Some(b'\r') = line.last() {
+            if matches!(line.last(), Some(b'\r')) {
                 line.pop();
             }
             if line != b"\\." {

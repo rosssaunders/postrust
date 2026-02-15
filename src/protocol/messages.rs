@@ -86,7 +86,7 @@ pub fn decode_startup_action(bytes: &[u8]) -> Result<StartupAction, ProtocolErro
             })
         }
         other => Err(ProtocolError {
-            message: format!("unsupported startup code {}", other),
+            message: format!("unsupported startup code {other}"),
         }),
     }
 }
@@ -505,9 +505,9 @@ fn encode_error_or_notice(
 fn render_command_complete(tag: &str, rows: u64) -> String {
     let upper = tag.trim().to_ascii_uppercase();
     match upper.as_str() {
-        "INSERT" => format!("INSERT 0 {}", rows),
+        "INSERT" => format!("INSERT 0 {rows}"),
         "SELECT" | "UPDATE" | "DELETE" | "MERGE" | "MOVE" | "FETCH" | "COPY" => {
-            format!("{} {}", upper, rows)
+            format!("{upper} {rows}")
         }
         _ => upper,
     }
@@ -544,7 +544,7 @@ fn find_zero(bytes: &[u8], from: usize) -> Option<usize> {
 
 fn decode_utf8(bytes: &[u8], context: &str) -> Result<String, ProtocolError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| ProtocolError {
-        message: format!("{} is not valid utf8", context),
+        message: format!("{context} is not valid utf8"),
     })
 }
 

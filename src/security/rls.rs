@@ -88,7 +88,7 @@ impl RlsRegistry {
             if if_exists {
                 return Ok(());
             }
-            return Err(format!("policy \"{}\" does not exist", policy_name));
+            return Err(format!("policy \"{policy_name}\" does not exist"));
         };
         let Some(idx) = policies
             .iter()
@@ -97,7 +97,7 @@ impl RlsRegistry {
             if if_exists {
                 return Ok(());
             }
-            return Err(format!("policy \"{}\" does not exist", policy_name));
+            return Err(format!("policy \"{policy_name}\" does not exist"));
         };
         policies.remove(idx);
         if policies.is_empty() {

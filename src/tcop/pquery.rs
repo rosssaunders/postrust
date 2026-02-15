@@ -483,7 +483,7 @@ fn derive_query_expr_output_columns(
             let ncols = rows.first().map(|r| r.len()).unwrap_or(0);
             Ok((1..=ncols)
                 .map(|i| PlannedOutputColumn {
-                    name: format!("column{}", i),
+                    name: format!("column{i}"),
                     type_oid: PG_TEXT_OID, // Default to text, actual type determined at execution
                 })
                 .collect())
@@ -809,16 +809,14 @@ pub(crate) fn validate_recursive_cte_terms(
     if query_expr_references_relation(left, cte_name) {
         return Err(EngineError {
             message: format!(
-                "recursive query \"{}\" has self-reference in non-recursive term",
-                cte_display_name
+                "recursive query \"{cte_display_name}\" has self-reference in non-recursive term"
             ),
         });
     }
     if !query_expr_references_relation(right, cte_name) {
         return Err(EngineError {
             message: format!(
-                "recursive query \"{}\" must reference itself in recursive term",
-                cte_display_name
+                "recursive query \"{cte_display_name}\" must reference itself in recursive term"
             ),
         });
     }
@@ -848,7 +846,7 @@ fn derive_query_expr_columns(
         QueryExpr::Values(rows) => {
             // VALUES query - derive column names
             let ncols = rows.first().map(|r| r.len()).unwrap_or(0);
-            Ok((1..=ncols).map(|i| format!("column{}", i)).collect())
+            Ok((1..=ncols).map(|i| format!("column{i}")).collect())
         }
         QueryExpr::Insert(_) | QueryExpr::Update(_) | QueryExpr::Delete(_) => Err(EngineError {
             message: "data-modifying statements in WITH are not yet fully supported".to_string(),
@@ -1145,7 +1143,7 @@ fn expand_table_expression_columns(
                     .alias
                     .as_ref()
                     .map(|alias| alias.to_ascii_lowercase())
-                    .unwrap_or(relation_name.clone());
+                    .unwrap_or(relation_name);
                 return Ok(columns
                     .iter()
                     .map(|column| ExpandedFromColumn {
@@ -1305,7 +1303,7 @@ fn expand_table_expression_columns_typed(
                     .alias
                     .as_ref()
                     .map(|alias| alias.to_ascii_lowercase())
-                    .unwrap_or(relation_name.clone());
+                    .unwrap_or(relation_name);
                 return Ok(columns
                     .iter()
                     .map(|column| ExpandedFromTypeColumn {

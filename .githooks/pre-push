@@ -1,0 +1,9 @@
+#!/bin/bash
+# Pre-push hook: block pushes if clippy or build fails
+set -e
+
+echo "🔨 Running cargo build..."
+cargo build 2>&1
+echo "📎 Running cargo clippy..."
+cargo clippy -- -D warnings 2>&1
+echo "✅ Build and clippy passed. Pushing..."

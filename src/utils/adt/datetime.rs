@@ -103,7 +103,7 @@ pub(crate) fn eval_extract_or_date_part(
         }
         _ => {
             return Err(EngineError {
-                message: format!("unsupported date/time field {}", field_name),
+                message: format!("unsupported date/time field {field_name}"),
             });
         }
     };
@@ -155,7 +155,7 @@ pub(crate) fn eval_date_trunc(
         }
         _ => {
             return Err(EngineError {
-                message: format!("unsupported date_trunc field {}", field_name),
+                message: format!("unsupported date_trunc field {field_name}"),
             });
         }
     }
@@ -495,7 +495,7 @@ fn parse_date_text(text: &str) -> Result<DateValue, EngineError> {
     }
 
     Err(EngineError {
-        message: format!("invalid date value: \"{}\"", text),
+        message: format!("invalid date value: \"{text}\""),
     })
 }
 
@@ -818,7 +818,7 @@ fn parse_time_text(text: &str) -> Result<(u32, u32, u32, u32), EngineError> {
     let time_parts = cleaned.split(':').collect::<Vec<_>>();
     if time_parts.len() < 2 || time_parts.len() > 3 {
         return Err(EngineError {
-            message: format!("invalid time format: \"{}\"", text),
+            message: format!("invalid time format: \"{text}\""),
         });
     }
     
@@ -872,20 +872,20 @@ fn parse_time_text(text: &str) -> Result<(u32, u32, u32, u32), EngineError> {
     
     if hour > 23 {
         return Err(EngineError {
-            message: format!("date/time field value out of range: \"{}\"", text),
+            message: format!("date/time field value out of range: \"{text}\""),
         });
     }
     
     if minute > 59 {
         return Err(EngineError {
-            message: format!("date/time field value out of range: \"{}\"", text),
+            message: format!("date/time field value out of range: \"{text}\""),
         });
     }
     
     // PostgreSQL allows second values slightly over 60 that round down
     if second > 59 {
         return Err(EngineError {
-            message: format!("date/time field value out of range: \"{}\"", text),
+            message: format!("date/time field value out of range: \"{text}\""),
         });
     }
     
@@ -1118,7 +1118,7 @@ pub(crate) fn format_timestamp(datetime: DateTimeValue) -> String {
 #[allow(dead_code)]
 pub(crate) fn format_time(hour: u32, minute: u32, second: u32, microsecond: u32) -> String {
     if microsecond == 0 {
-        format!("{:02}:{:02}:{:02}", hour, minute, second)
+        format!("{hour:02}:{minute:02}:{second:02}")
     } else {
         // Remove trailing zeros from microseconds
         let mut frac = microsecond;
@@ -1128,9 +1128,7 @@ pub(crate) fn format_time(hour: u32, minute: u32, second: u32, microsecond: u32)
             precision -= 1;
         }
         format!(
-            "{:02}:{:02}:{:02}.{:0width$}",
-            hour, minute, second, frac,
-            width = precision
+            "{hour:02}:{minute:02}:{second:02}.{frac:0precision$}"
         )
     }
 }
@@ -1248,7 +1246,7 @@ fn format_interval(interval: IntervalValue) -> String {
 }
 
 pub(crate) fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
-    let year = year as i64 - if month <= 2 { 1 } else { 0 };
+    let year = year as i64 - i64::from(month <= 2);
     let era = if year >= 0 { year } else { year - 399 } / 400;
     let yoe = year - era * 400;
     let month = month as i64;
@@ -1268,7 +1266,7 @@ fn civil_from_days(days: i64) -> DateValue {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
+    let year = year + i64::from(month <= 2);
     DateValue {
         year: year as i32,
         month: month as u32,
@@ -1286,17 +1284,17 @@ pub(crate) fn eval_make_time(
     // Validate inputs like PostgreSQL does
     if !(0..=23).contains(&hour) {
         return Err(EngineError {
-            message: format!("hour {} is out of range 0..23", hour),
+            message: format!("hour {hour} is out of range 0..23"),
         });
     }
     if !(0..=59).contains(&minute) {
         return Err(EngineError {
-            message: format!("minute {} is out of range 0..59", minute),
+            message: format!("minute {minute} is out of range 0..59"),
         });
     }
     if !(0.0..60.0).contains(&second) {
         return Err(EngineError {
-            message: format!("second {} is out of range 0..<60", second),
+            message: format!("second {second} is out of range 0..<60"),
         });
     }
 
@@ -1305,13 +1303,11 @@ pub(crate) fn eval_make_time(
 
     if frac == 0 {
         Ok(ScalarValue::Text(format!(
-            "{:02}:{:02}:{:02}",
-            hour, minute, sec
+            "{hour:02}:{minute:02}:{sec:02}"
         )))
     } else {
         Ok(ScalarValue::Text(format!(
-            "{:02}:{:02}:{:02}.{:06}",
-            hour, minute, sec, frac
+            "{hour:02}:{minute:02}:{sec:02}.{frac:06}"
         )))
     }
 }

@@ -11,7 +11,7 @@ pub async fn execute_create_extension(
                 return Ok(());
             }
             return Err(EngineError {
-                message: format!("extension \"{}\" already exists", name),
+                message: format!("extension \"{name}\" already exists"),
             });
         }
         let (version, description) = match name.as_str() {
@@ -19,7 +19,7 @@ pub async fn execute_create_extension(
             "http" => ("1.0".to_string(), "HTTP client extension".to_string()),
             _ => {
                 return Err(EngineError {
-                    message: format!("extension \"{}\" is not available", name),
+                    message: format!("extension \"{name}\" is not available"),
                 });
             }
         };
@@ -51,7 +51,7 @@ pub async fn execute_drop_extension(
         ext.extensions.retain(|e| e.name != name);
         if ext.extensions.len() == before && !drop_ext.if_exists {
             return Err(EngineError {
-                message: format!("extension \"{}\" does not exist", name),
+                message: format!("extension \"{name}\" does not exist"),
             });
         }
         if name == "ws" {

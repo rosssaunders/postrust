@@ -191,7 +191,7 @@ async fn execute_simple_query_via_session(sql: &str) -> Result<Vec<CliQueryResul
                                     "\\x{}",
                                     bytes
                                         .iter()
-                                        .map(|b| format!("{:02x}", b))
+                                        .map(|b| format!("{b:02x}"))
                                         .collect::<String>()
                                 )
                             }),

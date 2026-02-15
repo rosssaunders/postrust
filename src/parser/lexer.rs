@@ -638,7 +638,7 @@ impl<'a> Lexer<'a> {
             }
             c if is_operator_char(c) => self.lex_operator(start),
             _ => Err(LexError {
-                message: format!("unexpected character '{}'", ch),
+                message: format!("unexpected character '{ch}'"),
                 position: start,
             }),
         }
@@ -778,15 +778,14 @@ impl<'a> Lexer<'a> {
             if self.peek_char() == Some('$') {
                 self.advance_char(); // consume closing $ of opening delimiter
                 let tag = &self.input[tag_start..self.pos - 1]; // tag between the two $
-                let delimiter = format!("${}$", tag);
+                let delimiter = format!("${tag}$");
                 let body_start = self.pos;
                 // Find matching closing delimiter
                 loop {
                     if self.pos >= self.input.len() {
                         return Err(LexError {
                             message: format!(
-                                "unterminated dollar-quoted string (expected {})",
-                                delimiter
+                                "unterminated dollar-quoted string (expected {delimiter})"
                             ),
                             position: start,
                         });
@@ -817,7 +816,7 @@ impl<'a> Lexer<'a> {
                 self.advance_char();
             }
             let body = &self.input[digit_start..self.pos];
-            let mut text = format!(".{}", body);
+            let mut text = format!(".{body}");
             self.consume_exponent(&mut text)?;
             return Ok(self.mk(start, TokenKind::Float(text)));
         }

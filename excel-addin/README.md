@@ -74,6 +74,54 @@ No build tools, no frameworks — just HTML, CSS, and vanilla JS.
 wasm-pack build --target web --out-dir excel-addin/pkg --release
 ```
 
+## HTTPS Certificate Trust
+
+The dev server uses a self-signed certificate. Browsers will reject it by default.
+
+**Option A: Add to system trust store (Linux)**
+```bash
+sudo cp .certs/cert.pem /usr/local/share/ca-certificates/openassay-dev.crt
+sudo update-ca-certificates
+```
+
+**Option B: Launch Chromium with flag**
+```bash
+chromium --ignore-certificate-errors
+```
+
+**Option C: Manual browser exception**
+Navigate to `https://localhost:3000` and accept the certificate warning before using the add-in.
+
+## Excel Online Account Requirements
+
+Sideloading Office Add-ins in Excel Online requires a **Microsoft 365 subscription** (Business or Education) or a Microsoft account with access to OneDrive. Free Microsoft accounts (e.g., `@outlook.com`) can sideload via the manual upload flow:
+
+1. Open [Office on the web](https://office.live.com/) and create/open an Excel workbook
+2. Go to **Insert → Office Add-ins → Upload My Add-in**
+3. Upload `manifest.xml`
+
+If you see "Something's not right — page temporarily unavailable" when opening Excel Online, this typically indicates:
+- The free account doesn't have access to the full Excel Online editor (try creating a workbook from OneDrive instead of excel.office.com directly)
+- Try navigating to [onedrive.live.com](https://onedrive.live.com), creating a new Excel workbook there, then sideloading the add-in
+
+## Known Issues
+
+### NUMERIC Floating Point Precision
+
+The engine currently represents all numeric values as either `Int(i64)` or `Float(f64)` — there is no dedicated `NUMERIC`/`DECIMAL` type with arbitrary precision. This means:
+
+```sql
+-- Returns 99.94999999999999 instead of 99.95
+SELECT SUM(amount * qty) FROM orders;
+```
+
+PostgreSQL's `NUMERIC` type uses base-10000 digit arrays for exact decimal arithmetic. Implementing this requires adding a new `ScalarValue::Numeric` variant backed by a proper decimal library (e.g., `rust_decimal` or a custom PG-compatible implementation). This is tracked as a future enhancement.
+
+**Workaround:** Use `ROUND()` to control display precision:
+```sql
+SELECT ROUND(SUM(amount * qty), 2) FROM orders;
+```
+
 ## Requirements
 
 - Excel Online or Excel Desktop (Windows/Mac) with Office Add-ins support

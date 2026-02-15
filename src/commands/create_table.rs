@@ -67,7 +67,7 @@ pub async fn execute_create_table(
         });
         if let Some(name) = existing {
             return Err(EngineError {
-                message: format!("sequence \"{}\" already exists", name),
+                message: format!("sequence \"{name}\" already exists"),
             });
         }
     }
@@ -411,7 +411,7 @@ async fn execute_create_table_as_select(
         columns: Vec::new(),
         rows: Vec::new(),
         // PostgreSQL returns "SELECT n" for CTAS, where n is the number of rows inserted
-        command_tag: format!("SELECT {}", row_count),
+        command_tag: format!("SELECT {row_count}"),
         rows_affected: row_count,
     })
 }

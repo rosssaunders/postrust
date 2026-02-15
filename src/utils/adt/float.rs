@@ -14,8 +14,7 @@ pub fn float8in(input: &str) -> Result<f64, EngineError> {
     if trimmed.is_empty() {
         return Err(EngineError {
             message: format!(
-                "invalid input syntax for type double precision: \"{}\"",
-                input
+                "invalid input syntax for type double precision: \"{input}\""
             ),
         });
     }
@@ -39,8 +38,7 @@ pub fn float8in(input: &str) -> Result<f64, EngineError> {
             if val.is_infinite() {
                 return Err(EngineError {
                     message: format!(
-                        "\"{}\" is out of range for type double precision",
-                        trimmed
+                        "\"{trimmed}\" is out of range for type double precision"
                     ),
                 });
             }
@@ -48,8 +46,7 @@ pub fn float8in(input: &str) -> Result<f64, EngineError> {
             if val == 0.0 && !is_zero_input(trimmed) {
                 return Err(EngineError {
                     message: format!(
-                        "\"{}\" is out of range for type double precision",
-                        trimmed
+                        "\"{trimmed}\" is out of range for type double precision"
                     ),
                 });
             }
@@ -57,8 +54,7 @@ pub fn float8in(input: &str) -> Result<f64, EngineError> {
         }
         Err(_) => Err(EngineError {
             message: format!(
-                "invalid input syntax for type double precision: \"{}\"",
-                input
+                "invalid input syntax for type double precision: \"{input}\""
             ),
         }),
     }
@@ -70,7 +66,7 @@ pub fn float4in(input: &str) -> Result<f64, EngineError> {
 
     if trimmed.is_empty() {
         return Err(EngineError {
-            message: format!("invalid input syntax for type real: \"{}\"", input),
+            message: format!("invalid input syntax for type real: \"{input}\""),
         });
     }
 
@@ -91,26 +87,26 @@ pub fn float4in(input: &str) -> Result<f64, EngineError> {
         Ok(val) => {
             if val.is_infinite() {
                 return Err(EngineError {
-                    message: format!("\"{}\" is out of range for type real", trimmed),
+                    message: format!("\"{trimmed}\" is out of range for type real"),
                 });
             }
             // Check f32 range
             let val32 = val as f32;
             if val32.is_infinite() && !val.is_infinite() {
                 return Err(EngineError {
-                    message: format!("\"{}\" is out of range for type real", trimmed),
+                    message: format!("\"{trimmed}\" is out of range for type real"),
                 });
             }
             if val32 == 0.0 && val != 0.0 && !is_zero_input(trimmed) {
                 return Err(EngineError {
-                    message: format!("\"{}\" is out of range for type real", trimmed),
+                    message: format!("\"{trimmed}\" is out of range for type real"),
                 });
             }
             // Store as f32-precision value in f64
             Ok(val32 as f64)
         }
         Err(_) => Err(EngineError {
-            message: format!("invalid input syntax for type real: \"{}\"", input),
+            message: format!("invalid input syntax for type real: \"{input}\""),
         }),
     }
 }
@@ -317,7 +313,7 @@ pub fn float8_ne(a: f64, b: f64) -> bool {
 pub fn check_float8_overflow(val: f64, operation: &str) -> Result<f64, EngineError> {
     if val.is_infinite() {
         return Err(EngineError {
-            message: format!("value out of range: overflow in {}", operation),
+            message: format!("value out of range: overflow in {operation}"),
         });
     }
     Ok(val)

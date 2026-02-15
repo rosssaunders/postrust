@@ -41,3 +41,93 @@ proptest = "1.6"
 [[bench]]
 name = "engine_bench"
 harness = false
+
+[lints.clippy]
+# ── Enable lint groups ──────────────────────────────────────
+all        = { level = "deny", priority = -1 }
+pedantic   = { level = "deny", priority = -1 }
+nursery    = { level = "deny", priority = -1 }
+
+# ── Pedantic/nursery lints we intentionally suppress ────────
+# These are either too noisy, inapplicable to this codebase,
+# or would require massive churn with no safety benefit.
+
+# Documentation lints — we don't require doc sections for every fn
+missing_errors_doc       = { level = "allow" }
+missing_panics_doc       = { level = "allow" }
+missing_docs_in_private_items = { level = "allow" }
+
+# Style preferences we disagree with
+module_name_repetitions  = { level = "allow" }  # e.g. exec_main::exec_query is fine
+similar_names            = { level = "allow" }  # val/vals, row/rows etc are clear
+too_many_lines           = { level = "allow" }  # large match arms in executor are unavoidable
+cognitive_complexity     = { level = "allow" }  # SQL execution is inherently complex
+too_many_arguments       = { level = "allow" }  # internal fns with many params are fine
+struct_excessive_bools   = { level = "allow" }  # AST nodes legitimately have many bools
+
+# Must-use on every pub fn is excessive
+must_use_candidate       = { level = "allow" }
+return_self_not_must_use = { level = "allow" }
+
+# Cast lints — we do a lot of i64/usize/f64 conversion for SQL types
+cast_possible_truncation = { level = "allow" }
+cast_sign_loss           = { level = "allow" }
+cast_precision_loss      = { level = "allow" }
+cast_possible_wrap       = { level = "allow" }
+cast_lossless            = { level = "allow" }
+
+# Async crate — many fns must be async for trait/interface reasons
+future_not_send          = { level = "allow" }
+unused_async             = { level = "allow" }
+
+# Match arm style — identical arms often make the intent clearer
+match_same_arms          = { level = "allow" }
+
+# These would require massive churn for marginal benefit
+unnecessary_wraps        = { level = "allow" }  # Result returns for consistency
+option_if_let_else       = { level = "allow" }  # if-let is often clearer than map_or_else
+
+# Derive Eq — would be a large mechanical change
+derive_partial_eq_without_eq = { level = "allow" }
+
+# Large error types in Result — our EngineError is fine
+result_large_err         = { level = "allow" }
+
+# Implicit clone via to_string on &str — too noisy
+implicit_clone           = { level = "allow" }
+
+# Doc backtick lints — too noisy for SQL-heavy docs
+doc_markdown             = { level = "allow" }
+
+# Mul-add suggestion — not always clearer
+suboptimal_flops         = { level = "allow" }
+
+# Needless pass by value — many are for API consistency
+needless_pass_by_value   = { level = "allow" }
+
+# Redundant closure — sometimes clearer with closure
+redundant_closure_for_method_calls = { level = "allow" }
+
+# Significant drop in match — too noisy with RwLock patterns
+significant_drop_tightening = { level = "allow" }
+
+# const fn — many fns could be const but aren't worth marking
+missing_const_for_fn     = { level = "allow" }
+
+# Struct name repetition — e.g. TableKind::TableKind is intentional
+struct_field_names        = { level = "allow" }
+
+# Trivial regex — we use regex for consistency
+trivial_regex            = { level = "allow" }
+
+# Single-char names in short scopes are fine
+single_char_lifetime_names = { level = "allow" }
+
+# Small trivial closures in map/unwrap are often clearer
+map_unwrap_or            = { level = "allow" }
+
+# if-then-some-else-none pattern
+if_not_else              = { level = "allow" }
+
+# Manual let-else — sometimes if-let is clearer
+manual_let_else          = { level = "allow" }

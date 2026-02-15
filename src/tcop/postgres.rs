@@ -722,12 +722,12 @@ impl PostgresSession {
         let user = security::normalize_identifier(&user);
         if !security::role_exists(&user) {
             return Err(SessionError {
-                message: format!("role \"{}\" does not exist", user),
+                message: format!("role \"{user}\" does not exist"),
             });
         }
         if !security::can_role_login(&user) {
             return Err(SessionError {
-                message: format!("role \"{}\" is not permitted to login", user),
+                message: format!("role \"{user}\" is not permitted to login"),
             });
         }
 
@@ -791,7 +791,7 @@ impl PostgresSession {
         };
         if !mechanism.eq_ignore_ascii_case("SCRAM-SHA-256") {
             return Err(SessionError {
-                message: format!("unsupported SASL mechanism {}", mechanism),
+                message: format!("unsupported SASL mechanism {mechanism}"),
             });
         }
 
@@ -1140,7 +1140,7 @@ impl PostgresSession {
         let key = portal_key(portal_name);
         let (operation, params, result_formats, cached_result, cursor, row_desc_sent) = {
             let portal = self.portals.get(&key).ok_or_else(|| SessionError {
-                message: format!("portal \"{}\" does not exist", portal_name),
+                message: format!("portal \"{portal_name}\" does not exist"),
             })?;
             (
                 portal.operation.clone(),
@@ -1171,7 +1171,7 @@ impl PostgresSession {
         let row_description = operation_row_description_fields(&operation, &result_formats)?;
 
         let portal = self.portals.get_mut(&key).ok_or_else(|| SessionError {
-            message: format!("portal \"{}\" does not exist", portal_name),
+            message: format!("portal \"{portal_name}\" does not exist"),
         })?;
 
         if portal.result_cache.is_none()
@@ -1233,7 +1233,7 @@ impl PostgresSession {
         self.start_xact_command();
         let key = portal_key(portal_name);
         let portal = self.portals.get(&key).ok_or_else(|| SessionError {
-            message: format!("portal \"{}\" does not exist", portal_name),
+            message: format!("portal \"{portal_name}\" does not exist"),
         })?;
 
         if self.is_aborted_transaction_block() && portal.operation.returns_data() {
@@ -1393,7 +1393,7 @@ impl PostgresSession {
                 message: if is_parser_security_command(trimmed) {
                     err.message
                 } else {
-                    format!("parse error: {}", err)
+                    format!("parse error: {err}")
                 },
             })?;
             let statement = match statement {
@@ -1489,7 +1489,7 @@ impl PostgresSession {
                     match self.tx_state.visibility_mode() {
                         VisibilityMode::Global => self.execute_security_command(command)?,
                         VisibilityMode::TransactionLocal => {
-                            self.execute_security_in_transaction_scope(command)?
+                            self.execute_security_in_transaction_scope(command)?;
                         }
                     }
                     Ok(ExecutionOutcome::Command(Completion {
@@ -1520,7 +1520,7 @@ impl PostgresSession {
                             delimiter: command.delimiter,
                             null_marker: command.null_marker.clone(),
                             header: command.header,
-                            column_type_oids: column_type_oids.clone(),
+                            column_type_oids,
                             payload: Vec::new(),
                         });
                         Ok(ExecutionOutcome::CopyInStart {
@@ -1606,7 +1606,7 @@ impl PostgresSession {
                 message: if statement_name.is_empty() {
                     "unnamed prepared statement does not exist".to_string()
                 } else {
-                    format!("prepared statement \"{}\" does not exist", statement_name)
+                    format!("prepared statement \"{statement_name}\" does not exist")
                 },
             })
     }
@@ -1658,7 +1658,7 @@ impl PostgresSession {
 
         restore_state(working);
         let executed = self.execute_security_command(command);
-        let next_working = executed.as_ref().ok().map(|_| snapshot_state());
+        let next_working = executed.as_ref().ok().map(|()| snapshot_state());
         restore_state(baseline);
 
         if let Some(snapshot) = next_working {
@@ -1704,12 +1704,12 @@ impl PostgresSession {
                 let normalized = security::normalize_identifier(role_name);
                 if !security::role_exists(&normalized) {
                     return Err(SessionError {
-                        message: format!("role \"{}\" does not exist", role_name),
+                        message: format!("role \"{role_name}\" does not exist"),
                     });
                 }
                 if !security::can_set_role(&self.session_user, &normalized) {
                     return Err(SessionError {
-                        message: format!("permission denied to set role \"{}\"", role_name),
+                        message: format!("permission denied to set role \"{role_name}\""),
                     });
                 }
                 self.current_role = normalized;
@@ -1913,7 +1913,7 @@ impl PostgresSession {
                     .iter()
                     .position(|c| c.to_ascii_lowercase() == col_lower)
                     .ok_or_else(|| SessionError {
-                        message: format!("column \"{}\" does not exist", col),
+                        message: format!("column \"{col}\" does not exist"),
                     })?;
                 col_indices.push(idx);
             }
@@ -1989,7 +1989,7 @@ impl PostgresSession {
         self.copy_in_state = None;
         self.finish_xact_command();
         Err(SessionError {
-            message: format!("COPY failed: {}", message),
+            message: format!("COPY failed: {message}"),
         })
     }
 
@@ -2337,7 +2337,7 @@ fn copy_command(statement: CopyStatement) -> Result<CopyCommand, SessionError> {
         }
     };
     let null_marker = null_marker.unwrap_or(match format {
-        CopyFormat::Csv => "".to_string(),
+        CopyFormat::Csv => String::new(),
         _ => "\\N".to_string(),
     });
     Ok(CopyCommand {
@@ -2491,7 +2491,7 @@ fn parse_create_policy_command(query: &str) -> Result<SecurityCommand, SessionEr
             let (cmd, next) = split_once_whitespace(after_for).unwrap_or((after_for, ""));
             let cmd_upper = cmd.trim().to_ascii_uppercase();
             command = RlsCommand::from_keyword(&cmd_upper).ok_or_else(|| SessionError {
-                message: format!("unsupported policy command {}", cmd),
+                message: format!("unsupported policy command {cmd}"),
             })?;
             tail = next;
             continue;
@@ -2565,9 +2565,9 @@ fn parse_drop_policy_command(query: &str) -> Result<SecurityCommand, SessionErro
 }
 
 fn parse_policy_predicate(raw: &str) -> Result<Expr, SessionError> {
-    let sql = format!("SELECT 1 WHERE {}", raw);
+    let sql = format!("SELECT 1 WHERE {raw}");
     let statement = parse_statement(&sql).map_err(|err| SessionError {
-        message: format!("parse error: {}", err),
+        message: format!("parse error: {err}"),
     })?;
     let Statement::Query(query) = statement else {
         return Err(SessionError {
@@ -2716,17 +2716,14 @@ fn first_keyword_uppercase(query: &str) -> Option<String> {
 fn split_simple_query_statements(query: &str) -> Vec<String> {
     use crate::parser::lexer::{TokenKind, lex_sql};
 
-    let tokens = match lex_sql(query) {
-        Ok(tokens) => tokens,
-        Err(_) => {
-            // If lexing fails, return the whole query as a single statement
-            // and let the parser produce a proper error message.
-            let trimmed = query.trim();
-            if trimmed.is_empty() {
-                return Vec::new();
-            }
-            return vec![trimmed.to_string()];
+    let tokens = if let Ok(tokens) = lex_sql(query) { tokens } else {
+        // If lexing fails, return the whole query as a single statement
+        // and let the parser produce a proper error message.
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return Vec::new();
         }
+        return vec![trimmed.to_string()];
     };
 
     let mut statements = Vec::new();
@@ -2830,7 +2827,7 @@ fn normalize_format_codes(
     for format in &formats {
         if *format != 0 && *format != 1 {
             return Err(SessionError {
-                message: format!("{context} contains unsupported format code {}", format),
+                message: format!("{context} contains unsupported format code {format}"),
             });
         }
     }
@@ -2926,7 +2923,7 @@ fn resolve_parse_parameter_types(
 ) -> Result<Vec<PgType>, SessionError> {
     let mut max_index = 0usize;
     let tokens = lex_sql(query_string).map_err(|err| SessionError {
-        message: format!("parse error: {}", err),
+        message: format!("parse error: {err}"),
     })?;
     for token in tokens {
         if let TokenKind::Parameter(index) = token.kind {
@@ -2962,7 +2959,7 @@ fn decode_bind_parameter(
         1 => decode_binary_bind_parameter(index, &raw, type_oid)?,
         other => {
             return Err(SessionError {
-                message: format!("unsupported bind parameter format code {}", other),
+                message: format!("unsupported bind parameter format code {other}"),
             });
         }
     };
@@ -3097,7 +3094,7 @@ fn encode_result_field(
         1 => encode_binary_scalar(value, field.type_oid, "result")?,
         other => {
             return Err(SessionError {
-                message: format!("unsupported result format code {}", other),
+                message: format!("unsupported result format code {other}"),
             });
         }
     };
@@ -3110,7 +3107,7 @@ fn encode_binary_scalar(
     context: &str,
 ) -> Result<Vec<u8>, SessionError> {
     match (type_oid, value) {
-        (16, ScalarValue::Bool(v)) => Ok(vec![if *v { 1 } else { 0 }]),
+        (16, ScalarValue::Bool(v)) => Ok(vec![u8::from(*v)]),
         (20, ScalarValue::Int(v)) => Ok(v.to_be_bytes().to_vec()),
         (701, ScalarValue::Float(v)) => Ok(v.to_bits().to_be_bytes().to_vec()),
         (25, ScalarValue::Text(v)) => Ok(v.as_bytes().to_vec()),
@@ -3120,20 +3117,20 @@ fn encode_binary_scalar(
             .parse::<i64>()
             .map(|parsed| parsed.to_be_bytes().to_vec())
             .map_err(|_| SessionError {
-                message: format!("{} integer field is invalid", context),
+                message: format!("{context} integer field is invalid"),
             }),
         (701, ScalarValue::Text(v)) => v
             .trim()
             .parse::<f64>()
             .map(|parsed| parsed.to_bits().to_be_bytes().to_vec())
             .map_err(|_| SessionError {
-                message: format!("{} float field is invalid", context),
+                message: format!("{context} float field is invalid"),
             }),
         (16, ScalarValue::Text(v)) => match v.trim().to_ascii_lowercase().as_str() {
             "true" | "t" | "1" => Ok(vec![1]),
             "false" | "f" | "0" => Ok(vec![0]),
             _ => Err(SessionError {
-                message: format!("{} boolean field is invalid", context),
+                message: format!("{context} boolean field is invalid"),
             }),
         },
         (1082, ScalarValue::Text(v)) => {
@@ -3146,7 +3143,7 @@ fn encode_binary_scalar(
         }
         (_, ScalarValue::Null) => Ok(Vec::new()),
         _ => Err(SessionError {
-            message: format!("{} binary type oid {} is not supported", context, type_oid),
+            message: format!("{context} binary type oid {type_oid} is not supported"),
         }),
     }
 }
@@ -3160,7 +3157,7 @@ fn decode_binary_scalar(
         16 => {
             if raw.len() != 1 {
                 return Err(SessionError {
-                    message: format!("{} boolean field length must be 1", context),
+                    message: format!("{context} boolean field length must be 1"),
                 });
             }
             Ok(ScalarValue::Bool(raw[0] != 0))
@@ -3168,7 +3165,7 @@ fn decode_binary_scalar(
         20 => {
             if raw.len() != 8 {
                 return Err(SessionError {
-                    message: format!("{} int8 field length must be 8", context),
+                    message: format!("{context} int8 field length must be 8"),
                 });
             }
             Ok(ScalarValue::Int(i64::from_be_bytes([
@@ -3178,7 +3175,7 @@ fn decode_binary_scalar(
         701 => {
             if raw.len() != 8 {
                 return Err(SessionError {
-                    message: format!("{} float8 field length must be 8", context),
+                    message: format!("{context} float8 field length must be 8"),
                 });
             }
             let bits = u64::from_be_bytes([
@@ -3188,13 +3185,13 @@ fn decode_binary_scalar(
         }
         25 => Ok(ScalarValue::Text(String::from_utf8(raw.to_vec()).map_err(
             |_| SessionError {
-                message: format!("{} text field is not valid utf8", context),
+                message: format!("{context} text field is not valid utf8"),
             },
         )?)),
         1082 => {
             if raw.len() != 4 {
                 return Err(SessionError {
-                    message: format!("{} date field length must be 4", context),
+                    message: format!("{context} date field length must be 4"),
                 });
             }
             let days = i32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
@@ -3203,7 +3200,7 @@ fn decode_binary_scalar(
         1114 => {
             if raw.len() != 8 {
                 return Err(SessionError {
-                    message: format!("{} timestamp field length must be 8", context),
+                    message: format!("{context} timestamp field length must be 8"),
                 });
             }
             let micros = i64::from_be_bytes([
@@ -3212,7 +3209,7 @@ fn decode_binary_scalar(
             Ok(ScalarValue::Text(format_pg_timestamp_from_micros(micros)))
         }
         other => Err(SessionError {
-            message: format!("{} binary type oid {} is not supported", context, other),
+            message: format!("{context} binary type oid {other} is not supported"),
         }),
     }
 }
@@ -3249,7 +3246,7 @@ fn format_pg_date_from_days(days: i32) -> String {
     let pg_epoch = days_from_civil(2000, 1, 1);
     let absolute_days = pg_epoch + days as i64;
     let (year, month, day) = civil_from_days(absolute_days);
-    format!("{:04}-{:02}-{:02}", year, month, day)
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 fn format_pg_timestamp_from_micros(micros: i64) -> String {
@@ -3265,13 +3262,11 @@ fn format_pg_timestamp_from_micros(micros: i64) -> String {
     let fractional = micros_of_day % 1_000_000;
     if fractional == 0 {
         format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-            year, month, day, hour, minute, second
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
         )
     } else {
         format!(
-            "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
-            year, month, day, hour, minute, second, fractional
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{fractional:06}"
         )
     }
 }
@@ -3369,7 +3364,7 @@ fn civil_from_days(days: i64) -> (i32, u32, u32) {
     let mp = (5 * doy + 2) / 153;
     let day = doy - (153 * mp + 2) / 5 + 1;
     let month = mp + if mp < 10 { 3 } else { -9 };
-    let year = year + if month <= 2 { 1 } else { 0 };
+    let year = year + i64::from(month <= 2);
     (year as i32, month as u32, day as u32)
 }
 
@@ -3457,7 +3452,7 @@ fn encode_copy_csv_row(row: &[ScalarValue], delimiter: char, null_marker: &str) 
                     || text == null_marker;
                 if must_quote {
                     let escaped = text.replace('"', "\"\"");
-                    format!("\"{}\"", escaped)
+                    format!("\"{escaped}\"")
                 } else {
                     text
                 }
@@ -3659,7 +3654,7 @@ fn parse_copy_text_field(
             Ok(ScalarValue::Text(format_pg_timestamp_from_micros(micros)))
         }
         other => Err(SessionError {
-            message: format!("unsupported COPY type oid {}", other),
+            message: format!("unsupported COPY type oid {other}"),
         }),
     }
 }

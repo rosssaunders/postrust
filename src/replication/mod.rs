@@ -58,7 +58,7 @@ impl Lsn {
         let lo = u64::from_str_radix(lo, 16).map_err(|_| ReplicationError {
             message: format!("invalid LSN format: {raw}"),
         })?;
-        Ok(Lsn((hi << 32) | lo))
+        Ok(Self((hi << 32) | lo))
     }
 
     pub fn as_u64(self) -> u64 {

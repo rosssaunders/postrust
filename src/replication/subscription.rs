@@ -59,7 +59,7 @@ pub fn create_subscription(config: SubscriptionConfig) -> Result<(), Replication
                     runtime.block_on(run_subscription(config_clone, stop_rx));
                 }
                 Err(err) => {
-                    eprintln!("replication runtime error: {}", err);
+                    eprintln!("replication runtime error: {err}");
                 }
             }
         })
@@ -67,7 +67,7 @@ pub fn create_subscription(config: SubscriptionConfig) -> Result<(), Replication
             message: err.to_string(),
         })?;
     registry.insert(
-        config.name.clone(),
+        config.name,
         SubscriptionHandle {
             stop: Some(stop_tx),
         },
@@ -83,7 +83,7 @@ pub fn drop_subscription(name: &str) -> Result<(), ReplicationError> {
         })?;
     let Some(handle) = registry.remove(name) else {
         return Err(ReplicationError {
-            message: format!("subscription \"{}\" does not exist", name),
+            message: format!("subscription \"{name}\" does not exist"),
         });
     };
     if let Some(stop) = handle.stop {
@@ -106,7 +106,7 @@ async fn run_subscription(config: SubscriptionConfig, mut stop: oneshot::Receive
                 let delay = backoff;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
                 tokio::select! {
-                    _ = tokio::time::sleep(delay) => {},
+                    () = tokio::time::sleep(delay) => {},
                     _ = &mut stop => return,
                 }
             }
@@ -123,7 +123,7 @@ async fn run_subscription_once(config: &SubscriptionConfig) -> Result<(), Replic
     let (standard_client, connection) = tokio_postgres::connect(&standard_conninfo, NoTls).await?;
     tokio::spawn(async move {
         if let Err(err) = connection.await {
-            eprintln!("replication schema connection error: {}", err);
+            eprintln!("replication schema connection error: {err}");
         }
     });
 

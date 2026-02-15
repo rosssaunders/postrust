@@ -77,7 +77,7 @@ impl RoleRegistry {
 
     pub fn create_role(&mut self, role: &str, options: CreateRoleOptions) -> Result<(), String> {
         if self.roles.contains_key(role) {
-            return Err(format!("role \"{}\" already exists", role));
+            return Err(format!("role \"{role}\" already exists"));
         }
         self.roles.insert(
             role.to_string(),
@@ -93,10 +93,10 @@ impl RoleRegistry {
 
     pub fn drop_role(&mut self, role: &str) -> Result<(), String> {
         if matches!(role, "postgres" | "public") {
-            return Err(format!("role \"{}\" cannot be dropped", role));
+            return Err(format!("role \"{role}\" cannot be dropped"));
         }
         if self.roles.remove(role).is_none() {
-            return Err(format!("role \"{}\" does not exist", role));
+            return Err(format!("role \"{role}\" does not exist"));
         }
         self.granted_roles.remove(role);
         for grants in self.granted_roles.values_mut() {
@@ -107,7 +107,7 @@ impl RoleRegistry {
 
     pub fn alter_role(&mut self, role: &str, options: AlterRoleOptions) -> Result<(), String> {
         let Some(entry) = self.roles.get_mut(role) else {
-            return Err(format!("role \"{}\" does not exist", role));
+            return Err(format!("role \"{role}\" does not exist"));
         };
         if let Some(value) = options.superuser {
             entry.superuser = value;
@@ -123,10 +123,10 @@ impl RoleRegistry {
 
     pub fn grant_role(&mut self, role: &str, member: &str) -> Result<(), String> {
         if !self.roles.contains_key(role) {
-            return Err(format!("role \"{}\" does not exist", role));
+            return Err(format!("role \"{role}\" does not exist"));
         }
         if !self.roles.contains_key(member) {
-            return Err(format!("role \"{}\" does not exist", member));
+            return Err(format!("role \"{member}\" does not exist"));
         }
         if role == member {
             return Ok(());
@@ -139,10 +139,10 @@ impl RoleRegistry {
 
     pub fn revoke_role(&mut self, role: &str, member: &str) -> Result<(), String> {
         if !self.roles.contains_key(role) {
-            return Err(format!("role \"{}\" does not exist", role));
+            return Err(format!("role \"{role}\" does not exist"));
         }
         if !self.roles.contains_key(member) {
-            return Err(format!("role \"{}\" does not exist", member));
+            return Err(format!("role \"{member}\" does not exist"));
         }
         if let Some(entry) = self.granted_roles.get_mut(member) {
             entry.remove(role);

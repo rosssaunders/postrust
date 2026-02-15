@@ -134,7 +134,7 @@ pub async fn execute_alter_sequence(
     with_sequences_write(|sequences| {
         let Some(state) = sequences.get_mut(&key) else {
             return Err(EngineError {
-                message: format!("sequence \"{}\" does not exist", key),
+                message: format!("sequence \"{key}\" does not exist"),
             });
         };
         for action in &alter.actions {
@@ -226,7 +226,7 @@ pub async fn execute_drop_sequence(
             });
         }
         return Err(EngineError {
-            message: format!("sequence \"{}\" does not exist", key),
+            message: format!("sequence \"{key}\" does not exist"),
         });
     }
 
@@ -287,7 +287,7 @@ pub fn normalize_sequence_name_from_text(raw: &str) -> Result<String, EngineErro
         [seq_name] => Ok(format!("public.{seq_name}")),
         [schema_name, seq_name] => Ok(format!("{schema_name}.{seq_name}")),
         _ => Err(EngineError {
-            message: format!("invalid sequence name \"{}\"", raw),
+            message: format!("invalid sequence name \"{raw}\""),
         }),
     }
 }
@@ -313,7 +313,7 @@ pub fn sequence_next_value(
         if next < state.min_value || next > state.max_value {
             if !state.cycle {
                 return Err(EngineError {
-                    message: format!("sequence \"{}\" is out of bounds", sequence_name),
+                    message: format!("sequence \"{sequence_name}\" is out of bounds"),
                 });
             }
             next = if state.increment > 0 {
@@ -330,7 +330,7 @@ pub fn sequence_next_value(
 
     if next < state.min_value || next > state.max_value {
         return Err(EngineError {
-            message: format!("sequence \"{}\" overflowed", sequence_name),
+            message: format!("sequence \"{sequence_name}\" overflowed"),
         });
     }
     if state.increment > 0 && next > state.max_value
@@ -338,8 +338,7 @@ pub fn sequence_next_value(
     {
         return Err(EngineError {
             message: format!(
-                "nextval: sequence \"{}\" has reached its limit",
-                sequence_name
+                "nextval: sequence \"{sequence_name}\" has reached its limit"
             ),
         });
     }
@@ -355,8 +354,7 @@ pub fn set_sequence_value(
     if value < state.min_value || value > state.max_value {
         return Err(EngineError {
             message: format!(
-                "setval: value {} is out of bounds for sequence \"{}\"",
-                value, sequence_name
+                "setval: value {value} is out of bounds for sequence \"{sequence_name}\""
             ),
         });
     }

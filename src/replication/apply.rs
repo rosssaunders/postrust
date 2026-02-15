@@ -67,7 +67,7 @@ impl ApplyWorker {
             .map(|column| RelationColumn {
                 name: column.name.clone(),
                 type_oid: column.type_oid,
-                flags: if column.primary_key { 0x01 } else { 0x00 },
+                flags: u8::from(column.primary_key),
                 type_modifier: -1,
             })
             .collect();
@@ -247,7 +247,7 @@ impl ApplyWorker {
 
     fn apply_in_scope<F>(&mut self, action: F) -> Result<(), ReplicationError>
     where
-        F: FnOnce(&mut ApplyWorker) -> Result<(), ReplicationError>,
+        F: FnOnce(&mut Self) -> Result<(), ReplicationError>,
     {
         if !self.tx_state.in_explicit_block() {
             return action(self);
@@ -263,7 +263,7 @@ impl ApplyWorker {
             })?;
         restore_state(working);
         let result = action(self);
-        let next_working = result.as_ref().ok().map(|_| snapshot_state());
+        let next_working = result.as_ref().ok().map(|()| snapshot_state());
         restore_state(baseline);
         if let Some(snapshot) = next_working {
             self.tx_state.set_working_snapshot(snapshot);
@@ -273,7 +273,7 @@ impl ApplyWorker {
 
     fn get_relation(&self, relation_id: u32) -> Result<&RelationInfo, ReplicationError> {
         self.relations.get(&relation_id).ok_or_else(|| ReplicationError {
-            message: format!("unknown relation id {}", relation_id),
+            message: format!("unknown relation id {relation_id}"),
         })
     }
 }

@@ -267,3 +267,11 @@ Current code anchors:
 - Security: `src/security/`
 - Protocol: `src/protocol/`
 - Transaction management: `src/access/transam/`
+
+## Known Limitations
+
+### No NUMERIC/DECIMAL Type
+All numeric values are stored as `Int(i64)` or `Float(f64)`. There is no arbitrary-precision `NUMERIC` type. Decimal arithmetic (e.g., `NUMERIC * INT`) uses IEEE 754 float64, which can produce rounding errors like `99.94999999999999` instead of `99.95`. PostgreSQL uses base-10000 digit arrays for exact NUMERIC arithmetic. Implementing this requires a new `ScalarValue::Numeric` variant.
+
+### Excel Add-in
+The Excel add-in (`excel-addin/`) is functional with WASM build. See `excel-addin/README.md` for setup instructions, HTTPS certificate trust, Excel Online account requirements, and known issues.

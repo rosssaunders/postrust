@@ -260,7 +260,7 @@ async fn execute_values(
     
     // Generate column names: column1, column2, ...
     let columns = (1..=ncols)
-        .map(|i| format!("column{}", i))
+        .map(|i| format!("column{i}"))
         .collect::<Vec<_>>();
     
     let mut result_rows = Vec::new();
@@ -644,7 +644,7 @@ async fn evaluate_lateral_join(
         let right_eval =
             evaluate_table_expression(&join.right, params, Some(&merged_outer)).await?;
         right_columns = Some(right_eval.columns.clone());
-        right_null_scope = Some(right_eval.null_scope.clone());
+        right_null_scope = Some(right_eval.null_scope);
     } else {
         for left_row in &left.rows {
             let mut merged_outer = left_row.clone();
@@ -1674,7 +1674,7 @@ fn virtual_relation_rows(
             }))
         }
         _ => Err(EngineError {
-            message: format!("relation \"{}.{}\" does not exist", schema, relation),
+            message: format!("relation \"{schema}.{relation}\" does not exist"),
         }),
     }
 }
@@ -2277,8 +2277,7 @@ fn eval_group_expr<'a>(
                 {
                     return Err(EngineError {
                         message: format!(
-                            "{}() aggregate modifiers require grouped aggregate evaluation",
-                            fn_name
+                            "{fn_name}() aggregate modifiers require grouped aggregate evaluation"
                         ),
                     });
                 }
@@ -3058,7 +3057,7 @@ pub(crate) async fn eval_aggregate_function(
                 "regr_sxy" => Ok(ScalarValue::Float(sxy)),
                 "regr_syy" => Ok(ScalarValue::Float(syy)),
                 _ => Err(EngineError {
-                    message: format!("unsupported aggregate function {}", fn_name),
+                    message: format!("unsupported aggregate function {fn_name}"),
                 }),
             }
         }
@@ -3272,7 +3271,7 @@ pub(crate) async fn eval_aggregate_function(
             Ok(ScalarValue::Text(JsonValue::Object(out).to_string()))
         }
         _ => Err(EngineError {
-            message: format!("unsupported aggregate function {}", fn_name),
+            message: format!("unsupported aggregate function {fn_name}"),
         }),
     }
 }
@@ -3294,12 +3293,12 @@ async fn join_condition_matches(
             let left_value = left_row
                 .lookup_join_column(col)
                 .ok_or_else(|| EngineError {
-                    message: format!("column \"{}\" does not exist in left side of JOIN", col),
+                    message: format!("column \"{col}\" does not exist in left side of JOIN"),
                 })?;
             let right_value = right_row
                 .lookup_join_column(col)
                 .ok_or_else(|| EngineError {
-                    message: format!("column \"{}\" does not exist in right side of JOIN", col),
+                    message: format!("column \"{col}\" does not exist in right side of JOIN"),
                 })?;
 
             if matches!(left_value, ScalarValue::Null) || matches!(right_value, ScalarValue::Null) {
@@ -3324,7 +3323,7 @@ fn scope_from_row(
     for (col, value) in columns.iter().zip(row.iter()) {
         scope.insert_unqualified(col, value.clone());
         for qualifier in qualifiers {
-            scope.insert_qualified(&format!("{}.{}", qualifier, col), value.clone());
+            scope.insert_qualified(&format!("{qualifier}.{col}"), value.clone());
         }
     }
 
@@ -3333,7 +3332,7 @@ fn scope_from_row(
         if scope.lookup_join_column(col).is_none() {
             scope.insert_unqualified(col, ScalarValue::Null);
             for qualifier in qualifiers {
-                scope.insert_qualified(&format!("{}.{}", qualifier, col), ScalarValue::Null);
+                scope.insert_qualified(&format!("{qualifier}.{col}"), ScalarValue::Null);
             }
         }
     }
@@ -3573,7 +3572,7 @@ pub(crate) fn compare_order_keys(
 }
 
 fn scalar_cmp(a: &ScalarValue, b: &ScalarValue) -> Ordering {
-    use ScalarValue::*;
+    use ScalarValue::{Null, Bool, Int, Float, Text};
     match (a, b) {
         (Null, Null) => Ordering::Equal,
         (Null, _) => Ordering::Less,

@@ -26,7 +26,7 @@ pub fn describe_table(catalog: &Catalog, oid: Oid) -> Result<TableRefByOid, Cata
         }
     }
     Err(CatalogError {
-        message: format!("relation oid {} does not exist", oid),
+        message: format!("relation oid {oid} does not exist"),
     })
 }
 
@@ -55,7 +55,7 @@ pub fn table_dependency_edges(catalog: &Catalog) -> Vec<(Oid, Oid)> {
 
 fn relation_dependency_edges(catalog: &Catalog) -> Vec<(Oid, Oid)> {
     let mut edges = table_dependency_edges(catalog);
-    let mut seen = edges.iter().cloned().collect::<HashSet<_>>();
+    let mut seen = edges.iter().copied().collect::<HashSet<_>>();
 
     for schema in catalog.schemas() {
         for relation in schema.tables() {
@@ -139,8 +139,7 @@ pub fn plan_sequence_drop(
         if let Some((schema_name, table_name, column_name)) = default_dependents.first() {
             return Err(CatalogError {
                 message: format!(
-                    "cannot drop sequence \"{}\" because column \"{}.{}.{}\" depends on it",
-                    sequence_name, schema_name, table_name, column_name
+                    "cannot drop sequence \"{sequence_name}\" because column \"{schema_name}.{table_name}.{column_name}\" depends on it"
                 ),
             });
         }
@@ -249,7 +248,7 @@ pub fn order_relations_for_drop(
                     .iter()
                     .any(|(parent, child)| parent == *oid && remaining.contains(child))
             })
-            .cloned()
+            .copied()
             .collect::<Vec<_>>();
         if leaves.is_empty() {
             return Err(CatalogError {

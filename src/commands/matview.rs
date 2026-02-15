@@ -56,8 +56,7 @@ fn acquire_refresh_execution_guard(
     if !inserted {
         return Err(EngineError {
             message: format!(
-                "cannot refresh materialized view \"{}\" because it is already being refreshed",
-                qualified_name
+                "cannot refresh materialized view \"{qualified_name}\" because it is already being refreshed"
             ),
         });
     }
@@ -143,7 +142,7 @@ pub async fn execute_refresh_materialized_view(
                 ),
             });
         }
-    };
+    }
     with_storage_write(|storage| {
         storage.rows_by_table.insert(relation.oid(), rows);
     });

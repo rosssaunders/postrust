@@ -780,7 +780,7 @@ pub(crate) fn eval_jsonb_set_lax(args: &[ScalarValue]) -> Result<ScalarValue, En
             "return_target" => {}
             _ => {
                 return Err(EngineError {
-                    message: format!("jsonb_set_lax() unknown null_value_treatment {}", treatment),
+                    message: format!("jsonb_set_lax() unknown null_value_treatment {treatment}"),
                 });
             }
         }
@@ -1358,7 +1358,7 @@ fn parse_jsonpath_steps(path: &str, context: &str) -> Result<Vec<JsonPathStep>, 
             }
             _ => {
                 return Err(EngineError {
-                    message: format!("{context} invalid JSONPath near byte {}", idx),
+                    message: format!("{context} invalid JSONPath near byte {idx}"),
                 });
             }
         }
@@ -1804,7 +1804,7 @@ pub(crate) fn eval_json_concat_operator(
                 Ok(ScalarValue::Text(json_concat(lhs, rhs).to_string()))
             } else {
                 // Otherwise, do string concatenation
-                Ok(ScalarValue::Text(format!("{}{}", left_str, right_str)))
+                Ok(ScalarValue::Text(format!("{left_str}{right_str}")))
             }
         }
         (left, right) => {

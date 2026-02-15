@@ -15,16 +15,16 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:55432".to_string());
     let tls_config = build_tls_config().unwrap_or_else(|err| {
-        eprintln!("failed to build TLS config: {}", err);
+        eprintln!("failed to build TLS config: {err}");
         std::process::exit(1);
     });
 
     let listener = TcpListener::bind(&addr).unwrap_or_else(|err| {
-        eprintln!("failed to bind {}: {}", addr, err);
+        eprintln!("failed to bind {addr}: {err}");
         std::process::exit(1);
     });
 
-    println!("openassay pgwire listening on {}", addr);
+    println!("openassay pgwire listening on {addr}");
 
     for stream in listener.incoming() {
         match stream {
@@ -32,28 +32,28 @@ fn main() {
                 let tls_config = tls_config.clone();
                 thread::spawn(move || {
                     if let Err(err) = handle_connection(stream, tls_config) {
-                        eprintln!("connection error: {}", err);
+                        eprintln!("connection error: {err}");
                     }
                 });
             }
-            Err(err) => eprintln!("accept error: {}", err),
+            Err(err) => eprintln!("accept error: {err}"),
         }
     }
 }
 
 fn build_tls_config() -> io::Result<Arc<ServerConfig>> {
     let cert = generate_simple_self_signed(vec!["localhost".to_string(), "127.0.0.1".to_string()])
-        .map_err(|err| io::Error::other(format!("rcgen: {}", err)))?;
+        .map_err(|err| io::Error::other(format!("rcgen: {err}")))?;
     let cert_der = cert
         .serialize_der()
-        .map_err(|err| io::Error::other(format!("cert: {}", err)))?;
+        .map_err(|err| io::Error::other(format!("cert: {err}")))?;
     let key_der = cert.serialize_private_key_der();
 
     let config = ServerConfig::builder()
         .with_safe_defaults()
         .with_no_client_auth()
         .with_single_cert(vec![Certificate(cert_der)], PrivateKey(key_der))
-        .map_err(|err| io::Error::other(format!("rustls: {}", err)))?;
+        .map_err(|err| io::Error::other(format!("rustls: {err}")))?;
     Ok(Arc::new(config))
 }
 
@@ -270,7 +270,7 @@ impl ClientStream {
             }
         };
         let conn = ServerConnection::new(config)
-            .map_err(|err| io::Error::other(format!("tls: {}", err)))?;
+            .map_err(|err| io::Error::other(format!("tls: {err}")))?;
         *self = Self::Tls(StreamOwned::new(conn, plain));
         Ok(())
     }

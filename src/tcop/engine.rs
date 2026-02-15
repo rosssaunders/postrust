@@ -353,7 +353,7 @@ pub(crate) mod ws_native {
     /// Open a real WebSocket connection. Returns a handle for sending/receiving.
     pub fn open_connection(url: &str) -> Result<NativeWsHandle, String> {
         let (socket, _response) =
-            tungstenite::connect(url).map_err(|e| format!("WebSocket connect failed: {}", e))?;
+            tungstenite::connect(url).map_err(|e| format!("WebSocket connect failed: {e}"))?;
 
         let writer = Arc::new(Mutex::new(Some(socket)));
         let reader_writer = Arc::clone(&writer);
@@ -402,9 +402,9 @@ pub(crate) mod ws_native {
         let mut guard = handle.writer.lock().unwrap();
         if let Some(ref mut ws) = *guard {
             ws.write(tungstenite::Message::Text(msg.to_string()))
-                .map_err(|e| format!("WebSocket send failed: {}", e))?;
+                .map_err(|e| format!("WebSocket send failed: {e}"))?;
             ws.flush()
-                .map_err(|e| format!("WebSocket flush failed: {}", e))?;
+                .map_err(|e| format!("WebSocket flush failed: {e}"))?;
             Ok(())
         } else {
             Err("connection already closed".to_string())
@@ -2132,7 +2132,7 @@ fn resolve_insert_target_indexes(
         let normalized = column_name.to_ascii_lowercase();
         if !seen.insert(normalized.clone()) {
             return Err(EngineError {
-                message: format!("column \"{}\" specified more than once", column_name),
+                message: format!("column \"{column_name}\" specified more than once"),
             });
         }
         let Some((idx, _)) = table
@@ -2222,8 +2222,7 @@ fn resolve_on_conflict_target_indexes(
                 if !seen.insert(normalized.clone()) {
                     return Err(EngineError {
                         message: format!(
-                            "ON CONFLICT target column \"{}\" specified more than once",
-                            column
+                            "ON CONFLICT target column \"{column}\" specified more than once"
                         ),
                     });
                 }
