@@ -6,6 +6,7 @@ pub mod commands;
 pub mod executor;
 pub mod parser;
 pub mod planner;
+pub mod plpgsql;
 pub mod protocol;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod replication;

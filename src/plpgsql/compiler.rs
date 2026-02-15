@@ -1,0 +1,1134 @@
+//! Phase 1 PL/pgSQL compiler.
+//!
+//! This is a lightweight parser/compiler for PL/pgSQL function bodies and
+//! anonymous `DO` blocks. It follows the same high-level compile flow as
+//! PostgreSQL `pl_comp.c` (`pl_comp.c:90-318`, `760-902`) but intentionally
+//! implements a restricted subset for OpenAssay Phase 1.
+
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::parser::ast::{CreateFunctionStatement, DoStatement, Statement};
+use crate::parser::sql_parser::{ParseError as SqlParseError, parse_statement};
+use crate::plpgsql::scanner::{
+    PlPgSqlKeyword, PlPgSqlScanError, PlPgSqlToken, PlPgSqlTokenKind, extract_sql_expression,
+    tokenize,
+};
+use crate::plpgsql::types::{
+    PlPgSqlDtype, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlIfElsif, PlPgSqlPromiseType,
+    PlPgSqlRaiseOption, PlPgSqlRaiseOptionType, PlPgSqlResolveOption, PlPgSqlStmt, PlPgSqlStmtAssign,
+    PlPgSqlStmtBlock, PlPgSqlStmtCall, PlPgSqlStmtCommit, PlPgSqlStmtExecSql, PlPgSqlStmtGetdiag,
+    PlPgSqlStmtIf, PlPgSqlStmtPerform, PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtRollback,
+    PlPgSqlStmtType, PlPgSqlTrigtype, PlPgSqlType, PlPgSqlTypeType, PlPgSqlValue, PlPgSqlVar,
+    PlPgSqlVariable, PlPgSqlDatum,
+};
+
+/// Compiler error for PL/pgSQL parse/compile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlPgSqlCompileError {
+    pub message: String,
+    pub position: usize,
+    pub line: usize,
+    pub column: usize,
+}
+
+impl fmt::Display for PlPgSqlCompileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} at byte {} (line {}, col {})",
+            self.message, self.position, self.line, self.column
+        )
+    }
+}
+
+impl std::error::Error for PlPgSqlCompileError {}
+
+impl From<PlPgSqlScanError> for PlPgSqlCompileError {
+    fn from(value: PlPgSqlScanError) -> Self {
+        Self {
+            message: value.message,
+            position: value.position,
+            line: value.line,
+            column: value.column,
+        }
+    }
+}
+
+/// Compiles a PL/pgSQL body (`DECLARE ... BEGIN ... END`) into a function AST.
+pub fn compile_function_body(body: &str) -> Result<PlPgSqlFunction, PlPgSqlCompileError> {
+    let tokens = tokenize(body)?;
+    let mut parser = BodyParser::new(body, tokens);
+    parser.parse_function_body()
+}
+
+/// Compiles a SQL `DO ... LANGUAGE plpgsql` command into a function AST.
+pub fn compile_do_block_sql(sql: &str) -> Result<PlPgSqlFunction, PlPgSqlCompileError> {
+    match parse_statement(sql) {
+        Ok(Statement::Do(do_stmt)) => compile_do_statement(&do_stmt),
+        Ok(_) => Err(PlPgSqlCompileError {
+            message: "expected DO statement".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        }),
+        Err(_) => {
+            let do_stmt = parse_do_sql_fallback(sql)?;
+            compile_do_statement(&do_stmt)
+        }
+    }
+}
+
+/// Compiles an already-parsed SQL `DO` statement.
+pub fn compile_do_statement(do_stmt: &DoStatement) -> Result<PlPgSqlFunction, PlPgSqlCompileError> {
+    if !do_stmt.language.eq_ignore_ascii_case("plpgsql") {
+        return Err(PlPgSqlCompileError {
+            message: format!(
+                "DO block language must be plpgsql, got {}",
+                do_stmt.language
+            ),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let mut compiled = compile_function_body(&do_stmt.body)?;
+    compiled.fn_signature = "inline_code_block".to_string();
+    Ok(compiled)
+}
+
+/// Compiles a SQL `CREATE FUNCTION ... LANGUAGE plpgsql` command body.
+pub fn compile_create_function_sql(sql: &str) -> Result<PlPgSqlFunction, PlPgSqlCompileError> {
+    let stmt = parse_statement(sql).map_err(|e| map_sql_parse_error(sql, e))?;
+    match stmt {
+        Statement::CreateFunction(create_stmt) => compile_create_function_statement(&create_stmt),
+        _ => Err(PlPgSqlCompileError {
+            message: "expected CREATE FUNCTION statement".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        }),
+    }
+}
+
+/// Compiles an already-parsed SQL `CREATE FUNCTION` statement body.
+pub fn compile_create_function_statement(
+    create_stmt: &CreateFunctionStatement,
+) -> Result<PlPgSqlFunction, PlPgSqlCompileError> {
+    if !create_stmt.language.eq_ignore_ascii_case("plpgsql") {
+        return Err(PlPgSqlCompileError {
+            message: format!(
+                "function language must be plpgsql, got {}",
+                create_stmt.language
+            ),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let mut compiled = compile_function_body(&create_stmt.body)?;
+    compiled.fn_signature = create_stmt.name.join(".");
+    compiled.fn_nargs = i32::try_from(create_stmt.params.len()).unwrap_or(i32::MAX);
+    Ok(compiled)
+}
+
+struct BodyParser<'a> {
+    source: &'a str,
+    tokens: Vec<PlPgSqlToken>,
+    idx: usize,
+    datums: Vec<PlPgSqlDatum>,
+    variables_by_name: HashMap<String, i32>,
+    next_dno: i32,
+    next_stmtid: u32,
+}
+
+impl<'a> BodyParser<'a> {
+    fn new(source: &'a str, tokens: Vec<PlPgSqlToken>) -> Self {
+        Self {
+            source,
+            tokens,
+            idx: 0,
+            datums: Vec::new(),
+            variables_by_name: HashMap::new(),
+            next_dno: 0,
+            next_stmtid: 0,
+        }
+    }
+
+    fn parse_function_body(&mut self) -> Result<PlPgSqlFunction, PlPgSqlCompileError> {
+        let mut initvarnos = Vec::new();
+
+        if self.consume_keyword(PlPgSqlKeyword::Declare) {
+            initvarnos = self.parse_declare_section()?;
+        }
+
+        self.expect_keyword(PlPgSqlKeyword::Begin, "expected BEGIN")?;
+        let body = self.parse_statement_list_until_keywords(&[PlPgSqlKeyword::End])?;
+        self.expect_keyword(PlPgSqlKeyword::End, "expected END")?;
+
+        // Accept optional END <label> and optional trailing semicolon.
+        if matches!(self.current_kind(), PlPgSqlTokenKind::Identifier(_)) {
+            self.advance();
+        }
+        if matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+            self.advance();
+        }
+
+        if !matches!(self.current_kind(), PlPgSqlTokenKind::Eof) {
+            return Err(self.error_at_current("unexpected tokens after END"));
+        }
+
+        let block_stmtid = self.alloc_stmtid();
+        let block = PlPgSqlStmtBlock {
+            cmd_type: PlPgSqlStmtType::Block,
+            lineno: 1,
+            stmtid: block_stmtid,
+            label: None,
+            body,
+            n_initvars: i32::try_from(initvarnos.len()).unwrap_or(i32::MAX),
+            initvarnos,
+            exceptions: None,
+        };
+
+        let ndatums = i32::try_from(self.datums.len()).unwrap_or(i32::MAX);
+
+        Ok(PlPgSqlFunction {
+            fn_signature: "plpgsql_phase1".to_string(),
+            fn_oid: 0,
+            fn_is_trigger: PlPgSqlTrigtype::NotTrigger,
+            fn_input_collation: 0,
+            fn_cxt: None,
+            fn_rettype: 2278, // VOIDOID in PostgreSQL.
+            fn_rettyplen: 4,
+            fn_retbyval: true,
+            fn_retistuple: false,
+            fn_retisdomain: false,
+            fn_retset: false,
+            fn_readonly: false,
+            fn_prokind: 'f',
+            fn_nargs: 0,
+            fn_argvarnos: Vec::new(),
+            out_param_varno: -1,
+            found_varno: -1,
+            new_varno: -1,
+            old_varno: -1,
+            resolve_option: PlPgSqlResolveOption::Error,
+            print_strict_params: false,
+            extra_warnings: 0,
+            extra_errors: 0,
+            ndatums,
+            datums: self.datums.clone(),
+            copiable_size: 0,
+            action: Some(block),
+            nstatements: self.next_stmtid,
+            requires_procedure_resowner: false,
+            has_exception_block: false,
+            cur_estate: None,
+            cached_function: None,
+        })
+    }
+
+    fn parse_declare_section(&mut self) -> Result<Vec<i32>, PlPgSqlCompileError> {
+        let mut initvarnos = Vec::new();
+
+        while !self.is_keyword(PlPgSqlKeyword::Begin) {
+            if matches!(self.current_kind(), PlPgSqlTokenKind::Eof) {
+                return Err(self.error_at_current("expected BEGIN after DECLARE section"));
+            }
+            if matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+                self.advance();
+                continue;
+            }
+
+            let name = self.expect_identifier("expected variable name in DECLARE section")?;
+            let decl_line = self.current_token().span.line;
+            let dno = self.allocate_dno();
+
+            let type_start_idx = self.idx;
+            while !matches!(self.current_kind(), PlPgSqlTokenKind::Assign)
+                && !matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon)
+                && !matches!(self.current_kind(), PlPgSqlTokenKind::Eof)
+            {
+                self.advance();
+            }
+
+            let type_end = self.current_token().span.start;
+            let type_name = self.source[self.tokens[type_start_idx].span.start..type_end]
+                .trim()
+                .to_string();
+            if type_name.is_empty() {
+                return Err(self.error_at_current("expected variable type in DECLARE section"));
+            }
+
+            let default_val = if matches!(self.current_kind(), PlPgSqlTokenKind::Assign) {
+                self.advance();
+                let start_idx = self.idx;
+                let (expr, end_idx) = extract_sql_expression(&self.tokens, self.source, start_idx)?;
+                self.idx = end_idx;
+                Some(self.make_expr(expr))
+            } else {
+                None
+            };
+
+            self.expect_semicolon()?;
+
+            let variable = PlPgSqlVariable {
+                dtype: PlPgSqlDtype::Var,
+                dno,
+                refname: name.clone(),
+                lineno: i32::try_from(decl_line).unwrap_or(i32::MAX),
+                isconst: false,
+                notnull: false,
+                default_val,
+            };
+            let datatype = self.make_type(&type_name);
+            let var = PlPgSqlVar {
+                variable,
+                datatype: Some(datatype),
+                cursor_explicit_expr: None,
+                cursor_explicit_argrow: -1,
+                cursor_options: 0,
+                value: Some(PlPgSqlValue::Null),
+                isnull: true,
+                freeval: false,
+                promise: PlPgSqlPromiseType::None,
+            };
+
+            self.variables_by_name
+                .insert(name.to_ascii_lowercase(), dno);
+            self.datums.push(PlPgSqlDatum::Var(var));
+            initvarnos.push(dno);
+        }
+
+        Ok(initvarnos)
+    }
+
+    fn parse_statement_list_until_keywords(
+        &mut self,
+        stop_keywords: &[PlPgSqlKeyword],
+    ) -> Result<Vec<PlPgSqlStmt>, PlPgSqlCompileError> {
+        let mut stmts = Vec::new();
+
+        while !matches!(self.current_kind(), PlPgSqlTokenKind::Eof)
+            && !self.current_keyword_in(stop_keywords)
+        {
+            if matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+                self.advance();
+                continue;
+            }
+            stmts.push(self.parse_statement()?);
+        }
+
+        Ok(stmts)
+    }
+
+    fn parse_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        if self.is_keyword(PlPgSqlKeyword::If) {
+            return self.parse_if_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Return) {
+            return self.parse_return_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Raise) {
+            return self.parse_raise_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Perform) {
+            return self.parse_perform_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Commit) {
+            return self.parse_commit_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Rollback) {
+            return self.parse_rollback_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Call) {
+            return self.parse_call_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Get) {
+            return self.parse_getdiag_statement();
+        }
+
+        if let PlPgSqlTokenKind::Identifier(name) = self.current_kind().clone()
+            && matches!(self.peek_kind(1), Some(PlPgSqlTokenKind::Assign))
+        {
+            return self.parse_assignment_statement(name);
+        }
+
+        self.parse_execsql_statement()
+    }
+
+    fn parse_assignment_statement(&mut self, name: String) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.advance();
+        self.expect_assign()?;
+
+        let start_idx = self.idx;
+        let (expr_text, end_idx) = extract_sql_expression(&self.tokens, self.source, start_idx)?;
+        self.idx = end_idx;
+        self.expect_semicolon()?;
+
+        let varno = self
+            .variables_by_name
+            .get(&name.to_ascii_lowercase())
+            .copied()
+            .unwrap_or(-1);
+
+        Ok(PlPgSqlStmt::Assign(PlPgSqlStmtAssign {
+            cmd_type: PlPgSqlStmtType::Assign,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            varno,
+            expr: self.make_expr(expr_text),
+        }))
+    }
+
+    fn parse_if_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let if_token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::If, "expected IF")?;
+
+        let cond = self.extract_expression_until_keywords(&[PlPgSqlKeyword::Then])?;
+        self.expect_keyword(PlPgSqlKeyword::Then, "expected THEN")?;
+
+        let then_body = self.parse_statement_list_until_keywords(&[
+            PlPgSqlKeyword::Elsif,
+            PlPgSqlKeyword::Else,
+            PlPgSqlKeyword::End,
+        ])?;
+
+        let mut elsif_list = Vec::new();
+        while self.consume_keyword(PlPgSqlKeyword::Elsif) {
+            let elsif_line = self.previous_token().span.line;
+            let elsif_cond = self.extract_expression_until_keywords(&[PlPgSqlKeyword::Then])?;
+            self.expect_keyword(PlPgSqlKeyword::Then, "expected THEN after ELSIF condition")?;
+            let elsif_stmts = self.parse_statement_list_until_keywords(&[
+                PlPgSqlKeyword::Elsif,
+                PlPgSqlKeyword::Else,
+                PlPgSqlKeyword::End,
+            ])?;
+            elsif_list.push(PlPgSqlIfElsif {
+                lineno: i32::try_from(elsif_line).unwrap_or(i32::MAX),
+                cond: self.make_expr(elsif_cond),
+                stmts: elsif_stmts,
+            });
+        }
+
+        let else_body = if self.consume_keyword(PlPgSqlKeyword::Else) {
+            self.parse_statement_list_until_keywords(&[PlPgSqlKeyword::End])?
+        } else {
+            Vec::new()
+        };
+
+        self.expect_keyword(PlPgSqlKeyword::End, "expected END to close IF")?;
+        let _ = self.consume_keyword(PlPgSqlKeyword::If);
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::If(PlPgSqlStmtIf {
+            cmd_type: PlPgSqlStmtType::If,
+            lineno: i32::try_from(if_token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            cond: self.make_expr(cond),
+            then_body,
+            elsif_list,
+            else_body,
+        }))
+    }
+
+    fn parse_return_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Return, "expected RETURN")?;
+
+        let expr = if matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+            None
+        } else {
+            let (expr_text, end_idx) = extract_sql_expression(&self.tokens, self.source, self.idx)?;
+            self.idx = end_idx;
+            Some(self.make_expr(expr_text))
+        };
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::Return(PlPgSqlStmtReturn {
+            cmd_type: PlPgSqlStmtType::Return,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            expr,
+            retvarno: -1,
+        }))
+    }
+
+    fn parse_raise_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Raise, "expected RAISE")?;
+
+        let mut condname = None;
+        let mut elog_level = 0;
+
+        if self.is_keyword(PlPgSqlKeyword::Notice) {
+            self.advance();
+            condname = Some("NOTICE".to_string());
+            elog_level = 1;
+        } else if let PlPgSqlTokenKind::Identifier(word) = self.current_kind().clone()
+            && word.eq_ignore_ascii_case("notice")
+        {
+            self.advance();
+            condname = Some("NOTICE".to_string());
+            elog_level = 1;
+        }
+
+        let mut parts = Vec::new();
+        if !matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+            parts = self.extract_comma_expressions_until_semicolon()?;
+        }
+        self.expect_semicolon()?;
+
+        let message = parts.first().cloned();
+        let params = parts
+            .iter()
+            .skip(1)
+            .cloned()
+            .map(|query| self.make_expr(query))
+            .collect::<Vec<_>>();
+
+        let mut options = Vec::new();
+        if let Some(msg) = &message {
+            options.push(PlPgSqlRaiseOption {
+                opt_type: PlPgSqlRaiseOptionType::Message,
+                expr: self.make_expr(msg.clone()),
+            });
+        }
+
+        Ok(PlPgSqlStmt::Raise(PlPgSqlStmtRaise {
+            cmd_type: PlPgSqlStmtType::Raise,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            elog_level,
+            condname,
+            message,
+            params,
+            options,
+        }))
+    }
+
+    fn parse_perform_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Perform, "expected PERFORM")?;
+        let (expr_text, end_idx) = extract_sql_expression(&self.tokens, self.source, self.idx)?;
+        self.idx = end_idx;
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::Perform(PlPgSqlStmtPerform {
+            cmd_type: PlPgSqlStmtType::Perform,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            expr: self.make_expr(expr_text),
+        }))
+    }
+
+    fn parse_call_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Call, "expected CALL")?;
+        let (expr_text, end_idx) = extract_sql_expression(&self.tokens, self.source, self.idx)?;
+        self.idx = end_idx;
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::Call(PlPgSqlStmtCall {
+            cmd_type: PlPgSqlStmtType::Call,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            expr: self.make_expr(expr_text),
+            is_call: true,
+            target: None,
+        }))
+    }
+
+    fn parse_commit_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Commit, "expected COMMIT")?;
+        self.expect_semicolon()?;
+        Ok(PlPgSqlStmt::Commit(PlPgSqlStmtCommit {
+            cmd_type: PlPgSqlStmtType::Commit,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            chain: false,
+        }))
+    }
+
+    fn parse_rollback_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Rollback, "expected ROLLBACK")?;
+        self.expect_semicolon()?;
+        Ok(PlPgSqlStmt::Rollback(PlPgSqlStmtRollback {
+            cmd_type: PlPgSqlStmtType::Rollback,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            chain: false,
+        }))
+    }
+
+    fn parse_getdiag_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Get, "expected GET")?;
+
+        if self.is_keyword(PlPgSqlKeyword::Diagnostics) {
+            self.advance();
+            while !matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon)
+                && !matches!(self.current_kind(), PlPgSqlTokenKind::Eof)
+            {
+                self.advance();
+            }
+            self.expect_semicolon()?;
+            return Ok(PlPgSqlStmt::Getdiag(PlPgSqlStmtGetdiag {
+                cmd_type: PlPgSqlStmtType::GetDiag,
+                lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+                stmtid: self.alloc_stmtid(),
+                is_stacked: false,
+                diag_items: Vec::new(),
+            }));
+        }
+
+        Err(self.error_at_current("expected DIAGNOSTICS after GET"))
+    }
+
+    fn parse_execsql_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        let (sql, end_idx) = extract_sql_expression(&self.tokens, self.source, self.idx)?;
+        self.idx = end_idx;
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::ExecSql(PlPgSqlStmtExecSql {
+            cmd_type: PlPgSqlStmtType::ExecSql,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            sqlstmt: self.make_expr(sql),
+            mod_stmt: false,
+            mod_stmt_set: false,
+            into: false,
+            strict: false,
+            target: None,
+        }))
+    }
+
+    fn extract_expression_until_keywords(
+        &mut self,
+        keywords: &[PlPgSqlKeyword],
+    ) -> Result<String, PlPgSqlCompileError> {
+        let start_idx = self.idx;
+        let mut idx = self.idx;
+        let mut depth = 0usize;
+
+        while idx < self.tokens.len() {
+            match self.tokens[idx].kind {
+                PlPgSqlTokenKind::LParen => depth += 1,
+                PlPgSqlTokenKind::RParen => depth = depth.saturating_sub(1),
+                PlPgSqlTokenKind::Keyword(keyword) if depth == 0 && keywords.contains(&keyword) => {
+                    if idx == start_idx {
+                        return Err(PlPgSqlCompileError {
+                            message: "expected expression".to_string(),
+                            position: self.tokens[idx].span.start,
+                            line: self.tokens[idx].span.line,
+                            column: self.tokens[idx].span.column,
+                        });
+                    }
+
+                    let start = self.tokens[start_idx].span.start;
+                    let end = self.tokens[idx].span.start;
+                    self.idx = idx;
+                    return Ok(self.source[start..end].trim().to_string());
+                }
+                PlPgSqlTokenKind::Eof => break,
+                _ => {}
+            }
+            idx += 1;
+        }
+
+        Err(self.error_at_current("unterminated expression"))
+    }
+
+    fn extract_comma_expressions_until_semicolon(
+        &mut self,
+    ) -> Result<Vec<String>, PlPgSqlCompileError> {
+        let mut parts = Vec::new();
+        let mut part_start = self.idx;
+        let mut idx = self.idx;
+        let mut depth = 0usize;
+
+        while idx < self.tokens.len() {
+            match self.tokens[idx].kind {
+                PlPgSqlTokenKind::LParen => depth += 1,
+                PlPgSqlTokenKind::RParen => depth = depth.saturating_sub(1),
+                PlPgSqlTokenKind::Comma if depth == 0 => {
+                    let start = self.tokens[part_start].span.start;
+                    let end = self.tokens[idx].span.start;
+                    parts.push(self.source[start..end].trim().to_string());
+                    part_start = idx + 1;
+                }
+                PlPgSqlTokenKind::Semicolon if depth == 0 => {
+                    let start = self.tokens[part_start].span.start;
+                    let end = self.tokens[idx].span.start;
+                    let part = self.source[start..end].trim().to_string();
+                    if !part.is_empty() {
+                        parts.push(part);
+                    }
+                    self.idx = idx;
+                    return Ok(parts);
+                }
+                PlPgSqlTokenKind::Eof => break,
+                _ => {}
+            }
+            idx += 1;
+        }
+
+        Err(self.error_at_current("unterminated RAISE expression list"))
+    }
+
+    fn make_expr(&self, query: String) -> PlPgSqlExpr {
+        PlPgSqlExpr {
+            query,
+            parse_mode: None,
+            func_signature: None,
+            ns: Vec::new(),
+            target_param: -1,
+            target_is_local: false,
+            plan: None,
+            paramnos: Vec::new(),
+            expr_simple_expr: None,
+            expr_simple_type: None,
+            expr_simple_typmod: -1,
+            expr_simple_mutable: false,
+            expr_rwopt: Default::default(),
+            expr_rw_param: None,
+            expr_simple_plansource: None,
+            expr_simple_plan: None,
+            expr_simple_plan_lxid: 0,
+            expr_simple_state: None,
+            expr_simple_in_use: false,
+            expr_simple_lxid: 0,
+        }
+    }
+
+    fn make_type(&self, type_name: &str) -> PlPgSqlType {
+        let trimmed = type_name.trim();
+        let ttype = if trimmed.eq_ignore_ascii_case("record") {
+            PlPgSqlTypeType::Rec
+        } else {
+            PlPgSqlTypeType::Scalar
+        };
+        PlPgSqlType {
+            typname: trimmed.to_string(),
+            typoid: 0,
+            ttype,
+            typlen: -1,
+            typbyval: false,
+            typtype: 'b',
+            collation: 0,
+            typisarray: trimmed.ends_with("[]"),
+            atttypmod: -1,
+            origtypname: Some(trimmed.to_string()),
+            tcache: None,
+            tupdesc_id: 0,
+        }
+    }
+
+    fn allocate_dno(&mut self) -> i32 {
+        let dno = self.next_dno;
+        self.next_dno = self.next_dno.saturating_add(1);
+        dno
+    }
+
+    fn alloc_stmtid(&mut self) -> u32 {
+        self.next_stmtid = self.next_stmtid.saturating_add(1);
+        self.next_stmtid
+    }
+
+    fn current_token(&self) -> &PlPgSqlToken {
+        let idx = self.idx.min(self.tokens.len().saturating_sub(1));
+        &self.tokens[idx]
+    }
+
+    fn previous_token(&self) -> &PlPgSqlToken {
+        if self.idx == 0 {
+            &self.tokens[0]
+        } else {
+            &self.tokens[self.idx - 1]
+        }
+    }
+
+    fn current_kind(&self) -> &PlPgSqlTokenKind {
+        &self.current_token().kind
+    }
+
+    fn peek_kind(&self, offset: usize) -> Option<&PlPgSqlTokenKind> {
+        self.tokens.get(self.idx + offset).map(|t| &t.kind)
+    }
+
+    fn advance(&mut self) {
+        if self.idx < self.tokens.len().saturating_sub(1) {
+            self.idx += 1;
+        }
+    }
+
+    fn consume_keyword(&mut self, keyword: PlPgSqlKeyword) -> bool {
+        if self.is_keyword(keyword) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_keyword(
+        &mut self,
+        keyword: PlPgSqlKeyword,
+        message: &str,
+    ) -> Result<(), PlPgSqlCompileError> {
+        if self.consume_keyword(keyword) {
+            Ok(())
+        } else {
+            Err(self.error_at_current(message))
+        }
+    }
+
+    fn expect_identifier(&mut self, message: &str) -> Result<String, PlPgSqlCompileError> {
+        match self.current_kind().clone() {
+            PlPgSqlTokenKind::Identifier(name) => {
+                self.advance();
+                Ok(name)
+            }
+            _ => Err(self.error_at_current(message)),
+        }
+    }
+
+    fn expect_assign(&mut self) -> Result<(), PlPgSqlCompileError> {
+        if matches!(self.current_kind(), PlPgSqlTokenKind::Assign) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(self.error_at_current("expected :="))
+        }
+    }
+
+    fn expect_semicolon(&mut self) -> Result<(), PlPgSqlCompileError> {
+        if matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(self.error_at_current("expected ';'"))
+        }
+    }
+
+    fn is_keyword(&self, keyword: PlPgSqlKeyword) -> bool {
+        matches!(
+            self.current_kind(),
+            PlPgSqlTokenKind::Keyword(found) if *found == keyword
+        )
+    }
+
+    fn current_keyword_in(&self, keywords: &[PlPgSqlKeyword]) -> bool {
+        matches!(
+            self.current_kind(),
+            PlPgSqlTokenKind::Keyword(found) if keywords.contains(found)
+        )
+    }
+
+    fn error_at_current(&self, message: &str) -> PlPgSqlCompileError {
+        let token = self.current_token();
+        PlPgSqlCompileError {
+            message: message.to_string(),
+            position: token.span.start,
+            line: token.span.line,
+            column: token.span.column,
+        }
+    }
+}
+
+fn map_sql_parse_error(sql: &str, err: SqlParseError) -> PlPgSqlCompileError {
+    let (line, column) = line_column_from_offset(sql, err.position);
+    PlPgSqlCompileError {
+        message: err.message,
+        position: err.position,
+        line,
+        column,
+    }
+}
+
+fn line_column_from_offset(source: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+
+    for (idx, ch) in source.char_indices() {
+        if idx >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+
+    (line, column)
+}
+
+fn parse_do_sql_fallback(sql: &str) -> Result<DoStatement, PlPgSqlCompileError> {
+    let trimmed = sql.trim().trim_end_matches(';').trim();
+    let rest = strip_prefix_ci(trimmed, "do").ok_or(PlPgSqlCompileError {
+        message: "expected DO statement".to_string(),
+        position: 0,
+        line: 1,
+        column: 1,
+    })?;
+
+    let rest = rest.trim_start();
+    if rest.is_empty() {
+        return Err(PlPgSqlCompileError {
+            message: "expected DO body".to_string(),
+            position: trimmed.len(),
+            line: 1,
+            column: trimmed.len() + 1,
+        });
+    }
+
+    let (body, language) = if let Some(after_language) = strip_prefix_ci(rest, "language") {
+        let (language, consumed) = parse_language_name(after_language.trim_start())?;
+        let after_lang = after_language.trim_start()[consumed..].trim_start();
+        let (body, _) = parse_sql_string_literal(after_lang)?;
+        (body, language)
+    } else {
+        let (body, consumed) = parse_sql_string_literal(rest)?;
+        let after_body = rest[consumed..].trim_start();
+        if let Some(after_language) = strip_prefix_ci(after_body, "language") {
+            let (language, _) = parse_language_name(after_language.trim_start())?;
+            (body, language)
+        } else {
+            (body, "plpgsql".to_string())
+        }
+    };
+
+    Ok(DoStatement { body, language })
+}
+
+fn strip_prefix_ci<'a>(input: &'a str, prefix: &str) -> Option<&'a str> {
+    let plen = prefix.len();
+    if input.len() < plen {
+        return None;
+    }
+    if input[..plen].eq_ignore_ascii_case(prefix) {
+        Some(&input[plen..])
+    } else {
+        None
+    }
+}
+
+fn parse_language_name(input: &str) -> Result<(String, usize), PlPgSqlCompileError> {
+    if input.is_empty() {
+        return Err(PlPgSqlCompileError {
+            message: "expected language name after LANGUAGE".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let first = input.chars().next().expect("checked is_empty");
+    if first == '\'' {
+        let (name, consumed) = parse_single_quoted_string(input)?;
+        return Ok((name, consumed));
+    }
+
+    let mut end = 0usize;
+    for (idx, ch) in input.char_indices() {
+        if idx == 0 {
+            if !(ch == '_' || ch.is_ascii_alphabetic()) {
+                break;
+            }
+            end = idx + ch.len_utf8();
+            continue;
+        }
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+
+    if end == 0 {
+        return Err(PlPgSqlCompileError {
+            message: "expected language name after LANGUAGE".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    Ok((input[..end].to_string(), end))
+}
+
+fn parse_sql_string_literal(input: &str) -> Result<(String, usize), PlPgSqlCompileError> {
+    if input.is_empty() {
+        return Err(PlPgSqlCompileError {
+            message: "expected quoted DO body".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let first = input.chars().next().expect("checked is_empty");
+    if first == '\'' {
+        return parse_single_quoted_string(input);
+    }
+    if first == '$' {
+        return parse_dollar_quoted_string(input);
+    }
+
+    Err(PlPgSqlCompileError {
+        message: "expected quoted DO body".to_string(),
+        position: 0,
+        line: 1,
+        column: 1,
+    })
+}
+
+fn parse_single_quoted_string(input: &str) -> Result<(String, usize), PlPgSqlCompileError> {
+    if !input.starts_with('\'') {
+        return Err(PlPgSqlCompileError {
+            message: "expected single-quoted string".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let mut result = String::new();
+    let mut idx = 1usize;
+    while idx < input.len() {
+        let ch = input[idx..]
+            .chars()
+            .next()
+            .expect("slice index checked by loop");
+        idx += ch.len_utf8();
+        if ch == '\'' {
+            if idx < input.len() && input[idx..].starts_with('\'') {
+                result.push('\'');
+                idx += 1;
+            } else {
+                return Ok((result, idx));
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    Err(PlPgSqlCompileError {
+        message: "unterminated single-quoted string".to_string(),
+        position: input.len(),
+        line: 1,
+        column: input.len() + 1,
+    })
+}
+
+fn parse_dollar_quoted_string(input: &str) -> Result<(String, usize), PlPgSqlCompileError> {
+    if !input.starts_with('$') {
+        return Err(PlPgSqlCompileError {
+            message: "expected dollar-quoted string".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let mut tag_end = 1usize;
+    while tag_end < input.len() {
+        let ch = input[tag_end..]
+            .chars()
+            .next()
+            .expect("slice index checked by loop");
+        if ch == '$' {
+            tag_end += 1;
+            break;
+        }
+        if !(ch == '_' || ch.is_ascii_alphanumeric()) {
+            return Err(PlPgSqlCompileError {
+                message: "invalid dollar-quote tag".to_string(),
+                position: tag_end,
+                line: 1,
+                column: tag_end + 1,
+            });
+        }
+        tag_end += ch.len_utf8();
+    }
+
+    if tag_end > input.len() || !input[..tag_end].ends_with('$') {
+        return Err(PlPgSqlCompileError {
+            message: "unterminated dollar-quote tag".to_string(),
+            position: 0,
+            line: 1,
+            column: 1,
+        });
+    }
+
+    let delimiter = &input[..tag_end];
+    if let Some(rel_end) = input[tag_end..].find(delimiter) {
+        let body_start = tag_end;
+        let body_end = tag_end + rel_end;
+        let consumed = body_end + delimiter.len();
+        return Ok((input[body_start..body_end].to_string(), consumed));
+    }
+
+    Err(PlPgSqlCompileError {
+        message: "unterminated dollar-quoted string".to_string(),
+        position: input.len(),
+        line: 1,
+        column: input.len() + 1,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compile_do_block_sql, compile_function_body};
+    use crate::plpgsql::types::PlPgSqlStmt;
+
+    #[test]
+    fn compiles_declare_begin_assignment_return() {
+        let src = "
+DECLARE
+  x integer := 1;
+BEGIN
+  x := x + 1;
+  RETURN x;
+END;
+";
+        let compiled = compile_function_body(src).expect("compile should succeed");
+
+        assert_eq!(compiled.datums.len(), 1);
+        let action = compiled.action.expect("action should be present");
+        assert_eq!(action.body.len(), 2);
+        assert!(matches!(action.body[0], PlPgSqlStmt::Assign(_)));
+        assert!(matches!(action.body[1], PlPgSqlStmt::Return(_)));
+    }
+
+    #[test]
+    fn compiles_if_and_raise_notice() {
+        let src = "
+BEGIN
+  IF x > 0 THEN
+    RAISE NOTICE 'ok: %', x;
+  ELSE
+    RETURN 0;
+  END IF;
+END;
+";
+        let compiled = compile_function_body(src).expect("compile should succeed");
+        let action = compiled.action.expect("action should be present");
+        assert_eq!(action.body.len(), 1);
+        assert!(matches!(action.body[0], PlPgSqlStmt::If(_)));
+    }
+
+    #[test]
+    fn compiles_do_sql_wrapper() {
+        let sql = "DO $$ BEGIN RETURN; END; $$ LANGUAGE plpgsql";
+        let compiled = compile_do_block_sql(sql).expect("compile should succeed");
+        assert_eq!(compiled.fn_signature, "inline_code_block");
+    }
+}
