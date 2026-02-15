@@ -321,19 +321,24 @@
         const t0 = performance.now();
         const result = await runSQL(sql);
         const elapsed = ((performance.now() - t0) / 1000).toFixed(3);
-        lastResult = result;
-
         if (result.error) {
           setStatus(`Error: ${result.error}`, 'error');
           document.getElementById('results').innerHTML = '';
           return;
         }
 
-        const rows = result.rows || [];
-        const columns = result.columns || [];
+        // Support both flat and nested result formats; for multi-statement, use last result with rows
+        let firstResult = result;
+        if (result.results && result.results.length > 0) {
+          // Prefer last result that has columns (SELECT), otherwise last result
+          firstResult = result.results.slice().reverse().find(r => r.columns && r.columns.length > 0) || result.results[result.results.length - 1];
+        }
+        lastResult = firstResult;
+        const rows = firstResult.rows || [];
+        const columns = firstResult.columns || [];
 
         setStatus(
-          `${rows.length} row${rows.length !== 1 ? 's' : ''} · ${elapsed}s · ${result.command_tag || 'OK'}`,
+          `${rows.length} row${rows.length !== 1 ? 's' : ''} · ${elapsed}s · ${firstResult.command_tag || result.command_tag || 'OK'}`,
           'success'
         );
 
