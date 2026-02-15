@@ -394,6 +394,9 @@ impl<'a> BodyParser<'a> {
         if self.is_keyword(PlPgSqlKeyword::Get) {
             return self.parse_getdiag_statement();
         }
+        if self.is_keyword(PlPgSqlKeyword::Null) {
+            return self.parse_null_statement();
+        }
 
         if let PlPgSqlTokenKind::Identifier(name) = self.current_kind().clone()
             && matches!(self.peek_kind(1), Some(PlPgSqlTokenKind::Assign))
@@ -611,6 +614,25 @@ impl<'a> BodyParser<'a> {
             lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
             stmtid: self.alloc_stmtid(),
             chain: false,
+        }))
+    }
+
+    fn parse_null_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        self.expect_keyword(PlPgSqlKeyword::Null, "expected NULL")?;
+        if matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon) {
+            self.advance();
+        }
+        // NULL is a no-op statement — just return an empty exec SQL with no effect
+        let stmtid = self.alloc_stmtid();
+        Ok(PlPgSqlStmt::Block(PlPgSqlStmtBlock {
+            cmd_type: PlPgSqlStmtType::Block,
+            lineno: 0,
+            stmtid,
+            label: None,
+            body: Vec::new(),
+            n_initvars: 0,
+            initvarnos: Vec::new(),
+            exceptions: None,
         }))
     }
 
