@@ -460,6 +460,9 @@ pub(crate) async fn eval_scalar_function(
             ScalarValue::Null => Ok(ScalarValue::Null),
             ScalarValue::Int(i) => Ok(ScalarValue::Int(*i)),
             ScalarValue::Float(f) => Ok(ScalarValue::Float(f.ceil())),
+            ScalarValue::Numeric(d) => {
+                Ok(ScalarValue::Numeric(d.ceil()))
+            }
             _ => Err(EngineError {
                 message: "ceil() expects numeric argument".to_string(),
             }),
@@ -468,6 +471,9 @@ pub(crate) async fn eval_scalar_function(
             ScalarValue::Null => Ok(ScalarValue::Null),
             ScalarValue::Int(i) => Ok(ScalarValue::Int(*i)),
             ScalarValue::Float(f) => Ok(ScalarValue::Float(f.floor())),
+            ScalarValue::Numeric(d) => {
+                Ok(ScalarValue::Numeric(d.floor()))
+            }
             _ => Err(EngineError {
                 message: "floor() expects numeric argument".to_string(),
             }),
@@ -486,6 +492,9 @@ pub(crate) async fn eval_scalar_function(
                 ScalarValue::Float(f) => {
                     let factor = 10f64.powi(scale as i32);
                     Ok(ScalarValue::Float((f * factor).round() / factor))
+                }
+                ScalarValue::Numeric(d) => {
+                    Ok(ScalarValue::Numeric(d.round_dp(scale as u32)))
                 }
                 _ => Err(EngineError {
                     message: "round() expects numeric argument".to_string(),
@@ -506,6 +515,9 @@ pub(crate) async fn eval_scalar_function(
                 ScalarValue::Float(f) => {
                     let factor = 10f64.powi(scale as i32);
                     Ok(ScalarValue::Float((f * factor).trunc() / factor))
+                }
+                ScalarValue::Numeric(d) => {
+                    Ok(ScalarValue::Numeric(d.trunc_with_scale(scale as u32)))
                 }
                 _ => Err(EngineError {
                     message: "trunc() expects numeric argument".to_string(),

@@ -660,6 +660,12 @@ pub(crate) fn parse_f64_numeric_scalar(
     match value {
         ScalarValue::Float(v) => Ok(*v),
         ScalarValue::Int(v) => Ok(*v as f64),
+        ScalarValue::Numeric(d) => {
+            use rust_decimal::prelude::ToPrimitive;
+            d.to_f64().ok_or_else(|| EngineError {
+                message: message.to_string(),
+            })
+        }
         _ => Err(EngineError {
             message: message.to_string(),
         }),
