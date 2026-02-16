@@ -6,9 +6,6 @@ use crate::commands::sequence::{
     normalize_sequence_name_from_text, sequence_next_value, set_sequence_value,
     with_sequences_read, with_sequences_write,
 };
-use crate::extensions::openferric::{
-    eval_american_price, eval_barrier_price, eval_bs_greeks, eval_bs_price, eval_heston_price,
-};
 use crate::security;
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::{EngineError, with_ext_read};
@@ -94,11 +91,6 @@ pub(crate) async fn eval_scalar_function(
             require_http_extension()?;
             eval_urlencode(&args[0])
         }
-        "bs_price" if args.len() == 6 => eval_bs_price(args),
-        "bs_greeks" if args.len() == 6 => eval_bs_greeks(args),
-        "barrier_price" if args.len() == 9 => eval_barrier_price(args),
-        "american_price" if args.len() == 6 || args.len() == 7 => eval_american_price(args),
-        "heston_price" if args.len() == 10 => eval_heston_price(args),
         "row" => Ok(ScalarValue::Text(
             JsonValue::Array(
                 args.iter()

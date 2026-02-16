@@ -7,6 +7,7 @@ use crate::executor::exec_main::{
     compare_order_keys, eval_aggregate_function, execute_query_with_outer, is_aggregate_function,
     parse_non_negative_int, row_key,
 };
+use crate::extensions::openferric::eval_openferric_function;
 use crate::parser::ast::{
     BinaryOp, BooleanTestType, ComparisonQuantifier, CreateFunctionStatement, Expr, OrderByExpr,
     UnaryOp, WindowDefinition, WindowFrameBound, WindowFrameExclusion, WindowFrameUnits,
@@ -2708,7 +2709,7 @@ async fn eval_function(
         values.push(eval_expr(arg, scope, params).await?);
     }
 
-    // Handle schema-qualified extension functions (ws.connect, ws.send, ws.close)
+    // Handle schema-qualified extension functions.
     if name.len() == 2 {
         let schema = name[0].to_ascii_lowercase();
         if schema == "ws" {
@@ -2723,6 +2724,9 @@ async fn eval_function(
                     });
                 }
             }
+        }
+        if schema == "openferric" {
+            return eval_openferric_function(&fn_name, &values);
         }
     }
 
@@ -2747,7 +2751,8 @@ fn lookup_user_function(name: &[String]) -> Option<UserFunction> {
                     return true;
                 }
                 if lower_name.len() == 1 {
-                    return func.name.last() == lower_name.last();
+                    return func.name.last() == lower_name.last()
+                        && func.name.first().map(String::as_str) != Some("openferric");
                 }
                 false
             })

@@ -11,17 +11,46 @@ use openferric::pricing::american::crr_binomial_american;
 use openferric::pricing::barrier::barrier_price_closed_form;
 use openferric::pricing::european::{black_scholes_greeks, black_scholes_price};
 
-pub(crate) fn eval_bs_price(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+pub(crate) fn eval_openferric_function(
+    fn_name: &str,
+    args: &[ScalarValue],
+) -> Result<ScalarValue, EngineError> {
+    match fn_name {
+        "european_call" if args.len() == 5 => {
+            eval_european_price(args, OptionType::Call, "openferric.european_call()")
+        }
+        "european_put" if args.len() == 5 => {
+            eval_european_price(args, OptionType::Put, "openferric.european_put()")
+        }
+        "european_greeks" if args.len() == 6 => eval_european_greeks(args),
+        "american_call" if args.len() == 5 || args.len() == 6 => {
+            eval_american_price(args, OptionType::Call, "openferric.american_call()")
+        }
+        "american_put" if args.len() == 5 || args.len() == 6 => {
+            eval_american_price(args, OptionType::Put, "openferric.american_put()")
+        }
+        "barrier" if args.len() == 9 => eval_barrier(args),
+        "heston" if args.len() == 10 => eval_heston(args),
+        _ => Err(EngineError {
+            message: format!("function openferric.{fn_name}() does not exist"),
+        }),
+    }
+}
+
+fn eval_european_price(
+    args: &[ScalarValue],
+    option_type: OptionType,
+    context: &str,
+) -> Result<ScalarValue, EngineError> {
     if args.iter().any(|arg| matches!(arg, ScalarValue::Null)) {
         return Ok(ScalarValue::Null);
     }
 
-    let spot = parse_f64(&args[0], "bs_price() expects numeric spot")?;
-    let strike = parse_f64(&args[1], "bs_price() expects numeric strike")?;
-    let expiry = parse_f64(&args[2], "bs_price() expects numeric expiry")?;
-    let vol = parse_f64(&args[3], "bs_price() expects numeric vol")?;
-    let rate = parse_f64(&args[4], "bs_price() expects numeric rate")?;
-    let option_type = parse_option_type(&args[5], "bs_price()")?;
+    let spot = parse_f64(&args[0], &format!("{context} expects numeric spot"))?;
+    let strike = parse_f64(&args[1], &format!("{context} expects numeric strike"))?;
+    let expiry = parse_f64(&args[2], &format!("{context} expects numeric expiry"))?;
+    let vol = parse_f64(&args[3], &format!("{context} expects numeric vol"))?;
+    let rate = parse_f64(&args[4], &format!("{context} expects numeric rate"))?;
 
     Ok(ScalarValue::Float(black_scholes_price(
         option_type,
@@ -33,59 +62,71 @@ pub(crate) fn eval_bs_price(args: &[ScalarValue]) -> Result<ScalarValue, EngineE
     )))
 }
 
-pub(crate) fn eval_bs_greeks(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+fn eval_european_greeks(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if args.iter().any(|arg| matches!(arg, ScalarValue::Null)) {
         return Ok(ScalarValue::Null);
     }
 
-    let spot = parse_f64(&args[0], "bs_greeks() expects numeric spot")?;
-    let strike = parse_f64(&args[1], "bs_greeks() expects numeric strike")?;
-    let expiry = parse_f64(&args[2], "bs_greeks() expects numeric expiry")?;
-    let vol = parse_f64(&args[3], "bs_greeks() expects numeric vol")?;
-    let rate = parse_f64(&args[4], "bs_greeks() expects numeric rate")?;
-    let option_type = parse_option_type(&args[5], "bs_greeks()")?;
+    let spot = parse_f64(
+        &args[0],
+        "openferric.european_greeks() expects numeric spot",
+    )?;
+    let strike = parse_f64(
+        &args[1],
+        "openferric.european_greeks() expects numeric strike",
+    )?;
+    let expiry = parse_f64(
+        &args[2],
+        "openferric.european_greeks() expects numeric expiry",
+    )?;
+    let vol = parse_f64(&args[3], "openferric.european_greeks() expects numeric vol")?;
+    let rate = parse_f64(
+        &args[4],
+        "openferric.european_greeks() expects numeric rate",
+    )?;
+    let option_type = parse_option_type(&args[5], "openferric.european_greeks()")?;
 
     let greeks = black_scholes_greeks(option_type, spot, strike, rate, vol, expiry);
 
     let mut payload = JsonMap::new();
     payload.insert(
         "delta".to_string(),
-        finite_json_number(greeks.delta, "bs_greeks() delta")?,
+        finite_json_number(greeks.delta, "openferric.european_greeks() delta")?,
     );
     payload.insert(
         "gamma".to_string(),
-        finite_json_number(greeks.gamma, "bs_greeks() gamma")?,
+        finite_json_number(greeks.gamma, "openferric.european_greeks() gamma")?,
     );
     payload.insert(
         "vega".to_string(),
-        finite_json_number(greeks.vega, "bs_greeks() vega")?,
+        finite_json_number(greeks.vega, "openferric.european_greeks() vega")?,
     );
     payload.insert(
         "theta".to_string(),
-        finite_json_number(greeks.theta, "bs_greeks() theta")?,
+        finite_json_number(greeks.theta, "openferric.european_greeks() theta")?,
     );
     payload.insert(
         "rho".to_string(),
-        finite_json_number(greeks.rho, "bs_greeks() rho")?,
+        finite_json_number(greeks.rho, "openferric.european_greeks() rho")?,
     );
 
     Ok(ScalarValue::Text(JsonValue::Object(payload).to_string()))
 }
 
-pub(crate) fn eval_barrier_price(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+fn eval_barrier(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if args.iter().any(|arg| matches!(arg, ScalarValue::Null)) {
         return Ok(ScalarValue::Null);
     }
 
-    let spot = parse_f64(&args[0], "barrier_price() expects numeric spot")?;
-    let strike = parse_f64(&args[1], "barrier_price() expects numeric strike")?;
-    let expiry = parse_f64(&args[2], "barrier_price() expects numeric expiry")?;
-    let vol = parse_f64(&args[3], "barrier_price() expects numeric vol")?;
-    let rate = parse_f64(&args[4], "barrier_price() expects numeric rate")?;
-    let barrier = parse_f64(&args[5], "barrier_price() expects numeric barrier")?;
-    let option_type = parse_option_type(&args[6], "barrier_price()")?;
-    let barrier_style = parse_barrier_style(&args[7])?;
-    let barrier_direction = parse_barrier_direction(&args[8])?;
+    let spot = parse_f64(&args[0], "openferric.barrier() expects numeric spot")?;
+    let strike = parse_f64(&args[1], "openferric.barrier() expects numeric strike")?;
+    let expiry = parse_f64(&args[2], "openferric.barrier() expects numeric expiry")?;
+    let vol = parse_f64(&args[3], "openferric.barrier() expects numeric vol")?;
+    let rate = parse_f64(&args[4], "openferric.barrier() expects numeric rate")?;
+    let barrier = parse_f64(&args[5], "openferric.barrier() expects numeric barrier")?;
+    let option_type = parse_option_type(&args[6], "openferric.barrier()")?;
+    let barrier_style = parse_barrier_style(&args[7], "openferric.barrier()")?;
+    let barrier_direction = parse_barrier_direction(&args[8], "openferric.barrier()")?;
 
     Ok(ScalarValue::Float(barrier_price_closed_form(
         option_type,
@@ -100,19 +141,22 @@ pub(crate) fn eval_barrier_price(args: &[ScalarValue]) -> Result<ScalarValue, En
     )))
 }
 
-pub(crate) fn eval_american_price(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+fn eval_american_price(
+    args: &[ScalarValue],
+    option_type: OptionType,
+    context: &str,
+) -> Result<ScalarValue, EngineError> {
     if args.iter().any(|arg| matches!(arg, ScalarValue::Null)) {
         return Ok(ScalarValue::Null);
     }
 
-    let spot = parse_f64(&args[0], "american_price() expects numeric spot")?;
-    let strike = parse_f64(&args[1], "american_price() expects numeric strike")?;
-    let expiry = parse_f64(&args[2], "american_price() expects numeric expiry")?;
-    let vol = parse_f64(&args[3], "american_price() expects numeric vol")?;
-    let rate = parse_f64(&args[4], "american_price() expects numeric rate")?;
-    let option_type = parse_option_type(&args[5], "american_price()")?;
-    let steps = if args.len() == 7 {
-        parse_positive_steps(&args[6])?
+    let spot = parse_f64(&args[0], &format!("{context} expects numeric spot"))?;
+    let strike = parse_f64(&args[1], &format!("{context} expects numeric strike"))?;
+    let expiry = parse_f64(&args[2], &format!("{context} expects numeric expiry"))?;
+    let vol = parse_f64(&args[3], &format!("{context} expects numeric vol"))?;
+    let rate = parse_f64(&args[4], &format!("{context} expects numeric rate"))?;
+    let steps = if args.len() == 6 {
+        parse_positive_steps(&args[5], context)?
     } else {
         500
     };
@@ -128,21 +172,21 @@ pub(crate) fn eval_american_price(args: &[ScalarValue]) -> Result<ScalarValue, E
     )))
 }
 
-pub(crate) fn eval_heston_price(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
+fn eval_heston(args: &[ScalarValue]) -> Result<ScalarValue, EngineError> {
     if args.iter().any(|arg| matches!(arg, ScalarValue::Null)) {
         return Ok(ScalarValue::Null);
     }
 
-    let spot = parse_f64(&args[0], "heston_price() expects numeric spot")?;
-    let strike = parse_f64(&args[1], "heston_price() expects numeric strike")?;
-    let expiry = parse_f64(&args[2], "heston_price() expects numeric expiry")?;
-    let rate = parse_f64(&args[3], "heston_price() expects numeric rate")?;
-    let v0 = parse_f64(&args[4], "heston_price() expects numeric v0")?;
-    let kappa = parse_f64(&args[5], "heston_price() expects numeric kappa")?;
-    let theta = parse_f64(&args[6], "heston_price() expects numeric theta")?;
-    let sigma_v = parse_f64(&args[7], "heston_price() expects numeric sigma_v")?;
-    let rho = parse_f64(&args[8], "heston_price() expects numeric rho")?;
-    let option_type = parse_option_type(&args[9], "heston_price()")?;
+    let spot = parse_f64(&args[0], "openferric.heston() expects numeric spot")?;
+    let strike = parse_f64(&args[1], "openferric.heston() expects numeric strike")?;
+    let expiry = parse_f64(&args[2], "openferric.heston() expects numeric expiry")?;
+    let rate = parse_f64(&args[3], "openferric.heston() expects numeric rate")?;
+    let v0 = parse_f64(&args[4], "openferric.heston() expects numeric v0")?;
+    let kappa = parse_f64(&args[5], "openferric.heston() expects numeric kappa")?;
+    let theta = parse_f64(&args[6], "openferric.heston() expects numeric theta")?;
+    let sigma_v = parse_f64(&args[7], "openferric.heston() expects numeric sigma_v")?;
+    let rho = parse_f64(&args[8], "openferric.heston() expects numeric rho")?;
+    let option_type = parse_option_type(&args[9], "openferric.heston()")?;
 
     let instrument = VanillaOption {
         option_type,
@@ -181,22 +225,22 @@ fn parse_f64(value: &ScalarValue, message: &str) -> Result<f64, EngineError> {
     }
 }
 
-fn parse_positive_steps(value: &ScalarValue) -> Result<usize, EngineError> {
+fn parse_positive_steps(value: &ScalarValue, context: &str) -> Result<usize, EngineError> {
     let steps = match value {
         ScalarValue::Int(v) => *v,
         ScalarValue::Float(v) if v.fract() == 0.0 => *v as i64,
         ScalarValue::Text(v) => v.parse::<i64>().map_err(|_| EngineError {
-            message: "american_price() steps must be a positive integer".to_string(),
+            message: format!("{context} steps must be a positive integer"),
         })?,
         _ => {
             return Err(EngineError {
-                message: "american_price() steps must be a positive integer".to_string(),
+                message: format!("{context} steps must be a positive integer"),
             });
         }
     };
     if steps <= 0 {
         return Err(EngineError {
-            message: "american_price() steps must be a positive integer".to_string(),
+            message: format!("{context} steps must be a positive integer"),
         });
     }
     Ok(steps as usize)
@@ -212,22 +256,25 @@ fn parse_option_type(value: &ScalarValue, context: &str) -> Result<OptionType, E
     }
 }
 
-fn parse_barrier_style(value: &ScalarValue) -> Result<BarrierStyle, EngineError> {
+fn parse_barrier_style(value: &ScalarValue, context: &str) -> Result<BarrierStyle, EngineError> {
     match normalized_text(value, "barrier_type must be text")?.as_str() {
         "in" | "knock_in" | "ki" | "knockin" => Ok(BarrierStyle::In),
         "out" | "knock_out" | "ko" | "knockout" => Ok(BarrierStyle::Out),
         _ => Err(EngineError {
-            message: "barrier_price() barrier_type must be 'in' or 'out'".to_string(),
+            message: format!("{context} barrier_type must be 'in' or 'out'"),
         }),
     }
 }
 
-fn parse_barrier_direction(value: &ScalarValue) -> Result<BarrierDirection, EngineError> {
+fn parse_barrier_direction(
+    value: &ScalarValue,
+    context: &str,
+) -> Result<BarrierDirection, EngineError> {
     match normalized_text(value, "barrier_dir must be text")?.as_str() {
         "up" => Ok(BarrierDirection::Up),
         "down" => Ok(BarrierDirection::Down),
         _ => Err(EngineError {
-            message: "barrier_price() barrier_dir must be 'up' or 'down'".to_string(),
+            message: format!("{context} barrier_dir must be 'up' or 'down'"),
         }),
     }
 }
