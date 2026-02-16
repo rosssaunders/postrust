@@ -4773,6 +4773,15 @@ fn evaluates_sha256_function() {
 }
 
 #[test]
+fn evaluates_openferric_bs_price_function() {
+    let result = run("SELECT bs_price(100,105,0.25,0.20,0.05,'call')");
+    match &result.rows[0][0] {
+        ScalarValue::Float(v) => assert!(v.is_finite() && *v > 0.0),
+        other => panic!("expected Float, got {:?}", other),
+    }
+}
+
+#[test]
 fn evaluates_pg_typeof_function() {
     let result = run(
         "SELECT pg_typeof(42), pg_typeof(3.14), pg_typeof('hello'), pg_typeof(true), pg_typeof(NULL)",

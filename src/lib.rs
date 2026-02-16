@@ -54,7 +54,8 @@
     clippy::branches_sharing_code,
     clippy::useless_let_if_seq,
     clippy::suspicious_operation_groupings,
-    clippy::bool_to_int_with_if
+    clippy::bool_to_int_with_if,
+    clippy::collapsible_str_replace
 )]
 
 pub mod access;
@@ -62,6 +63,7 @@ pub mod analyzer;
 pub mod browser;
 pub mod catalog;
 pub mod commands;
+pub mod extensions;
 pub mod executor;
 pub mod parser;
 pub mod planner;
