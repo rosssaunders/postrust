@@ -4585,6 +4585,19 @@ fn create_extension_unknown_errors() {
     });
 }
 
+#[test]
+fn create_extension_openferric_is_available() {
+    let results = run_batch(&[
+        "CREATE EXTENSION openferric",
+        "SELECT extname FROM pg_extension WHERE extname = 'openferric'",
+    ]);
+    assert_eq!(results[0].command_tag, "CREATE EXTENSION");
+    assert_eq!(
+        results[1].rows,
+        vec![vec![ScalarValue::Text("openferric".to_string())]]
+    );
+}
+
 // === CREATE FUNCTION tests ===
 
 #[test]
@@ -4775,6 +4788,15 @@ fn evaluates_sha256_function() {
 #[test]
 fn evaluates_openferric_bs_price_function() {
     let result = run("SELECT bs_price(100,105,0.25,0.20,0.05,'call')");
+    match &result.rows[0][0] {
+        ScalarValue::Float(v) => assert!(v.is_finite() && *v > 0.0),
+        other => panic!("expected Float, got {:?}", other),
+    }
+}
+
+#[test]
+fn evaluates_openferric_european_call_wrapper_function() {
+    let result = run("SELECT openferric.european_call(100, 105, 0.25, 0.20, 0.05)");
     match &result.rows[0][0] {
         ScalarValue::Float(v) => assert!(v.is_finite() && *v > 0.0),
         other => panic!("expected Float, got {:?}", other),
