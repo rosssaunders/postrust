@@ -17,7 +17,8 @@ use crate::plpgsql::types::{
     PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtClose, PlPgSqlStmtDynexecute,
     PlPgSqlStmtExecSql, PlPgSqlStmtExit, PlPgSqlStmtFetch, PlPgSqlStmtForc, PlPgSqlStmtFori,
     PlPgSqlStmtFors, PlPgSqlStmtIf, PlPgSqlStmtLoop, PlPgSqlStmtOpen, PlPgSqlStmtPerform,
-    PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtReturnNext, PlPgSqlStmtWhile, PlPgSqlValue,
+    PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtReturnNext, PlPgSqlStmtWhile, PlPgSqlTypeType,
+    PlPgSqlValue,
 };
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
@@ -33,6 +34,7 @@ enum ExecResultCode {
 
 #[derive(Debug, Clone, Default)]
 struct CursorState {
+    columns: Vec<String>,
     rows: Vec<Vec<ScalarValue>>,
     position: usize,
 }
@@ -48,6 +50,8 @@ pub struct PLpgSQLExecState {
     pub ret_is_null: bool,
     pub exitlabel: Option<String>,
     datum_name_index: HashMap<String, i32>,
+    runtime_values: HashMap<i32, ScalarValue>,
+    record_field_names: HashMap<i32, Vec<String>>,
     retset_values: Vec<ScalarValue>,
     cursor_states: HashMap<i32, CursorState>,
 }
@@ -72,6 +76,8 @@ impl PLpgSQLExecState {
             ret_is_null: true,
             exitlabel: None,
             datum_name_index,
+            runtime_values: HashMap::new(),
+            record_field_names: HashMap::new(),
             retset_values: Vec::new(),
             cursor_states: HashMap::new(),
         }
@@ -90,7 +96,40 @@ impl PLpgSQLExecState {
         self.datum_value(dno).ok()
     }
 
+    fn record_field_value_by_name(&self, record: &str, field: &str) -> Result<ScalarValue, String> {
+        let dno = *self
+            .datum_name_index
+            .get(&record.to_ascii_lowercase())
+            .ok_or_else(|| format!("unknown variable \"{record}\""))?;
+        self.record_field_value(dno, record, field)
+    }
+
+    fn record_field_value(&self, dno: i32, record: &str, field: &str) -> Result<ScalarValue, String> {
+        let Some(field_names) = self.record_field_names.get(&dno) else {
+            return Err(format!(
+                "record \"{record}\" is not assigned yet and has no field \"{field}\""
+            ));
+        };
+
+        let pos = field_names
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(field))
+            .ok_or_else(|| format!("record \"{record}\" has no field \"{field}\""))?;
+
+        match self.runtime_values.get(&dno) {
+            Some(ScalarValue::Record(values)) => Ok(values.get(pos).cloned().unwrap_or(ScalarValue::Null)),
+            Some(ScalarValue::Null) | None => Err(format!(
+                "record \"{record}\" is null and has no field \"{field}\""
+            )),
+            _ => Err(format!("variable \"{record}\" is not a record")),
+        }
+    }
+
     fn datum_value(&self, dno: i32) -> Result<ScalarValue, String> {
+        if let Some(value) = self.runtime_values.get(&dno) {
+            return Ok(value.clone());
+        }
+
         let idx = Self::datum_index(dno)?;
         let datum = self
             .datums
@@ -304,7 +343,11 @@ fn exec_stmt_assign(
         return Err("assignment target variable is unresolved".to_string());
     }
     let value = exec_eval_expr(estate, &stmt.expr)?;
-    exec_assign_value_dno(estate, stmt.varno, value)?;
+    if let Some(fieldname) = &stmt.fieldname {
+        exec_assign_record_field_dno(estate, stmt.varno, fieldname, value)?;
+    } else {
+        exec_assign_value_dno(estate, stmt.varno, value)?;
+    }
     Ok(ExecResultCode::Ok)
 }
 
@@ -460,16 +503,14 @@ fn exec_stmt_fors(
     let mut found = false;
 
     for row in &result.rows {
-        if row.len() != 1 {
-            return Err(format!(
-                "FOR query returned {} columns, but loop variable \"{}\" expects exactly 1",
-                row.len(),
-                loop_var.refname
-            ));
-        }
-
         found = true;
-        exec_assign_value_dno(estate, loop_var.dno, row[0].clone())?;
+        assign_single_row_to_variable(
+            estate,
+            loop_var.dno,
+            &loop_var.refname,
+            row,
+            Some(result.columns.as_slice()),
+        )?;
 
         let rc = exec_stmts(estate, &stmt.body)?;
         match process_loop_rc(estate, stmt.label.as_deref(), rc) {
@@ -519,7 +560,18 @@ fn exec_stmt_forc(
         };
 
         found = true;
-        assign_single_row_to_variable(estate, loop_var.dno, &loop_var.refname, &row)?;
+        let columns = estate
+            .cursor_states
+            .get(&stmt.curvar)
+            .map(|state| state.columns.clone())
+            .unwrap_or_default();
+        assign_single_row_to_variable(
+            estate,
+            loop_var.dno,
+            &loop_var.refname,
+            &row,
+            Some(columns.as_slice()),
+        )?;
 
         let rc = exec_stmts(estate, &stmt.body)?;
         match process_loop_rc(estate, stmt.label.as_deref(), rc) {
@@ -732,6 +784,7 @@ fn exec_stmt_open(
     estate.cursor_states.insert(
         stmt.curvar,
         CursorState {
+            columns: result.columns,
             rows: result.rows,
             position: 0,
         },
@@ -760,8 +813,15 @@ fn exec_stmt_fetch(
     }
 
     let row = cursor_state.rows[cursor_state.position].clone();
+    let columns = cursor_state.columns.clone();
     cursor_state.position += 1;
-    assign_single_row_to_variable(estate, target.dno, &target.refname, &row)?;
+    assign_single_row_to_variable(
+        estate,
+        target.dno,
+        &target.refname,
+        &row,
+        Some(columns.as_slice()),
+    )?;
     set_found(estate, true)?;
     Ok(ExecResultCode::Ok)
 }
@@ -771,14 +831,28 @@ fn assign_single_row_to_variable(
     dno: i32,
     refname: &str,
     row: &[ScalarValue],
+    columns: Option<&[String]>,
 ) -> Result<(), String> {
-    if row.len() != 1 {
-        return Err(format!(
-            "target variable \"{refname}\" expects exactly 1 column but cursor returned {}",
-            row.len()
-        ));
+    if datum_is_record_variable(estate, dno)? {
+        let field_names: Vec<String> = if let Some(columns) = columns {
+            if columns.len() == row.len() {
+                columns.iter().map(|name| name.to_string()).collect()
+            } else {
+                (0..row.len()).map(|idx| format!("f{}", idx + 1)).collect()
+            }
+        } else {
+            (0..row.len()).map(|idx| format!("f{}", idx + 1)).collect()
+        };
+        assign_record_row_dno(estate, dno, row, &field_names)
+    } else {
+        if row.len() != 1 {
+            return Err(format!(
+                "target variable \"{refname}\" expects exactly 1 column but cursor returned {}",
+                row.len()
+            ));
+        }
+        exec_assign_value_dno(estate, dno, row[0].clone())
     }
-    exec_assign_value_dno(estate, dno, row[0].clone())
 }
 
 /// CLOSE cursor execution corresponding to `exec_stmt_close` (`pl_exec.c`).
@@ -933,6 +1007,73 @@ fn exec_eval_boolean(
     Ok((parsed, false))
 }
 
+fn datum_is_record_variable(estate: &PLpgSQLExecState, dno: i32) -> Result<bool, String> {
+    let idx = PLpgSQLExecState::datum_index(dno)?;
+    let datum = estate
+        .datums
+        .get(idx)
+        .ok_or_else(|| format!("datum {dno} is out of range"))?;
+
+    let is_record = match datum {
+        PlPgSqlDatum::Var(var) => var
+            .datatype
+            .as_ref()
+            .is_some_and(|datatype| {
+                datatype.ttype == PlPgSqlTypeType::Rec
+                    || datatype.typname.eq_ignore_ascii_case("record")
+            }),
+        _ => false,
+    };
+    Ok(is_record)
+}
+
+fn assign_record_row_dno(
+    estate: &mut PLpgSQLExecState,
+    dno: i32,
+    row: &[ScalarValue],
+    field_names: &[String],
+) -> Result<(), String> {
+    exec_assign_value_dno(estate, dno, ScalarValue::Record(row.to_vec()))?;
+    estate.record_field_names.insert(dno, field_names.to_vec());
+    Ok(())
+}
+
+fn exec_assign_record_field_dno(
+    estate: &mut PLpgSQLExecState,
+    dno: i32,
+    fieldname: &str,
+    value: ScalarValue,
+) -> Result<(), String> {
+    if !datum_is_record_variable(estate, dno)? {
+        return Err(format!(
+            "cannot assign to field \"{fieldname}\" because target is not a record"
+        ));
+    }
+
+    let mut fields = estate.record_field_names.get(&dno).cloned().unwrap_or_default();
+    let mut values = match estate.runtime_values.get(&dno) {
+        Some(ScalarValue::Record(values)) => values.clone(),
+        _ => Vec::new(),
+    };
+
+    if let Some(pos) = fields
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(fieldname))
+    {
+        if pos >= values.len() {
+            values.resize(pos + 1, ScalarValue::Null);
+        }
+        values[pos] = value;
+    } else {
+        fields.push(fieldname.to_string());
+        values.push(value);
+    }
+
+    exec_assign_value_dno(estate, dno, ScalarValue::Record(values))?;
+    estate.record_field_names.insert(dno, fields);
+    Ok(())
+}
+
 /// Assignment helper equivalent to `exec_assign_value` (`pl_exec.c:5066-5252`) for
 /// scalar variable datums.
 fn exec_assign_value_dno(
@@ -949,7 +1090,18 @@ fn exec_assign_value_dno(
     match datum {
         PlPgSqlDatum::Var(var) => {
             if let Some(datatype) = &var.datatype {
-                value = coerce_scalar_to_type(value, datatype.typname.as_str())?;
+                let is_record = datatype.ttype == PlPgSqlTypeType::Rec
+                    || datatype.typname.eq_ignore_ascii_case("record");
+                if is_record {
+                    if !matches!(value, ScalarValue::Null | ScalarValue::Record(_)) {
+                        return Err(format!(
+                            "cannot assign non-record value to record variable \"{}\"",
+                            var.variable.refname
+                        ));
+                    }
+                } else {
+                    value = coerce_scalar_to_type(value, datatype.typname.as_str())?;
+                }
             }
 
             if matches!(value, ScalarValue::Null) && var.variable.notnull {
@@ -961,6 +1113,10 @@ fn exec_assign_value_dno(
 
             var.isnull = matches!(value, ScalarValue::Null);
             var.value = Some(scalar_to_plpgsql_value(&value));
+            if matches!(value, ScalarValue::Null) {
+                estate.record_field_names.remove(&dno);
+            }
+            estate.runtime_values.insert(dno, value);
             Ok(())
         }
         _ => Err(format!(
@@ -1184,6 +1340,10 @@ fn try_eval_direct_expression(estate: &PLpgSQLExecState, expr: &str) -> Option<S
         return Some(value);
     }
 
+    if let Some((record, field)) = parse_simple_dotted_identifier(expr) {
+        return estate.record_field_value_by_name(record, field).ok();
+    }
+
     if is_simple_identifier(expr) {
         return estate.datum_value_by_name(expr);
     }
@@ -1318,24 +1478,38 @@ fn substitute_named_variables(sql: &str, estate: &PLpgSQLExecState) -> Result<St
     let tokens = tokenize(sql).map_err(|e| e.message)?;
     let mut output = String::with_capacity(sql.len());
     let mut cursor = 0usize;
+    let mut idx = 0usize;
 
-    for token in &tokens {
+    while idx < tokens.len() {
+        let token = &tokens[idx];
         if matches!(token.kind, PlPgSqlTokenKind::Eof) {
             break;
         }
 
-        let replacement = match &token.kind {
-            PlPgSqlTokenKind::Identifier(name) => estate
-                .datum_value_by_name(name)
-                .map(|value| scalar_to_sql_literal(&value)),
-            _ => None,
-        };
-
-        if let Some(replacement) = replacement {
+        if let PlPgSqlTokenKind::Identifier(record_name) = &token.kind
+            && matches!(
+                tokens.get(idx + 1).map(|t| &t.kind),
+                Some(PlPgSqlTokenKind::Dot)
+            )
+            && let Some(field_token) = tokens.get(idx + 2)
+            && let PlPgSqlTokenKind::Identifier(field_name) = &field_token.kind
+        {
+            let value = estate.record_field_value_by_name(record_name, field_name)?;
             output.push_str(&sql[cursor..token.span.start]);
-            output.push_str(&replacement);
+            output.push_str(&scalar_to_sql_literal(&value));
+            cursor = field_token.span.end;
+            idx += 3;
+            continue;
+        }
+
+        if let PlPgSqlTokenKind::Identifier(name) = &token.kind
+            && let Some(value) = estate.datum_value_by_name(name)
+        {
+            output.push_str(&sql[cursor..token.span.start]);
+            output.push_str(&scalar_to_sql_literal(&value));
             cursor = token.span.end;
         }
+        idx += 1;
     }
 
     output.push_str(&sql[cursor..]);
@@ -1394,6 +1568,21 @@ fn is_simple_identifier(text: &str) -> bool {
         return false;
     }
     chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn parse_simple_dotted_identifier(text: &str) -> Option<(&str, &str)> {
+    let trimmed = text.trim();
+    let dot = trimmed.find('.')?;
+    if trimmed[dot + 1..].contains('.') {
+        return None;
+    }
+    let (lhs, rhs_with_dot) = trimmed.split_at(dot);
+    let rhs = &rhs_with_dot[1..];
+    if is_simple_identifier(lhs) && is_simple_identifier(rhs) {
+        Some((lhs, rhs))
+    } else {
+        None
+    }
 }
 
 fn scalar_to_sql_literal(value: &ScalarValue) -> String {
@@ -1564,6 +1753,7 @@ END;
                     lineno: 1,
                     stmtid: 3,
                     varno: 0,
+                    fieldname: None,
                     expr: expr("x + 1"),
                 })],
             }),
@@ -1609,6 +1799,7 @@ END;
                     lineno: 1,
                     stmtid: 3,
                     varno: 1,
+                    fieldname: None,
                     expr: expr("sum + i"),
                 })],
             }),
@@ -1656,6 +1847,7 @@ END;
                 lineno: 1,
                 stmtid: 3,
                 varno: 0,
+                fieldname: None,
                 expr: expr("x + y"),
             })],
             n_initvars: 1,
@@ -1748,6 +1940,43 @@ END;
     }
 
     #[test]
+    fn executes_record_field_assignment_and_read() {
+        let src = "
+DECLARE
+  rec record;
+BEGIN
+  rec.a := 41;
+  rec.b := 1;
+  RETURN rec.a + rec.b;
+END;
+";
+        let func = compile_function_body(src).expect("compile should succeed");
+        let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
+        assert_eq!(result, Some(ScalarValue::Int(42)));
+    }
+
+    #[test]
+    fn executes_for_cursor_loop_with_record_target_and_dot_notation() {
+        let src = "
+DECLARE
+  c refcursor;
+  rec record;
+  sum integer := 0;
+BEGIN
+  OPEN c FOR SELECT 2 AS v UNION ALL SELECT 3 AS v;
+  FOR rec IN c LOOP
+    sum := sum + rec.v;
+  END LOOP;
+  CLOSE c;
+  RETURN sum;
+END;
+";
+        let func = compile_function_body(src).expect("compile should succeed");
+        let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
+        assert_eq!(result, Some(ScalarValue::Int(5)));
+    }
+
+    #[test]
     fn loop_statement_handles_exit_label() {
         let datums = vec![mk_var(0, "x", "integer", Some("0"))];
         let body = vec![
@@ -1762,6 +1991,7 @@ END;
                         lineno: 1,
                         stmtid: 3,
                         varno: 0,
+                        fieldname: None,
                         expr: expr("x + 1"),
                     }),
                     PlPgSqlStmt::Exit(crate::plpgsql::types::PlPgSqlStmtExit {

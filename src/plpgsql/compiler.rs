@@ -598,10 +598,20 @@ impl<'a> BodyParser<'a> {
             return self.parse_null_statement();
         }
 
-        if let PlPgSqlTokenKind::Identifier(name) = self.current_kind().clone()
-            && matches!(self.peek_kind(1), Some(PlPgSqlTokenKind::Assign))
-        {
-            return self.parse_assignment_statement(name);
+        if let PlPgSqlTokenKind::Identifier(name) = self.current_kind().clone() {
+            if matches!(self.peek_kind(1), Some(PlPgSqlTokenKind::Assign)) {
+                return self.parse_assignment_statement(name, None);
+            }
+            if matches!(self.peek_kind(1), Some(PlPgSqlTokenKind::Dot))
+                && matches!(self.peek_kind(2), Some(PlPgSqlTokenKind::Identifier(_)))
+                && matches!(self.peek_kind(3), Some(PlPgSqlTokenKind::Assign))
+            {
+                let Some(PlPgSqlTokenKind::Identifier(fieldname)) = self.peek_kind(2).cloned()
+                else {
+                    return Err(self.error_at_current("expected record field name"));
+                };
+                return self.parse_assignment_statement(name, Some(fieldname));
+            }
         }
 
         self.parse_execsql_statement()
@@ -617,9 +627,17 @@ impl<'a> BodyParser<'a> {
     fn parse_assignment_statement(
         &mut self,
         name: String,
+        fieldname: Option<String>,
     ) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
         let token = self.current_token().clone();
         self.advance();
+        if fieldname.is_some() {
+            if !matches!(self.current_kind(), PlPgSqlTokenKind::Dot) {
+                return Err(self.error_at_current("expected '.' in record field assignment"));
+            }
+            self.advance();
+            let _ = self.expect_identifier("expected record field name in assignment target")?;
+        }
         self.expect_assign()?;
 
         let start_idx = self.idx;
@@ -638,6 +656,7 @@ impl<'a> BodyParser<'a> {
             lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
             stmtid: self.alloc_stmtid(),
             varno,
+            fieldname,
             expr: self.make_expr(expr_text),
         }))
     }
@@ -2275,5 +2294,22 @@ END;
         assert!(matches!(action.body[0], PlPgSqlStmt::Open(_)));
         assert!(matches!(action.body[1], PlPgSqlStmt::Fetch(_)));
         assert!(matches!(action.body[2], PlPgSqlStmt::Close(_)));
+    }
+
+    #[test]
+    fn compiles_record_field_assignment() {
+        let src = "
+DECLARE
+  rec record;
+BEGIN
+  rec.a := 42;
+END;
+";
+        let compiled = compile_function_body(src).expect("compile should succeed");
+        let action = compiled.action.expect("action should be present");
+        let PlPgSqlStmt::Assign(assign) = &action.body[0] else {
+            panic!("first statement should be assignment");
+        };
+        assert_eq!(assign.fieldname.as_deref(), Some("a"));
     }
 }

@@ -322,6 +322,7 @@ pub struct PlPgSqlStmtAssign {
     pub lineno: i32,
     pub stmtid: u32,
     pub varno: i32,
+    pub fieldname: Option<String>,
     pub expr: PlPgSqlExpr,
 }
 
