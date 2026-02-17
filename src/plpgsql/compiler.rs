@@ -19,9 +19,10 @@ use crate::plpgsql::types::{
     PlPgSqlExceptionBlock, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlIfElsif, PlPgSqlPromiseType,
     PlPgSqlRaiseOption, PlPgSqlRaiseOptionType, PlPgSqlResolveOption, PlPgSqlStmt,
     PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtCall, PlPgSqlStmtCommit, PlPgSqlStmtDynexecute,
-    PlPgSqlStmtExecSql, PlPgSqlStmtFori, PlPgSqlStmtFors, PlPgSqlStmtGetdiag, PlPgSqlStmtIf,
-    PlPgSqlStmtPerform, PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtRollback, PlPgSqlStmtType,
-    PlPgSqlTrigtype, PlPgSqlType, PlPgSqlTypeType, PlPgSqlValue, PlPgSqlVar, PlPgSqlVariable,
+    PlPgSqlStmtExecSql, PlPgSqlStmtFetch, PlPgSqlStmtForc, PlPgSqlStmtFori, PlPgSqlStmtFors,
+    PlPgSqlStmtGetdiag, PlPgSqlStmtIf, PlPgSqlStmtOpen, PlPgSqlStmtPerform, PlPgSqlStmtRaise,
+    PlPgSqlStmtReturn, PlPgSqlStmtRollback, PlPgSqlStmtType, PlPgSqlTrigtype, PlPgSqlType,
+    PlPgSqlTypeType, PlPgSqlValue, PlPgSqlVar, PlPgSqlVariable, PlPgSqlStmtClose,
 };
 
 /// Compiler error for PL/pgSQL parse/compile.
@@ -569,6 +570,15 @@ impl<'a> BodyParser<'a> {
         if self.is_keyword(PlPgSqlKeyword::Execute) {
             return self.parse_execute_statement();
         }
+        if self.is_keyword(PlPgSqlKeyword::Open) {
+            return self.parse_open_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Fetch) {
+            return self.parse_fetch_statement();
+        }
+        if self.is_keyword(PlPgSqlKeyword::Close) {
+            return self.parse_close_statement();
+        }
         if self.is_keyword(PlPgSqlKeyword::Perform) {
             return self.parse_perform_statement();
         }
@@ -696,6 +706,10 @@ impl<'a> BodyParser<'a> {
                 var: PlPgSqlVariable,
                 query: String,
             },
+            Cursor {
+                var: PlPgSqlVariable,
+                curvar: i32,
+            },
         }
 
         let token = self.current_token().clone();
@@ -785,9 +799,16 @@ impl<'a> BodyParser<'a> {
                 return Err(self.error_at_current("expected query expression in FOR statement"));
             }
             let loop_var = self.lookup_or_create_loop_var(&var_name, token.span.line, None)?;
-            ForHeader::Query {
-                var: loop_var.variable,
-                query,
+            if let Some(curvar) = self.cursor_varno_for_header(header_start_idx, loop_idx) {
+                ForHeader::Cursor {
+                    var: loop_var.variable,
+                    curvar,
+                }
+            } else {
+                ForHeader::Query {
+                    var: loop_var.variable,
+                    query,
+                }
             }
         };
 
@@ -825,6 +846,16 @@ impl<'a> BodyParser<'a> {
                 var: Some(var),
                 body,
                 query: self.make_expr(query),
+            })),
+            ForHeader::Cursor { var, curvar } => Ok(PlPgSqlStmt::Forc(PlPgSqlStmtForc {
+                cmd_type: PlPgSqlStmtType::Forc,
+                lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+                stmtid: self.alloc_stmtid(),
+                label: None,
+                var: Some(var),
+                body,
+                curvar,
+                argquery: None,
             })),
         }
     }
@@ -1022,6 +1053,88 @@ impl<'a> BodyParser<'a> {
             strict,
             target,
             params: Vec::new(),
+        }))
+    }
+
+    fn parse_open_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Open, "expected OPEN")?;
+        let cursor_name = self.expect_identifier("expected cursor variable after OPEN")?;
+        let curvar = self.lookup_cursor_varno(&cursor_name)?;
+        if !self.consume_keyword(PlPgSqlKeyword::For) {
+            self.expect_identifier_word("for", "expected FOR in OPEN statement")?;
+        }
+
+        let (query, dynquery) = if self.is_keyword(PlPgSqlKeyword::Execute) {
+            self.advance();
+            let (dynquery_text, end_idx) =
+                extract_sql_expression(&self.tokens, self.source, self.idx)?;
+            self.idx = end_idx;
+            (None, Some(self.make_expr(dynquery_text)))
+        } else {
+            let (query_text, end_idx) = extract_sql_expression(&self.tokens, self.source, self.idx)?;
+            self.idx = end_idx;
+            (Some(self.make_expr(query_text)), None)
+        };
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::Open(PlPgSqlStmtOpen {
+            cmd_type: PlPgSqlStmtType::Open,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            curvar,
+            cursor_options: 0,
+            argquery: None,
+            query,
+            dynquery,
+            params: Vec::new(),
+        }))
+    }
+
+    fn parse_fetch_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Fetch, "expected FETCH")?;
+        let cursor_name = self.expect_identifier("expected cursor variable after FETCH")?;
+        let curvar = self.lookup_cursor_varno(&cursor_name)?;
+        self.expect_identifier_word("into", "expected INTO in FETCH statement")?;
+        let target_name = self.expect_identifier("expected target variable after INTO")?;
+        let target = self.variable_by_name(target_name.as_str());
+        let Some(target) = target else {
+            return Err(PlPgSqlCompileError {
+                message: format!("unknown variable \"{target_name}\" in FETCH INTO"),
+                position: self.previous_token().span.start,
+                line: self.previous_token().span.line,
+                column: self.previous_token().span.column,
+            });
+        };
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::Fetch(PlPgSqlStmtFetch {
+            cmd_type: PlPgSqlStmtType::Fetch,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            target: Some(target),
+            curvar,
+            direction: None,
+            how_many: 1,
+            expr: None,
+            is_move: false,
+            returns_multiple_rows: false,
+        }))
+    }
+
+    fn parse_close_statement(&mut self) -> Result<PlPgSqlStmt, PlPgSqlCompileError> {
+        let token = self.current_token().clone();
+        self.expect_keyword(PlPgSqlKeyword::Close, "expected CLOSE")?;
+        let cursor_name = self.expect_identifier("expected cursor variable after CLOSE")?;
+        let curvar = self.lookup_cursor_varno(&cursor_name)?;
+        self.expect_semicolon()?;
+
+        Ok(PlPgSqlStmt::Close(PlPgSqlStmtClose {
+            cmd_type: PlPgSqlStmtType::Close,
+            lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
+            stmtid: self.alloc_stmtid(),
+            curvar,
         }))
     }
 
@@ -1293,6 +1406,69 @@ impl<'a> BodyParser<'a> {
     fn variable_by_name(&self, name: &str) -> Option<PlPgSqlVariable> {
         let dno = *self.variables_by_name.get(&name.to_ascii_lowercase())?;
         self.variable_by_dno(dno)
+    }
+
+    fn lookup_cursor_varno(&self, name: &str) -> Result<i32, PlPgSqlCompileError> {
+        let Some(dno) = self.variables_by_name.get(&name.to_ascii_lowercase()).copied() else {
+            return Err(PlPgSqlCompileError {
+                message: format!("unknown cursor variable \"{name}\""),
+                position: self.current_token().span.start,
+                line: self.current_token().span.line,
+                column: self.current_token().span.column,
+            });
+        };
+
+        let idx = usize::try_from(dno).unwrap_or(usize::MAX);
+        let Some(PlPgSqlDatum::Var(var)) = self.datums.get(idx) else {
+            return Err(PlPgSqlCompileError {
+                message: format!("cursor variable \"{name}\" is unresolved"),
+                position: self.current_token().span.start,
+                line: self.current_token().span.line,
+                column: self.current_token().span.column,
+            });
+        };
+
+        let type_name = var
+            .datatype
+            .as_ref()
+            .map(|t| t.typname.to_ascii_lowercase())
+            .unwrap_or_default();
+        if type_name != "refcursor" && type_name != "cursor" {
+            return Err(PlPgSqlCompileError {
+                message: format!("variable \"{name}\" must be of type cursor or refcursor"),
+                position: self.current_token().span.start,
+                line: self.current_token().span.line,
+                column: self.current_token().span.column,
+            });
+        }
+
+        Ok(dno)
+    }
+
+    fn cursor_varno_for_header(&self, start_idx: usize, end_idx: usize) -> Option<i32> {
+        if end_idx != start_idx + 1 {
+            return None;
+        }
+
+        let PlPgSqlTokenKind::Identifier(name) = &self.tokens[start_idx].kind else {
+            return None;
+        };
+
+        let dno = *self.variables_by_name.get(&name.to_ascii_lowercase())?;
+        let idx = usize::try_from(dno).ok()?;
+        let PlPgSqlDatum::Var(var) = self.datums.get(idx)? else {
+            return None;
+        };
+        let type_name = var
+            .datatype
+            .as_ref()
+            .map(|t| t.typname.to_ascii_lowercase())
+            .unwrap_or_default();
+        if type_name == "refcursor" || type_name == "cursor" {
+            Some(dno)
+        } else {
+            None
+        }
     }
 
     fn lookup_or_create_loop_var(
@@ -2079,5 +2255,25 @@ END;
             .expect("top level block should have exception handlers");
         assert_eq!(exception_block.exc_list.len(), 1);
         assert_eq!(exception_block.exc_list[0].conditions.len(), 1);
+    }
+
+    #[test]
+    fn compiles_open_fetch_close_cursor_statements() {
+        let src = "
+DECLARE
+  c refcursor;
+  x integer;
+BEGIN
+  OPEN c FOR SELECT 1;
+  FETCH c INTO x;
+  CLOSE c;
+END;
+";
+        let compiled = compile_function_body(src).expect("compile should succeed");
+        let action = compiled.action.expect("action should be present");
+        assert_eq!(action.body.len(), 3);
+        assert!(matches!(action.body[0], PlPgSqlStmt::Open(_)));
+        assert!(matches!(action.body[1], PlPgSqlStmt::Fetch(_)));
+        assert!(matches!(action.body[2], PlPgSqlStmt::Close(_)));
     }
 }

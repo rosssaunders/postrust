@@ -14,10 +14,10 @@ use crate::parser::sql_parser::parse_statement;
 use crate::plpgsql::scanner::{PlPgSqlTokenKind, tokenize};
 use crate::plpgsql::types::{
     PLPGSQL_OTHERS, PlPgSqlCondition, PlPgSqlDatum, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlStmt,
-    PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtDynexecute, PlPgSqlStmtExecSql,
-    PlPgSqlStmtExit, PlPgSqlStmtFori, PlPgSqlStmtFors, PlPgSqlStmtIf, PlPgSqlStmtLoop,
-    PlPgSqlStmtPerform, PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtReturnNext,
-    PlPgSqlStmtWhile, PlPgSqlValue,
+    PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtClose, PlPgSqlStmtDynexecute,
+    PlPgSqlStmtExecSql, PlPgSqlStmtExit, PlPgSqlStmtFetch, PlPgSqlStmtForc, PlPgSqlStmtFori,
+    PlPgSqlStmtFors, PlPgSqlStmtIf, PlPgSqlStmtLoop, PlPgSqlStmtOpen, PlPgSqlStmtPerform,
+    PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtReturnNext, PlPgSqlStmtWhile, PlPgSqlValue,
 };
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
@@ -29,6 +29,12 @@ enum ExecResultCode {
     Return,
     Exit,
     Continue,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CursorState {
+    rows: Vec<Vec<ScalarValue>>,
+    position: usize,
 }
 
 /// PL/pgSQL execution state, mirroring key runtime fields in PostgreSQL's
@@ -43,6 +49,7 @@ pub struct PLpgSQLExecState {
     pub exitlabel: Option<String>,
     datum_name_index: HashMap<String, i32>,
     retset_values: Vec<ScalarValue>,
+    cursor_states: HashMap<i32, CursorState>,
 }
 
 impl PLpgSQLExecState {
@@ -66,6 +73,7 @@ impl PLpgSQLExecState {
             exitlabel: None,
             datum_name_index,
             retset_values: Vec::new(),
+            cursor_states: HashMap::new(),
         }
     }
 
@@ -262,12 +270,16 @@ fn exec_stmts(
             PlPgSqlStmt::While(stmt) => exec_stmt_while(estate, stmt)?,
             PlPgSqlStmt::Fori(stmt) => exec_stmt_fori(estate, stmt)?,
             PlPgSqlStmt::Fors(stmt) => exec_stmt_fors(estate, stmt)?,
+            PlPgSqlStmt::Forc(stmt) => exec_stmt_forc(estate, stmt)?,
             PlPgSqlStmt::Exit(stmt) => exec_stmt_exit(estate, stmt)?,
             PlPgSqlStmt::Return(stmt) => exec_stmt_return(estate, stmt)?,
             PlPgSqlStmt::ReturnNext(stmt) => exec_stmt_return_next(estate, stmt)?,
             PlPgSqlStmt::Raise(stmt) => exec_stmt_raise(estate, stmt)?,
             PlPgSqlStmt::ExecSql(stmt) => exec_stmt_execsql(estate, stmt)?,
             PlPgSqlStmt::DynExecute(stmt) => exec_stmt_dynexecute(estate, stmt)?,
+            PlPgSqlStmt::Open(stmt) => exec_stmt_open(estate, stmt)?,
+            PlPgSqlStmt::Fetch(stmt) => exec_stmt_fetch(estate, stmt)?,
+            PlPgSqlStmt::Close(stmt) => exec_stmt_close(estate, stmt)?,
             PlPgSqlStmt::Perform(stmt) => exec_stmt_perform(estate, stmt)?,
             _ => {
                 return Err(format!(
@@ -477,6 +489,56 @@ fn exec_stmt_fors(
     Ok(ExecResultCode::Ok)
 }
 
+/// Cursor FOR-loop execution corresponding to `exec_stmt_forc` (`pl_exec.c`) with
+/// simplified row assignment into a single scalar loop target.
+fn exec_stmt_forc(
+    estate: &mut PLpgSQLExecState,
+    stmt: &PlPgSqlStmtForc,
+) -> Result<ExecResultCode, String> {
+    let loop_var = stmt
+        .var
+        .as_ref()
+        .ok_or_else(|| "FOR cursor variable is missing".to_string())?;
+    if !estate.cursor_states.contains_key(&stmt.curvar) {
+        return Err("cursor is not open".to_string());
+    }
+
+    let mut found = false;
+    loop {
+        let row = {
+            let cursor_state = estate
+                .cursor_states
+                .get_mut(&stmt.curvar)
+                .ok_or_else(|| "cursor is not open".to_string())?;
+            if cursor_state.position >= cursor_state.rows.len() {
+                break;
+            }
+            let row = cursor_state.rows[cursor_state.position].clone();
+            cursor_state.position += 1;
+            row
+        };
+
+        found = true;
+        assign_single_row_to_variable(estate, loop_var.dno, &loop_var.refname, &row)?;
+
+        let rc = exec_stmts(estate, &stmt.body)?;
+        match process_loop_rc(estate, stmt.label.as_deref(), rc) {
+            LoopControl::Continue => {}
+            LoopControl::BreakWith(rc) => {
+                set_found(estate, found)?;
+                return Ok(rc);
+            }
+            LoopControl::Propagate(rc) => {
+                set_found(estate, found)?;
+                return Ok(rc);
+            }
+        }
+    }
+
+    set_found(estate, found)?;
+    Ok(ExecResultCode::Ok)
+}
+
 /// EXIT/CONTINUE execution corresponding to `exec_stmt_exit`
 /// (`pl_exec.c:3163-3186`).
 fn exec_stmt_exit(
@@ -648,6 +710,86 @@ fn exec_stmt_dynexecute(
         set_found(estate, found)?;
     }
 
+    Ok(ExecResultCode::Ok)
+}
+
+/// OPEN cursor execution corresponding to `exec_stmt_open` (`pl_exec.c`) with
+/// static query and dynamic EXECUTE query support.
+fn exec_stmt_open(
+    estate: &mut PLpgSQLExecState,
+    stmt: &PlPgSqlStmtOpen,
+) -> Result<ExecResultCode, String> {
+    let result = if let Some(query) = &stmt.query {
+        execute_sql_statement(estate, &query.query)?
+    } else if let Some(dynquery) = &stmt.dynquery {
+        let query_value = exec_eval_expr(estate, dynquery)?;
+        let sql = scalar_to_dynamic_sql(query_value)?;
+        execute_sql_statement(estate, &sql)?
+    } else {
+        return Err("OPEN requires either FOR query or FOR EXECUTE".to_string());
+    };
+
+    estate.cursor_states.insert(
+        stmt.curvar,
+        CursorState {
+            rows: result.rows,
+            position: 0,
+        },
+    );
+    Ok(ExecResultCode::Ok)
+}
+
+/// FETCH cursor execution corresponding to `exec_stmt_fetch` (`pl_exec.c`) for
+/// single-target assignments.
+fn exec_stmt_fetch(
+    estate: &mut PLpgSQLExecState,
+    stmt: &PlPgSqlStmtFetch,
+) -> Result<ExecResultCode, String> {
+    let target = stmt
+        .target
+        .as_ref()
+        .ok_or_else(|| "FETCH target variable is missing".to_string())?;
+    let Some(cursor_state) = estate.cursor_states.get_mut(&stmt.curvar) else {
+        return Err("cursor is not open".to_string());
+    };
+
+    if cursor_state.position >= cursor_state.rows.len() {
+        exec_assign_value_dno(estate, target.dno, ScalarValue::Null)?;
+        set_found(estate, false)?;
+        return Ok(ExecResultCode::Ok);
+    }
+
+    let row = cursor_state.rows[cursor_state.position].clone();
+    cursor_state.position += 1;
+    assign_single_row_to_variable(estate, target.dno, &target.refname, &row)?;
+    set_found(estate, true)?;
+    Ok(ExecResultCode::Ok)
+}
+
+fn assign_single_row_to_variable(
+    estate: &mut PLpgSQLExecState,
+    dno: i32,
+    refname: &str,
+    row: &[ScalarValue],
+) -> Result<(), String> {
+    if row.len() != 1 {
+        return Err(format!(
+            "target variable \"{refname}\" expects exactly 1 column but cursor returned {}",
+            row.len()
+        ));
+    }
+    exec_assign_value_dno(estate, dno, row[0].clone())
+}
+
+/// CLOSE cursor execution corresponding to `exec_stmt_close` (`pl_exec.c`).
+fn exec_stmt_close(
+    estate: &mut PLpgSQLExecState,
+    stmt: &PlPgSqlStmtClose,
+) -> Result<ExecResultCode, String> {
+    let removed = estate.cursor_states.remove(&stmt.curvar);
+    if removed.is_none() {
+        return Err("cursor is not open".to_string());
+    }
     Ok(ExecResultCode::Ok)
 }
 
@@ -1564,6 +1706,45 @@ END;
         let func = compile_function_body(src).expect("compile should succeed");
         let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
         assert_eq!(result, Some(ScalarValue::Bool(true)));
+    }
+
+    #[test]
+    fn executes_open_fetch_close_cursor() {
+        let src = "
+DECLARE
+  c refcursor;
+  x integer;
+BEGIN
+  OPEN c FOR SELECT 7;
+  FETCH c INTO x;
+  CLOSE c;
+  RETURN x;
+END;
+";
+        let func = compile_function_body(src).expect("compile should succeed");
+        let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
+        assert_eq!(result, Some(ScalarValue::Int(7)));
+    }
+
+    #[test]
+    fn executes_for_cursor_loop_with_scalar_target() {
+        let src = "
+DECLARE
+  c refcursor;
+  rec integer;
+  sum integer := 0;
+BEGIN
+  OPEN c FOR SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3;
+  FOR rec IN c LOOP
+    sum := sum + rec;
+  END LOOP;
+  CLOSE c;
+  RETURN sum;
+END;
+";
+        let func = compile_function_body(src).expect("compile should succeed");
+        let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
+        assert_eq!(result, Some(ScalarValue::Int(6)));
     }
 
     #[test]
