@@ -13,12 +13,12 @@ use crate::parser::ast::Statement;
 use crate::parser::sql_parser::parse_statement;
 use crate::plpgsql::scanner::{PlPgSqlTokenKind, tokenize};
 use crate::plpgsql::types::{
-    PLPGSQL_OTHERS, PlPgSqlCondition, PlPgSqlDatum, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlStmt,
-    PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtClose, PlPgSqlStmtDynexecute,
+    PLPGSQL_OTHERS, PlPgSqlCondition, PlPgSqlDatum, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlGetdiagKind,
+    PlPgSqlStmt, PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtClose, PlPgSqlStmtDynexecute,
     PlPgSqlStmtExecSql, PlPgSqlStmtExit, PlPgSqlStmtFetch, PlPgSqlStmtForc, PlPgSqlStmtFori,
-    PlPgSqlStmtFors, PlPgSqlStmtIf, PlPgSqlStmtLoop, PlPgSqlStmtOpen, PlPgSqlStmtPerform,
-    PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtReturnNext, PlPgSqlStmtWhile, PlPgSqlTypeType,
-    PlPgSqlValue,
+    PlPgSqlStmtFors, PlPgSqlStmtGetdiag, PlPgSqlStmtIf, PlPgSqlStmtLoop, PlPgSqlStmtOpen,
+    PlPgSqlStmtPerform, PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtReturnNext,
+    PlPgSqlStmtWhile, PlPgSqlTypeType, PlPgSqlValue,
 };
 use crate::storage::tuple::ScalarValue;
 use crate::tcop::engine::{QueryResult, execute_planned_query, plan_statement};
@@ -52,6 +52,7 @@ pub struct PLpgSQLExecState {
     datum_name_index: HashMap<String, i32>,
     runtime_values: HashMap<i32, ScalarValue>,
     record_field_names: HashMap<i32, Vec<String>>,
+    eval_processed: u64,
     retset_values: Vec<ScalarValue>,
     cursor_states: HashMap<i32, CursorState>,
 }
@@ -78,6 +79,7 @@ impl PLpgSQLExecState {
             datum_name_index,
             runtime_values: HashMap::new(),
             record_field_names: HashMap::new(),
+            eval_processed: 0,
             retset_values: Vec::new(),
             cursor_states: HashMap::new(),
         }
@@ -316,6 +318,7 @@ fn exec_stmts(
             PlPgSqlStmt::Raise(stmt) => exec_stmt_raise(estate, stmt)?,
             PlPgSqlStmt::ExecSql(stmt) => exec_stmt_execsql(estate, stmt)?,
             PlPgSqlStmt::DynExecute(stmt) => exec_stmt_dynexecute(estate, stmt)?,
+            PlPgSqlStmt::Getdiag(stmt) => exec_stmt_getdiag(estate, stmt)?,
             PlPgSqlStmt::Open(stmt) => exec_stmt_open(estate, stmt)?,
             PlPgSqlStmt::Fetch(stmt) => exec_stmt_fetch(estate, stmt)?,
             PlPgSqlStmt::Close(stmt) => exec_stmt_close(estate, stmt)?,
@@ -700,6 +703,7 @@ fn exec_stmt_execsql(
     stmt: &PlPgSqlStmtExecSql,
 ) -> Result<ExecResultCode, String> {
     let result = execute_sql_statement(estate, &stmt.sqlstmt.query)?;
+    set_eval_processed(estate, row_count_from_query_result(&result));
 
     if stmt.into {
         exec_select_into_targets(estate, stmt, &result)?;
@@ -757,9 +761,32 @@ fn exec_stmt_dynexecute(
             .unwrap_or(ScalarValue::Null);
         exec_assign_value_dno(estate, target.dno, value)?;
         set_found(estate, !result.rows.is_empty())?;
+        set_eval_processed(estate, result.rows.len() as u64);
     } else {
         let found = result.rows_affected > 0 || !result.rows.is_empty();
         set_found(estate, found)?;
+        set_eval_processed(estate, row_count_from_query_result(&result));
+    }
+
+    Ok(ExecResultCode::Ok)
+}
+
+fn exec_stmt_getdiag(
+    estate: &mut PLpgSQLExecState,
+    stmt: &PlPgSqlStmtGetdiag,
+) -> Result<ExecResultCode, String> {
+    if stmt.is_stacked {
+        return Err("GET STACKED DIAGNOSTICS is not implemented".to_string());
+    }
+
+    for item in &stmt.diag_items {
+        match item.kind {
+            PlPgSqlGetdiagKind::RowCount => {
+                let row_count = i64::try_from(estate.eval_processed).unwrap_or(i64::MAX);
+                exec_assign_value_dno(estate, item.target, ScalarValue::Int(row_count))?;
+            }
+            _ => return Err("only GET DIAGNOSTICS ROW_COUNT is implemented".to_string()),
+        }
     }
 
     Ok(ExecResultCode::Ok)
@@ -789,6 +816,7 @@ fn exec_stmt_open(
             position: 0,
         },
     );
+    set_eval_processed(estate, 0);
     Ok(ExecResultCode::Ok)
 }
 
@@ -809,6 +837,7 @@ fn exec_stmt_fetch(
     if cursor_state.position >= cursor_state.rows.len() {
         exec_assign_value_dno(estate, target.dno, ScalarValue::Null)?;
         set_found(estate, false)?;
+        set_eval_processed(estate, 0);
         return Ok(ExecResultCode::Ok);
     }
 
@@ -823,6 +852,7 @@ fn exec_stmt_fetch(
         Some(columns.as_slice()),
     )?;
     set_found(estate, true)?;
+    set_eval_processed(estate, 1);
     Ok(ExecResultCode::Ok)
 }
 
@@ -875,6 +905,7 @@ fn exec_stmt_perform(
     let expr = stmt.expr.query.trim();
     let sql = format!("SELECT {expr}");
     let result = execute_sql_statement(estate, &sql)?;
+    set_eval_processed(estate, result.rows.len() as u64);
     set_found(estate, !result.rows.is_empty())?;
     Ok(ExecResultCode::Ok)
 }
@@ -1154,6 +1185,18 @@ fn coerce_scalar_to_type(value: ScalarValue, type_name: &str) -> Result<ScalarVa
     };
 
     eval_cast_scalar(value, cast_type).map_err(|e| e.message)
+}
+
+fn row_count_from_query_result(result: &QueryResult) -> u64 {
+    if result.command_tag.eq_ignore_ascii_case("SELECT") {
+        result.rows.len() as u64
+    } else {
+        result.rows_affected
+    }
+}
+
+fn set_eval_processed(estate: &mut PLpgSQLExecState, processed: u64) {
+    estate.eval_processed = processed;
 }
 
 fn set_found(estate: &mut PLpgSQLExecState, state: bool) -> Result<(), String> {
@@ -1974,6 +2017,22 @@ END;
         let func = compile_function_body(src).expect("compile should succeed");
         let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
         assert_eq!(result, Some(ScalarValue::Int(5)));
+    }
+
+    #[test]
+    fn executes_get_diagnostics_row_count() {
+        let src = "
+DECLARE
+  rc integer;
+BEGIN
+  SELECT 1 UNION ALL SELECT 2;
+  GET DIAGNOSTICS rc := ROW_COUNT;
+  RETURN rc;
+END;
+";
+        let func = compile_function_body(src).expect("compile should succeed");
+        let result = plpgsql_exec_function(&func, &[]).expect("execution should succeed");
+        assert_eq!(result, Some(ScalarValue::Int(2)));
     }
 
     #[test]

@@ -15,14 +15,14 @@ use crate::plpgsql::scanner::{
     tokenize,
 };
 use crate::plpgsql::types::{
-    PLPGSQL_OTHERS, PlPgSqlCondition, PlPgSqlDatum, PlPgSqlDtype, PlPgSqlException,
-    PlPgSqlExceptionBlock, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlIfElsif, PlPgSqlPromiseType,
-    PlPgSqlRaiseOption, PlPgSqlRaiseOptionType, PlPgSqlResolveOption, PlPgSqlStmt,
-    PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtCall, PlPgSqlStmtCommit, PlPgSqlStmtDynexecute,
-    PlPgSqlStmtExecSql, PlPgSqlStmtFetch, PlPgSqlStmtForc, PlPgSqlStmtFori, PlPgSqlStmtFors,
-    PlPgSqlStmtGetdiag, PlPgSqlStmtIf, PlPgSqlStmtOpen, PlPgSqlStmtPerform, PlPgSqlStmtRaise,
-    PlPgSqlStmtReturn, PlPgSqlStmtRollback, PlPgSqlStmtType, PlPgSqlTrigtype, PlPgSqlType,
-    PlPgSqlTypeType, PlPgSqlValue, PlPgSqlVar, PlPgSqlVariable, PlPgSqlStmtClose,
+    PLPGSQL_OTHERS, PlPgSqlCondition, PlPgSqlDatum, PlPgSqlDiagItem, PlPgSqlDtype, PlPgSqlException,
+    PlPgSqlExceptionBlock, PlPgSqlExpr, PlPgSqlFunction, PlPgSqlGetdiagKind, PlPgSqlIfElsif,
+    PlPgSqlPromiseType, PlPgSqlRaiseOption, PlPgSqlRaiseOptionType, PlPgSqlResolveOption,
+    PlPgSqlStmt, PlPgSqlStmtAssign, PlPgSqlStmtBlock, PlPgSqlStmtCall, PlPgSqlStmtClose,
+    PlPgSqlStmtCommit, PlPgSqlStmtDynexecute, PlPgSqlStmtExecSql, PlPgSqlStmtFetch, PlPgSqlStmtForc,
+    PlPgSqlStmtFori, PlPgSqlStmtFors, PlPgSqlStmtGetdiag, PlPgSqlStmtIf, PlPgSqlStmtOpen,
+    PlPgSqlStmtPerform, PlPgSqlStmtRaise, PlPgSqlStmtReturn, PlPgSqlStmtRollback, PlPgSqlStmtType,
+    PlPgSqlTrigtype, PlPgSqlType, PlPgSqlTypeType, PlPgSqlValue, PlPgSqlVar, PlPgSqlVariable,
 };
 
 /// Compiler error for PL/pgSQL parse/compile.
@@ -1223,18 +1223,60 @@ impl<'a> BodyParser<'a> {
 
         if self.is_keyword(PlPgSqlKeyword::Diagnostics) {
             self.advance();
-            while !matches!(self.current_kind(), PlPgSqlTokenKind::Semicolon)
-                && !matches!(self.current_kind(), PlPgSqlTokenKind::Eof)
-            {
-                self.advance();
+            let mut diag_items = Vec::new();
+
+            loop {
+                let target_name = self.expect_identifier(
+                    "expected variable name in GET DIAGNOSTICS target list",
+                )?;
+                let Some(target_dno) = self.variables_by_name.get(&target_name.to_ascii_lowercase()).copied() else {
+                    return Err(PlPgSqlCompileError {
+                        message: format!("unknown variable \"{target_name}\" in GET DIAGNOSTICS"),
+                        position: self.previous_token().span.start,
+                        line: self.previous_token().span.line,
+                        column: self.previous_token().span.column,
+                    });
+                };
+
+                if matches!(self.current_kind(), PlPgSqlTokenKind::Assign)
+                    || matches!(self.current_kind(), PlPgSqlTokenKind::Equals)
+                {
+                    self.advance();
+                } else {
+                    return Err(self.error_at_current("expected := or = in GET DIAGNOSTICS item"));
+                }
+
+                let kind = match self.current_kind() {
+                    PlPgSqlTokenKind::Identifier(name) if name.eq_ignore_ascii_case("row_count") => {
+                        self.advance();
+                        PlPgSqlGetdiagKind::RowCount
+                    }
+                    _ => return Err(self.error_at_current("unsupported GET DIAGNOSTICS item")),
+                };
+
+                diag_items.push(PlPgSqlDiagItem {
+                    kind,
+                    target: target_dno,
+                });
+
+                if matches!(self.current_kind(), PlPgSqlTokenKind::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
             }
+
+            if diag_items.is_empty() {
+                return Err(self.error_at_current("GET DIAGNOSTICS requires at least one item"));
+            }
+
             self.expect_semicolon()?;
             return Ok(PlPgSqlStmt::Getdiag(PlPgSqlStmtGetdiag {
                 cmd_type: PlPgSqlStmtType::GetDiag,
                 lineno: i32::try_from(token.span.line).unwrap_or(i32::MAX),
                 stmtid: self.alloc_stmtid(),
                 is_stacked: false,
-                diag_items: Vec::new(),
+                diag_items,
             }));
         }
 
@@ -2311,5 +2353,22 @@ END;
             panic!("first statement should be assignment");
         };
         assert_eq!(assign.fieldname.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn compiles_get_diagnostics_row_count() {
+        let src = "
+DECLARE
+  rc integer;
+BEGIN
+  GET DIAGNOSTICS rc := ROW_COUNT;
+END;
+";
+        let compiled = compile_function_body(src).expect("compile should succeed");
+        let action = compiled.action.expect("action should be present");
+        let PlPgSqlStmt::Getdiag(stmt) = &action.body[0] else {
+            panic!("first statement should be GET DIAGNOSTICS");
+        };
+        assert_eq!(stmt.diag_items.len(), 1);
     }
 }
