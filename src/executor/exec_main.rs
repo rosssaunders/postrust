@@ -1,6 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 use crate::catalog::{SearchPath, TableKind, TypeSignature, with_catalog_read};
 use crate::executor::exec_expr::{
     EngineFuture, EvalScope, eval_any_all, eval_between_predicate, eval_binary, eval_cast_scalar,
@@ -2583,6 +2586,64 @@ fn sort_aggregate_rows(rows: &mut [AggregateInputRow], order_by: &[OrderByExpr])
     rows.sort_by(|left, right| compare_order_keys(&left.order_keys, &right.order_keys, order_by));
 }
 
+fn sum_i64_fast(values: &[i64]) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: We check CPU support with is_x86_feature_detected!("avx2") before calling.
+            return unsafe { sum_i64_avx2(values) };
+        }
+    }
+    values.iter().copied().sum()
+}
+
+fn sum_f64_fast(values: &[f64]) -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx") {
+            // SAFETY: We check CPU support with is_x86_feature_detected!("avx") before calling.
+            return unsafe { sum_f64_avx(values) };
+        }
+    }
+    values.iter().copied().sum()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn sum_i64_avx2(values: &[i64]) -> i64 {
+    let chunks = values.chunks_exact(4);
+    let remainder = chunks.remainder();
+    let mut acc = _mm256_setzero_si256();
+    for chunk in chunks {
+        // SAFETY: chunk is exactly 4 i64 values; loadu accepts unaligned addresses.
+        let v = unsafe { _mm256_loadu_si256(chunk.as_ptr().cast()) };
+        acc = _mm256_add_epi64(acc, v);
+    }
+
+    let mut lanes = [0_i64; 4];
+    // SAFETY: lanes has exactly 32 bytes of writable storage.
+    unsafe { _mm256_storeu_si256(lanes.as_mut_ptr().cast(), acc) };
+    lanes.iter().copied().sum::<i64>() + remainder.iter().copied().sum::<i64>()
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn sum_f64_avx(values: &[f64]) -> f64 {
+    let chunks = values.chunks_exact(4);
+    let remainder = chunks.remainder();
+    let mut acc = _mm256_setzero_pd();
+    for chunk in chunks {
+        // SAFETY: chunk is exactly 4 f64 values; loadu accepts unaligned addresses.
+        let v = unsafe { _mm256_loadu_pd(chunk.as_ptr()) };
+        acc = _mm256_add_pd(acc, v);
+    }
+
+    let mut lanes = [0.0_f64; 4];
+    // SAFETY: lanes has exactly 32 bytes of writable storage.
+    unsafe { _mm256_storeu_pd(lanes.as_mut_ptr(), acc) };
+    lanes.iter().copied().sum::<f64>() + remainder.iter().copied().sum::<f64>()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn eval_aggregate_function(
     fn_name: &str,
@@ -2660,8 +2721,8 @@ pub(crate) async fn eval_aggregate_function(
             }
             sort_aggregate_rows(&mut rows, order_by);
 
-            let mut int_sum: i64 = 0;
-            let mut float_sum: f64 = 0.0;
+            let mut int_values = Vec::with_capacity(rows.len());
+            let mut float_values = Vec::new();
             let mut decimal_sum: rust_decimal::Decimal = rust_decimal::Decimal::ZERO;
             let mut saw_float = false;
             let mut saw_decimal = false;
@@ -2670,13 +2731,12 @@ pub(crate) async fn eval_aggregate_function(
                 match row.args[0] {
                     ScalarValue::Null => {}
                     ScalarValue::Int(v) => {
-                        int_sum += v;
-                        float_sum += v as f64;
+                        int_values.push(v);
                         decimal_sum += rust_decimal::Decimal::from(v);
                         saw_any = true;
                     }
                     ScalarValue::Float(v) => {
-                        float_sum += v;
+                        float_values.push(v);
                         decimal_sum += rust_decimal::Decimal::try_from(v)
                             .unwrap_or(rust_decimal::Decimal::ZERO);
                         saw_float = true;
@@ -2698,6 +2758,8 @@ pub(crate) async fn eval_aggregate_function(
             if !saw_any {
                 return Ok(ScalarValue::Null);
             }
+            let int_sum = sum_i64_fast(&int_values);
+            let float_sum = sum_f64_fast(&float_values) + int_sum as f64;
             if saw_decimal {
                 Ok(ScalarValue::Numeric(decimal_sum))
             } else if saw_float {
@@ -2719,7 +2781,8 @@ pub(crate) async fn eval_aggregate_function(
             }
             sort_aggregate_rows(&mut rows, order_by);
 
-            let mut float_total = 0.0f64;
+            let mut int_values = Vec::with_capacity(rows.len());
+            let mut float_values = Vec::new();
             let mut decimal_total = rust_decimal::Decimal::ZERO;
             let mut count = 0u64;
             let mut saw_decimal = false;
@@ -2727,18 +2790,18 @@ pub(crate) async fn eval_aggregate_function(
                 match row.args[0] {
                     ScalarValue::Null => {}
                     ScalarValue::Int(v) => {
-                        float_total += v as f64;
+                        int_values.push(v);
                         decimal_total += rust_decimal::Decimal::from(v);
                         count += 1;
                     }
                     ScalarValue::Float(v) => {
-                        float_total += v;
+                        float_values.push(v);
                         decimal_total += rust_decimal::Decimal::try_from(v)
                             .unwrap_or(rust_decimal::Decimal::ZERO);
                         count += 1;
                     }
                     ScalarValue::Numeric(v) => {
-                        float_total += v.to_string().parse::<f64>().unwrap_or(0.0);
+                        float_values.push(v.to_string().parse::<f64>().unwrap_or(0.0));
                         decimal_total += v;
                         saw_decimal = true;
                         count += 1;
@@ -2756,6 +2819,7 @@ pub(crate) async fn eval_aggregate_function(
                 let avg = decimal_total / rust_decimal::Decimal::from(count);
                 Ok(ScalarValue::Numeric(avg))
             } else {
+                let float_total = sum_i64_fast(&int_values) as f64 + sum_f64_fast(&float_values);
                 Ok(ScalarValue::Float(float_total / count as f64))
             }
         }
@@ -3722,5 +3786,24 @@ pub(crate) fn parse_non_negative_int(
         _ => Err(EngineError {
             message: format!("{what} must be a non-negative integer"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sum_f64_fast, sum_i64_fast};
+
+    #[test]
+    fn fast_i64_sum_matches_scalar() {
+        let values = (1..=2048).collect::<Vec<i64>>();
+        assert_eq!(sum_i64_fast(&values), values.iter().copied().sum::<i64>());
+    }
+
+    #[test]
+    fn fast_f64_sum_matches_scalar() {
+        let values = (1..=2048).map(|v| v as f64 * 0.5).collect::<Vec<f64>>();
+        let fast = sum_f64_fast(&values);
+        let scalar = values.iter().copied().sum::<f64>();
+        assert!((fast - scalar).abs() < f64::EPSILON * 100.0);
     }
 }
