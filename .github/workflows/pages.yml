@@ -52,6 +52,7 @@ jobs:
           mkdir -p _site/notebook
           cp -r notebook/* _site/notebook/
           cp -r web/pkg _site/notebook/pkg
+          cp web/worker.js _site/notebook/worker.js
           touch _site/.nojekyll
 
       - name: Configure Pages

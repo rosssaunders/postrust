@@ -339,17 +339,60 @@
 </div>
 
 <script type="module">
-  import init, { execute_sql_json } from './pkg/openassay.js';
-
-  let wasmReady = false;
+  let worker = null;
+  let workerReady = false;
+  let workerMsgId = 0;
+  const workerCallbacks = new Map();
   let cellCounter = 0;
   const cells = [];
+
+  function initWorker() {
+    return new Promise(function (resolve, reject) {
+      worker = new Worker("worker.js", { type: "module" });
+      worker.onmessage = function (e) {
+        const msg = e.data;
+        if (msg.type === "ready") {
+          workerReady = true;
+          resolve();
+          return;
+        }
+        if (msg.type === "init_error") {
+          reject(new Error(msg.error));
+          return;
+        }
+        const cb = workerCallbacks.get(msg.id);
+        if (cb) {
+          workerCallbacks.delete(msg.id);
+          if (msg.type === "error") {
+            cb.reject(new Error(msg.error));
+          } else {
+            cb.resolve(msg.data);
+          }
+        }
+      };
+      worker.onerror = function (err) {
+        reject(err);
+      };
+    });
+  }
+
+  function workerCall(type, extra) {
+    return new Promise(function (resolve, reject) {
+      const id = ++workerMsgId;
+      workerCallbacks.set(id, { resolve: resolve, reject: reject });
+      const msg = { type: type, id: id };
+      if (extra) {
+        Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
+      }
+      worker.postMessage(msg);
+    });
+  }
 
   // Engine init
   async function initEngine() {
     try {
-      await init();
-      wasmReady = true;
+      await initWorker();
+      workerReady = true;
       document.getElementById('engine-dot').classList.remove('loading');
       document.getElementById('engine-status').textContent = 'Engine ready';
       document.getElementById('btn-run-all').disabled = false;
@@ -361,7 +404,7 @@
   }
 
   async function sql(query) {
-    const json = await execute_sql_json(query);
+    const json = await workerCall("exec_sql", { sql: query });
     const parsed = JSON.parse(json);
     if (!parsed.ok) return { error: parsed.error || parsed.rendered || 'Unknown error' };
     const results = parsed.results || [];
@@ -455,7 +498,7 @@
   };
 
   window.runCell = async function(id) {
-    if (!wasmReady) return;
+    if (!workerReady) return;
     const cell = document.getElementById(id);
     const editor = cell.querySelector('.cell-editor');
     const output = document.getElementById(`${id}-output`);
